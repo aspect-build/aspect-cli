@@ -196,6 +196,8 @@ impl<'v> values::Freeze for Metadata<'v> {
 
 starlark_simple_value!(FrozenMetadata);
 
+/// `std.fs`. A method that fails on the filesystem raises `std.io.Error`, so
+/// a task can catch that failure by type and not a bug in its own code.
 #[derive(Debug, Display, ProvidesStaticType, NoSerialize, Allocative)]
 #[display("<std.Filesystem>")]
 pub struct Filesystem {}
@@ -215,6 +217,11 @@ impl<'v> values::StarlarkValue<'v> for Filesystem {
 }
 
 starlark_simple_value!(Filesystem);
+
+/// `result` with its I/O error raised as `std.io.Error`.
+fn io<T>(result: std::io::Result<T>) -> anyhow::Result<T> {
+    result.map_err(|err| IoError::from(err).into())
+}
 
 /// A background read whose completion callers poll for. `state` is `None`
 /// while a reader is still working on it; `Some(result)` once it finished
@@ -465,7 +472,7 @@ pub(crate) fn filesystem_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = pos)] from: values::StringValue,
         #[starlark(require = pos)] to: values::StringValue,
     ) -> anyhow::Result<u64> {
-        Ok(fs::copy(from.as_str(), to.as_str())?)
+        Ok(io(fs::copy(from.as_str(), to.as_str()))?)
     }
 
     /// Creates a new, empty directory at the provided path.
@@ -480,7 +487,7 @@ pub(crate) fn filesystem_methods(registry: &mut MethodsBuilder) {
         #[allow(unused)] this: values::Value<'v>,
         #[starlark(require = pos)] path: values::StringValue,
     ) -> anyhow::Result<NoneType> {
-        fs::create_dir(path.as_str())?;
+        io(fs::create_dir(path.as_str()))?;
         Ok(NoneType)
     }
 
@@ -494,7 +501,7 @@ pub(crate) fn filesystem_methods(registry: &mut MethodsBuilder) {
         #[allow(unused)] this: values::Value<'v>,
         #[starlark(require = pos)] path: values::StringValue,
     ) -> anyhow::Result<NoneType> {
-        fs::create_dir_all(path.as_str())?;
+        io(fs::create_dir_all(path.as_str()))?;
         Ok(NoneType)
     }
 
@@ -514,7 +521,7 @@ pub(crate) fn filesystem_methods(registry: &mut MethodsBuilder) {
             std::path::PathBuf::from(parent)
         };
         let prefix = if prefix.is_empty() { "axl-" } else { prefix };
-        let dir = create_temp_dir(&base, prefix)?;
+        let dir = io(create_temp_dir(&base, prefix))?;
         let path = dir
             .to_str()
             .ok_or_else(|| anyhow::anyhow!("temp dir path is non-UTF-8"))?;
@@ -535,7 +542,7 @@ pub(crate) fn filesystem_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = pos)] original: values::StringValue,
         #[starlark(require = pos)] link: values::StringValue,
     ) -> anyhow::Result<NoneType> {
-        fs::hard_link(original.as_str(), link.as_str())?;
+        io(fs::hard_link(original.as_str(), link.as_str()))?;
         Ok(NoneType)
     }
 
@@ -551,7 +558,7 @@ pub(crate) fn filesystem_methods(registry: &mut MethodsBuilder) {
         #[allow(unused)] this: values::Value<'v>,
         #[starlark(require = pos)] path: values::StringValue,
     ) -> anyhow::Result<bool> {
-        Ok(fs::exists(path.as_str())?)
+        Ok(io(fs::exists(path.as_str()))?)
     }
 
     /// Returns true if this path is for a directory.
@@ -563,7 +570,7 @@ pub(crate) fn filesystem_methods(registry: &mut MethodsBuilder) {
         #[allow(unused)] this: values::Value<'v>,
         #[starlark(require = pos)] path: values::StringValue,
     ) -> anyhow::Result<bool> {
-        let metadata = fs::metadata(path.as_str())?;
+        let metadata = io(fs::metadata(path.as_str()))?;
         Ok(metadata.is_dir())
     }
 
@@ -580,7 +587,7 @@ pub(crate) fn filesystem_methods(registry: &mut MethodsBuilder) {
             r#"Deprecated: is_file is deprecated and will be removed in a future version of AXL.
             Use `fs.metadata().is_file` instead."#
         );
-        let metadata = fs::metadata(path.as_str())?;
+        let metadata = io(fs::metadata(path.as_str()))?;
         Ok(metadata.is_file())
     }
 
@@ -598,7 +605,7 @@ pub(crate) fn filesystem_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = pos)] path: values::StringValue,
         heap: Heap<'v>,
     ) -> anyhow::Result<Metadata<'v>> {
-        let m = fs::metadata(path.as_str())?;
+        let m = io(fs::metadata(path.as_str()))?;
         Ok(marshal_metadata(&m, heap))
     }
 
@@ -613,7 +620,7 @@ pub(crate) fn filesystem_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = pos)] path: values::StringValue,
         heap: Heap<'v>,
     ) -> anyhow::Result<ValueOfUnchecked<'v, UnpackList<DirEntry<'v>>>> {
-        let metadata = fs::read_dir(path.as_str())?;
+        let metadata = io(fs::read_dir(path.as_str()))?;
         Ok(heap
             .alloc_typed_unchecked(values::list::AllocList(metadata.map(|entry| {
                 let entry = entry.unwrap();
@@ -698,7 +705,7 @@ pub(crate) fn filesystem_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = pos)] path: values::StringValue,
         heap: Heap<'v>,
     ) -> anyhow::Result<values::StringValue<'v>> {
-        let r = fs::read_link(path.as_str())
+        let r = io(fs::read_link(path.as_str()))
             .map(|f| heap.alloc_str(&f.as_os_str().to_string_lossy().to_string()))?;
         Ok(r)
     }
@@ -714,7 +721,7 @@ pub(crate) fn filesystem_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = pos)] path: values::StringValue,
         heap: Heap<'v>,
     ) -> anyhow::Result<values::StringValue<'v>> {
-        let r = fs::read_to_string(path.as_str()).map(|f| heap.alloc_str(f.as_str()))?;
+        let r = io(fs::read_to_string(path.as_str())).map(|f| heap.alloc_str(f.as_str()))?;
         Ok(r)
     }
 
@@ -732,7 +739,7 @@ pub(crate) fn filesystem_methods(registry: &mut MethodsBuilder) {
         #[allow(unused)] this: values::Value<'v>,
         #[starlark(require = pos)] path: values::StringValue,
     ) -> anyhow::Result<NoneType> {
-        fs::remove_dir(path.as_str())?;
+        io(fs::remove_dir(path.as_str()))?;
         Ok(NoneType)
     }
 
@@ -745,7 +752,7 @@ pub(crate) fn filesystem_methods(registry: &mut MethodsBuilder) {
         #[allow(unused)] this: values::Value<'v>,
         #[starlark(require = pos)] path: values::StringValue,
     ) -> anyhow::Result<NoneType> {
-        fs::remove_dir_all(path.as_str())?;
+        io(fs::remove_dir_all(path.as_str()))?;
         Ok(NoneType)
     }
 
@@ -762,7 +769,7 @@ pub(crate) fn filesystem_methods(registry: &mut MethodsBuilder) {
         #[allow(unused)] this: values::Value<'v>,
         #[starlark(require = pos)] path: values::StringValue,
     ) -> anyhow::Result<NoneType> {
-        fs::remove_file(path.as_str())?;
+        io(fs::remove_file(path.as_str()))?;
         Ok(NoneType)
     }
 
@@ -779,7 +786,7 @@ pub(crate) fn filesystem_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = pos)] from: values::StringValue,
         #[starlark(require = pos)] to: values::StringValue,
     ) -> anyhow::Result<NoneType> {
-        fs::rename(from.as_str(), to.as_str())?;
+        io(fs::rename(from.as_str(), to.as_str()))?;
         Ok(NoneType)
     }
 
@@ -799,7 +806,10 @@ pub(crate) fn filesystem_methods(registry: &mut MethodsBuilder) {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(path.as_str(), fs::Permissions::from_mode(mode))?;
+            io(fs::set_permissions(
+                path.as_str(),
+                fs::Permissions::from_mode(mode),
+            ))?;
         }
         #[cfg(not(unix))]
         {
@@ -826,7 +836,7 @@ pub(crate) fn filesystem_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = pos)] path: values::StringValue,
         heap: Heap<'v>,
     ) -> anyhow::Result<Metadata<'v>> {
-        let m = fs::symlink_metadata(path.as_str())?;
+        let m = io(fs::symlink_metadata(path.as_str()))?;
         Ok(marshal_metadata(&m, heap))
     }
 
@@ -840,7 +850,7 @@ pub(crate) fn filesystem_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = pos)] path: values::StringValue,
         #[starlark(require = pos)] content: values::StringValue,
     ) -> anyhow::Result<NoneType> {
-        fs::write(path.as_str(), content.as_str())?;
+        io(fs::write(path.as_str(), content.as_str()))?;
         Ok(NoneType)
     }
 
@@ -996,7 +1006,7 @@ pub(crate) fn filesystem_methods(registry: &mut MethodsBuilder) {
         #[allow(unused)] this: values::Value<'v>,
         #[starlark(require = pos)] path: values::StringValue,
     ) -> anyhow::Result<stream::Readable> {
-        let file = fs::File::open(path.as_str())?;
+        let file = io(fs::File::open(path.as_str()))?;
         Ok(stream::Readable::File(Arc::new(Mutex::new(file))))
     }
 
@@ -1008,7 +1018,7 @@ pub(crate) fn filesystem_methods(registry: &mut MethodsBuilder) {
         #[allow(unused)] this: values::Value<'v>,
         #[starlark(require = pos)] path: values::StringValue,
     ) -> anyhow::Result<stream::Writable> {
-        let file = fs::File::create(path.as_str())?;
+        let file = io(fs::File::create(path.as_str()))?;
         Ok(stream::Writable::from(file))
     }
 
@@ -1170,6 +1180,33 @@ def _impl(ctx):
         fail("missing metadata was not None")
     if ctx.std.fs.try_read_dir({missing}) != []:
         fail("missing directory was not empty")
+    return 0
+
+Test = task(implementation = _impl)
+"#,
+        ))
+        .run_task(0)
+        .expect("run_task");
+        assert_eq!(exit, Some(0));
+    }
+
+    /// A failed filesystem call raises `std.io.Error`, caught by type with
+    /// its `kind`.
+    #[test]
+    fn a_failed_call_raises_std_io_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let gone = serde_json::to_string(dir.path().join("gone").to_str().unwrap()).unwrap();
+        let exit = crate::test::eval(&format!(
+            r#"
+def _impl(ctx):
+    fs = ctx.std.fs
+    for call in (fs.copy, fs.rename):
+        err, _ = catch(call, {gone}, {gone} + ".2", types = [std.io.Error])
+        if err == None or err.kind != "not_found":
+            fail("%r: got %r" % (call, err))
+    err, _ = catch(fs.remove_file, {gone}, types = [std.io.Error])
+    if err == None or err.kind != "not_found":
+        fail("remove_file: got %r" % err)
     return 0
 
 Test = task(implementation = _impl)
