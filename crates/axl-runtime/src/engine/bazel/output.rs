@@ -1039,16 +1039,21 @@ pub(crate) fn register_output(globals: &mut GlobalsBuilder) {
     /// `collect_errors()` stage keeps them and `build.output_collected_errors()`
     /// gives them for a build's: for a test that replays a recorded console.
     /// `stdout` is what they give as whether the console carried Bazel's
-    /// stdout too. Private to the builtins' tests.
+    /// stdout too, and `relay_cap` the build's
+    /// `--experimental_ui_max_stdouterr_bytes` (Bazel's default when not
+    /// given; -1 for no limit). Private to the builtins' tests.
     fn _collected_errors<'v>(
         #[starlark(require = pos)] text: &str,
         #[starlark(require = named, default = true)] pty: bool,
         #[starlark(require = named, default = false)] stdout: bool,
+        #[starlark(require = named, default = bazel::console::report::BAZEL_UI_MAX_STDOUTERR_BYTES as i64)]
+        relay_cap: i64,
         heap: starlark::values::Heap<'v>,
     ) -> anyhow::Result<starlark::values::Value<'v>> {
         let mode = if pty { Mode::Pty } else { Mode::Pipe };
-        let mut pipeline =
-            Config::new(mode, vec![Stage::CollectErrors], Style::default()).pipeline();
+        let mut config = Config::new(mode, vec![Stage::CollectErrors], Style::default());
+        config.relay_cap = u64::try_from(relay_cap).ok();
+        let mut pipeline = config.pipeline();
         let mut forwarder = bazel::console::forward::Forwarder::spawn(
             Box::new(std::io::Cursor::new(text.as_bytes().to_vec())),
             Box::new(std::io::sink()),

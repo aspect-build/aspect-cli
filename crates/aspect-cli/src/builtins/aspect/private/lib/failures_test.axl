@@ -18,13 +18,26 @@ def _event(kind: str, id, payload, children = [], aborted = False):
     """A build event as the build event hooks get it."""
     return struct(kind = kind, id = id, payload = payload, payload_kind = "aborted" if aborted else "", children = children)
 
-def _ended(ctx, events: list, console: str):
+# Bazel's default `--experimental_ui_max_stdouterr_bytes`.
+_RELAY_CAP = 1024 * 1024
+
+def _ended(ctx, events: list, console: str, logs = {}, relay_cap = _RELAY_CAP):
     """A state the build event hooks collected `events` into, its build
-    ended with `console`, as Bazel wrote it to a terminal."""
-    state = failures.new_state(lambda path, n: None, None, ctx.std.re.compile(term_text.ANSI))
+    ended with `console`, as Bazel wrote it to a terminal relaying at most
+    `relay_cap` bytes of an action's output (-1 for no limit); `logs` the
+    files the events name, by path, each read from its end as
+    `std.fs.try_read_tail` reads one."""
+
+    def read(path, n):
+        if path not in logs:
+            return None
+        text = logs[path]
+        return (text[len(text) - n:], len(text) - n) if len(text) > n else (text, 0)
+
+    state = failures.new_state(read, None, ctx.std.re.compile(term_text.ANSI))
     for e in events:
         failures.collect_event(state, e)
-    state.update(building = False, collected_errors = bazel.output._collected_errors(console))
+    state.update(building = False, collected_errors = bazel.output._collected_errors(console, relay_cap = relay_cap))
     return state
 
 def _error(text: str) -> str:
@@ -45,13 +58,14 @@ def _test_shard_tie(ctx):
 
 _CFG = struct(id = "c1")
 
-def _failed_action(label: str, output: str, message: str, exit_code = 1, code = "NON_ZERO_EXIT"):
+def _failed_action(label: str, output: str, message: str, exit_code = 1, code = "NON_ZERO_EXIT", stderr = None, mnemonic = "Genrule"):
     """A failed action's `action_completed` event, its spawn exiting with
-    `exit_code`."""
+    `exit_code`, its stderr the file at path `stderr` where given."""
     return _event("action_completed", struct(label = label, primary_output = output, configuration = _CFG), struct(
         success = False,
-        type = "Genrule",
+        type = mnemonic,
         exit_code = 1,
+        stderr = struct(file = "file://" + stderr) if stderr else None,
         failure_detail = struct(message = message, category = struct(code = code, spawn_exit_code = exit_code)),
     ))
 
@@ -117,6 +131,18 @@ def _test_timestamps(ctx):
     _eq("timestamped: located", ties["targets"]["//a:b"]["location"], "/ws/a/BUILD:1:8")
     _eq("timestamped: Bazel's other error with its body, not its closing line", [o["lines"] for o in ties["others"]], [["/ws/x/BUILD:1:1: syntax error at 'oops'", "  its detail"]])
 
+def _test_relay_cap(ctx):
+    # Bazel relays an action's stderr up to its cap, past which it says it
+    # skipped that file: a cap of 0 relays none, -1 any.
+    message = "bash failed: error executing Genrule command"
+    header = _error("/ws/a/BUILD:3:8: Executing genrule //a:g failed: (Exit 1): " + message)
+    action = _failed_action("//a:g", "bazel-out/k8-fastbuild/bin/a/g.out", message, stderr = "/out/e")
+    state = _ended(ctx, [action], header + "stderr (/out/e) 5 exceeds maximum size of --experimental_ui_max_stdouterr_bytes=0 bytes; skipping\n", logs = {"/out/e": "boom\n"}, relay_cap = 0)
+    _eq("relay cap 0: Bazel's skipped line ties", failure_ties.console_ties(state)["actions"][0]["location"], "/ws/a/BUILD:3:8")
+    big = ("y" * 1023 + "\n") * 1100
+    state = _ended(ctx, [action], header + big, logs = {"/out/e": big}, relay_cap = -1)
+    _eq("no relay cap: a stderr past 1 MiB ties whole", failure_ties.console_ties(state)["actions"][0]["location"], "/ws/a/BUILD:3:8")
+
 def _test_target_counts(ctx):
     # Built from the events; failed, the targets with an entry of their own;
     # blocked, those a failed root cause stopped.
@@ -148,6 +174,7 @@ def _impl(ctx: TaskContext) -> int:
     _test_package_errors_claim(ctx)
     _test_an_unclaimed_error_is_listed(ctx)
     _test_timestamps(ctx)
+    _test_relay_cap(ctx)
     _test_target_counts(ctx)
     _test_last_words(ctx)
     print("failures_test.axl: OK")

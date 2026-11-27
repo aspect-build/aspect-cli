@@ -5,7 +5,6 @@ Bazel's other errors."""
 load("./failure_records.axl", "failure_records")
 
 _action_logs = failure_records.action_logs
-_MAX_LOG_BYTES = failure_records.MAX_LOG_BYTES
 _own_labels = failure_records.own_labels
 _referrers = failure_records.referrers
 _workspace = failure_records.workspace
@@ -74,20 +73,23 @@ def _bazel_headers(state: dict, blocks: list, bounds: list, text: str) -> list:
         found = [h for h in found if h["coloured"]]
     return found
 
-def _relay_pieces(state: dict, rec: dict, stdout: bool, plain: bool):
+def _relay_pieces(state: dict, rec: dict, stdout: bool, plain: bool, room: int):
     """An action's output as Bazel relays it to the console, from its logs
     as they read now: its stderr, then, where the console carried Bazel's
     stdout too (`stdout`), its stdout, each `(stream, text, paths)`, `text`
-    None for one past Bazel's cap (cut as read) and `paths` what Bazel
-    names it by (its event's URI, decoded); None where one is gone. In a
-    console Bazel wrote without colour (`plain`, `--color=no`) Bazel strips
-    the escapes from what it relays, and so does this."""
+    None for one past Bazel's cap (`relay_cap`: past 0 bytes, any but an
+    empty one; with no cap, one longer than the kept console, `room`, which
+    cannot hold it) and `paths` what Bazel names it by (its event's URI,
+    decoded); None where one is gone. In a console Bazel wrote without
+    colour (`plain`, `--color=no`) Bazel strips the escapes from what it
+    relays, and so does this."""
     paths = dict(_action_logs(state, rec))
+    cap = (state.get("collected_errors") or {}).get("relay_cap")
     out = []
     for name in (("stderr", "stdout") if stdout else ("stderr",)):
         if name not in paths:
             continue
-        got = state["read"](paths[name], (state.get("collected_errors") or {}).get("relay_cap") or _MAX_LOG_BYTES)
+        got = state["read"](paths[name], room if cap == None else cap)
         if got == None:
             return None
         named = []
@@ -425,7 +427,7 @@ def _tie_actions(state: dict, text: str, headers: list, by: dict, claimed: dict,
             continue
         out = {"location": "", "status": "", "lines": []}
         label = rec["label"]
-        pieces = _relay_pieces(state, rec, stdout, plain)
+        pieces = _relay_pieces(state, rec, stdout, plain, len(text))
         message = rec.get("failure", "")
         first = message.partition("\n")[0]
         if message and pieces != None:
