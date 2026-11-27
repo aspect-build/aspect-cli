@@ -100,10 +100,10 @@ All of it: aspect history show t-replay
   │       |                  ^
   │ 1 error generated.
 ✗ //cc4:ph  CppCompile · exit 1 · cc4/BUILD.bazel:3:11
-  │       |                          ^~
-  │ cc4/a.cc:2:18: error: use of undeclared identifier 'xa'
-  │     2 | int a() { return xa; }
-  │       |                  ^~
+  │ In file included from cc4/a.cc:1:
+  │ ./cc4/a.h:1:26: error: use of undeclared identifier 'xh'
+  │     1 | inline int ah() { return xh; }
+  │ …
   │ 2 errors generated.
 ✗ //cc4:s2  CppCompile · exit 1 · cc4/BUILD.bazel:6:11
   │ cc4/shared.cc:1:19: error: use of undeclared identifier 'xs'

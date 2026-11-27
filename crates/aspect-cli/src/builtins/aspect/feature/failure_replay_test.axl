@@ -58,7 +58,7 @@ def _replay(ctx: TaskContext, case: str, prefix: str) -> str:
         return fs.try_read_tail(resolve(path), n)
 
     ansi = ctx.std.re.compile(ANSI)
-    state = new_state(read = read, ansi = ansi, building = True)
+    state = new_state(read = read, ansi = ansi, excerpt = ctx.std.excerpt, building = True)
     bep = folder + "/" + prefix + ".bep.json"
     if fs.exists(bep):
         # The events as the runtime reads a `--build_event_json_file`, each

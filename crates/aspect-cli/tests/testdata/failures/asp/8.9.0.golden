@@ -12,6 +12,5 @@ All of it: aspect history show t-replay
 ✗ //asp:x  analysis · asp/BUILD.bazel:1:8
   │ in //asp:defs.bzl%bad_aspect aspect on genrule rule //asp:x:
   │ Traceback (most recent call last):
-  │         File "asp/defs.bzl", line 2, column 9, in _a
-  │                 fail("aspect refuses " + str(target.label))
+  │ …
   │ Error in fail: aspect refuses @@//asp:x

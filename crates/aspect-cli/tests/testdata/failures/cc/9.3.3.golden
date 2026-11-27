@@ -73,10 +73,10 @@ All of it: aspect history show t-replay
   │ 1 error generated.
   │ Error in child process '/usr/bin/xcrun'. 1
 ✗ //cc:lib  CppCompile · exit 1 · cc/BUILD.bazel:2:11
+  │ cc/b.cc:1:19: error: expected ';' after return statement
   │     1 | int b() { return 1 }
   │       |                   ^
-  │       |                   ;
-  │ 1 error generated.
+  │ …
   │ Error in child process '/usr/bin/xcrun'. 1
 ✗ //cc2:stems  CppCompile · exit 1 · cc2/BUILD.bazel:2:11
   │ cc2/e.cc:1:18: error: use of undeclared identifier 'x'
@@ -115,10 +115,10 @@ All of it: aspect history show t-replay
   │ 1 error generated.
   │ Error in child process '/usr/bin/xcrun'. 1
 ✗ //cc4:ph  CppCompile · exit 1 · cc4/BUILD.bazel:3:11
-  │ cc4/a.cc:2:18: error: use of undeclared identifier 'xa'
-  │     2 | int a() { return xa; }
-  │       |                  ^~
-  │ 2 errors generated.
+  │ In file included from cc4/a.cc:1:
+  │ ./cc4/a.h:1:26: error: use of undeclared identifier 'xh'
+  │     1 | inline int ah() { return xh; }
+  │ …
   │ Error in child process '/usr/bin/xcrun'. 1
 ✗ //cc2:stems  CppCompile · exit 1 · cc2/BUILD.bazel:2:11
   │ cc2/f.cc:1:18: error: use of undeclared identifier 'x'
