@@ -441,6 +441,20 @@ fn run(task: &str) -> (Output, String) {
 }
 
 /// The position of `needle` in `text`, failing with both when it is not there.
+/// Whether process `pid` is stopped (`T` among `ps`'s state letters), as
+/// after a Ctrl+Z.
+#[cfg(unix)]
+fn is_stopped(pid: impl std::fmt::Display) -> bool {
+    Command::new("ps")
+        .args(["-o", "stat=", "-p", &pid.to_string()])
+        .output()
+        .is_ok_and(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .trim_start()
+                .starts_with('T')
+        })
+}
+
 fn at(text: &str, needle: &str) -> usize {
     text.find(needle)
         .unwrap_or_else(|| panic!("want {needle:?} in:\n{text}"))
@@ -1002,16 +1016,7 @@ fn a_ctrl_z_dump_is_never_spliced_with_the_clis_lines() {
     // gives the terminal back with a dump while the task prints.
     // `fg` only once it has stopped, as a shell does: it stops itself after
     // its dump, and a SIGCONT before that would leave it stopped for good.
-    let stopped = |pid: u32| {
-        std::process::Command::new("ps")
-            .args(["-o", "stat=", "-p", &pid.to_string()])
-            .output()
-            .is_ok_and(|o| {
-                String::from_utf8_lossy(&o.stdout)
-                    .trim_start()
-                    .starts_with('T')
-            })
-    };
+    let stopped = |pid: u32| is_stopped(pid);
     for _ in 0..3 {
         // SAFETY: signals to our own child.
         unsafe { libc::kill(child.id() as i32, libc::SIGTSTP) };
@@ -1117,16 +1122,7 @@ fn an_inherited_stdout_goes_back_into_the_screen_after_fg() {
         }
     }
     std::thread::sleep(Duration::from_millis(1000));
-    let stopped = |pid: u32| {
-        std::process::Command::new("ps")
-            .args(["-o", "stat=", "-p", &pid.to_string()])
-            .output()
-            .is_ok_and(|o| {
-                String::from_utf8_lossy(&o.stdout)
-                    .trim_start()
-                    .starts_with('T')
-            })
-    };
+    let stopped = |pid: u32| is_stopped(pid);
     // SAFETY: signals to our own child.
     unsafe { libc::kill(child.id() as i32, libc::SIGTSTP) };
     let asked = std::time::Instant::now();
@@ -1200,16 +1196,7 @@ fn ctrl_z_during_a_stalled_release_stops_at_once() {
         "the screen never left: {:?}",
         String::from_utf8_lossy(&raw)
     );
-    let stopped = |pid: u32| {
-        std::process::Command::new("ps")
-            .args(["-o", "stat=", "-p", &pid.to_string()])
-            .output()
-            .is_ok_and(|o| {
-                String::from_utf8_lossy(&o.stdout)
-                    .trim_start()
-                    .starts_with('T')
-            })
-    };
+    let stopped = |pid: u32| is_stopped(pid);
     // SAFETY: signals to our own child.
     unsafe { libc::kill(child.id() as i32, libc::SIGTSTP) };
     let asked = std::time::Instant::now();
@@ -1324,16 +1311,7 @@ fn ctrl_z_passes_stdouts_captured_lines_to_a_stdout_that_is_no_terminal() {
         }
     }
     std::thread::sleep(Duration::from_millis(1500));
-    let stopped = |pid: u32| {
-        std::process::Command::new("ps")
-            .args(["-o", "stat=", "-p", &pid.to_string()])
-            .output()
-            .is_ok_and(|o| {
-                String::from_utf8_lossy(&o.stdout)
-                    .trim_start()
-                    .starts_with('T')
-            })
-    };
+    let stopped = |pid: u32| is_stopped(pid);
     // SAFETY: signals to our own child.
     unsafe { libc::kill(child.id() as i32, libc::SIGTSTP) };
     let asked = std::time::Instant::now();
@@ -1423,16 +1401,7 @@ fn check_golden(task: &str, drive: Drive, golden: &str) {
         }
     }
     let pid = child.id() as i32;
-    let stopped = |pid: i32| {
-        std::process::Command::new("ps")
-            .args(["-o", "stat=", "-p", &pid.to_string()])
-            .output()
-            .is_ok_and(|o| {
-                String::from_utf8_lossy(&o.stdout)
-                    .trim_start()
-                    .starts_with('T')
-            })
-    };
+    let stopped = |pid: i32| is_stopped(pid);
     match drive {
         Drive::Nothing => {}
         Drive::CtrlZThenFg => {
@@ -1593,16 +1562,7 @@ fn fg_at_another_size_draws_no_stale_frame() {
         }
     }
     let pid = child.id() as i32;
-    let stopped = || {
-        std::process::Command::new("ps")
-            .args(["-o", "stat=", "-p", &pid.to_string()])
-            .output()
-            .is_ok_and(|o| {
-                String::from_utf8_lossy(&o.stdout)
-                    .trim_start()
-                    .starts_with('T')
-            })
-    };
+    let stopped = || is_stopped(pid);
     std::thread::sleep(Duration::from_millis(200));
     // SAFETY: signals to our own child; TIOCSWINSZ on its terminal.
     unsafe { libc::kill(pid, libc::SIGTSTP) };
@@ -1946,16 +1906,7 @@ fn a_secret_cut_by_a_suspend_is_redacted_in_the_history() {
     }
     std::thread::sleep(Duration::from_millis(300));
     let pid = child.id() as i32;
-    let stopped = || {
-        std::process::Command::new("ps")
-            .args(["-o", "stat=", "-p", &pid.to_string()])
-            .output()
-            .is_ok_and(|o| {
-                String::from_utf8_lossy(&o.stdout)
-                    .trim_start()
-                    .starts_with('T')
-            })
-    };
+    let stopped = || is_stopped(pid);
     // SAFETY: signals to our own child.
     unsafe { libc::kill(pid, libc::SIGTSTP) };
     let asked = std::time::Instant::now();

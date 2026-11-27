@@ -524,6 +524,22 @@ impl Config {
             .any(|s| matches!(s, Stage::Intercept { .. }))
     }
 
+    /// Whether the task's failure summary tells Bazel's errors instead of
+    /// a recap: it has a `recap_errors(summary = True)` stage.
+    pub fn summarized(&self) -> bool {
+        self.stages
+            .iter()
+            .any(|s| matches!(s, Stage::RecapInSummary))
+    }
+
+    /// Whether the console's errors are collected for the failure summary:
+    /// it has a `collect_errors()` stage.
+    pub fn collects_errors(&self) -> bool {
+        self.stages
+            .iter()
+            .any(|s| matches!(s, Stage::CollectErrors))
+    }
+
     /// A fresh chain for one invocation, with its own observations, event
     /// channel and raw log.
     pub fn pipeline(&self) -> Pipeline {
@@ -547,11 +563,7 @@ impl Config {
         // It reads Bazel's records as Bazel wrote them, before anything
         // rewrites one (the theme's colours, paths, a user's `rewrite`): the
         // summary ties Bazel's lines as it wrote them.
-        if self
-            .stages
-            .iter()
-            .any(|s| matches!(s, Stage::CollectErrors))
-        {
+        if self.collects_errors() {
             chain.push(Box::new(
                 report::ErrorCollector::new(self.pty, observations.clone())
                     .relaying(self.relay_cap),
@@ -646,10 +658,6 @@ impl Config {
             _ => RawLogState::Off,
         };
         if self.stages().iter().any(|s| s.hides()) || !matches!(state, RawLogState::Off) {
-            let summarized = self
-                .stages()
-                .iter()
-                .any(|s| matches!(s, Stage::RecapInSummary));
             chain.push(Box::new(
                 Summary::new(
                     stats,
@@ -657,7 +665,7 @@ impl Config {
                     self.style.clone(),
                     self.linker(&written).map(|_| self.files(&written)),
                 )
-                .log_named_elsewhere(summarized),
+                .log_named_elsewhere(self.summarized()),
             ));
         }
         let feed = (self.output == Output::Hidden).then(|| Arc::new(feed::Feed::default()));

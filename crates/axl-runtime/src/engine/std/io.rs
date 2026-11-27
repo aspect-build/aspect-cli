@@ -185,7 +185,11 @@ pub(crate) fn stdio_methods(registry: &mut MethodsBuilder) {
         Ok(bazel::console::links::LinkFormat::EDITORS
             .iter()
             .filter(|(command, _)| bazel::console::links::installed(command))
-            .map(|(_, alias)| (alias.to_string(), editor_name(alias).to_string()))
+            .map(|(_, alias)| {
+                let name =
+                    bazel::console::links::LinkFormat::editor_name(alias).unwrap_or_default();
+                (alias.to_string(), name.to_string())
+            })
             .collect())
     }
 }
@@ -200,7 +204,7 @@ fn target_of(url: &str, format: &bazel::console::links::LinkFormat) -> Option<(S
     };
     current
         .into_iter()
-        .chain(LinkFormat::ALIASES.iter().map(|(_, t)| *t))
+        .chain(LinkFormat::ALIASES.iter().map(|(_, _, t)| *t))
         .find_map(|template| match_template(template, url))
 }
 
@@ -231,32 +235,17 @@ fn match_template(template: &str, url: &str) -> Option<(String, u32)> {
     Some((path, line))
 }
 
-/// An editor's name for a person, by its format's alias.
-fn editor_name(alias: &str) -> &'static str {
-    match alias {
-        "cursor" => "Cursor",
-        "vscode" => "VS Code",
-        "vscode-insiders" => "VS Code Insiders",
-        "vscodium" => "VSCodium",
-        "zed" => "Zed",
-        "idea" => "IntelliJ IDEA",
-        "macvim" => "MacVim",
-        "textmate" => "TextMate",
-        "file" => "the system's app for it",
-        "kitty" => "kitty",
-        _ => "",
-    }
-}
-
 /// `(format, name)` of a link format: its alias, else `template`, or `none`.
 fn editor_of(format: &bazel::console::links::LinkFormat) -> (String, String) {
     use bazel::console::links::LinkFormat;
     match format {
         LinkFormat::None => ("none".into(), String::new()),
-        LinkFormat::Template(t) => match LinkFormat::ALIASES.iter().find(|(_, tmpl)| tmpl == t) {
-            Some((alias, _)) => (alias.to_string(), editor_name(alias).to_string()),
-            None => ("template".into(), "your editor".into()),
-        },
+        LinkFormat::Template(t) => {
+            match LinkFormat::ALIASES.iter().find(|(_, _, tmpl)| tmpl == t) {
+                Some((alias, name, _)) => (alias.to_string(), name.to_string()),
+                None => ("template".into(), "your editor".into()),
+            }
+        }
     }
 }
 

@@ -138,29 +138,46 @@ pub enum LinkFormat {
 
 impl LinkFormat {
     /// The names [`LinkFormat::parse`] takes, ripgrep's, each with the
-    /// template it stands for.
-    pub const ALIASES: &[(&str, &str)] = &[
-        ("vscode", "vscode://file{path}:{line}:{column}"),
+    /// editor's name for a person and the template it stands for.
+    pub const ALIASES: &[(&str, &str, &str)] = &[
+        ("vscode", "VS Code", "vscode://file{path}:{line}:{column}"),
         (
             "vscode-insiders",
+            "VS Code Insiders",
             "vscode-insiders://file{path}:{line}:{column}",
         ),
-        ("cursor", "cursor://file{path}:{line}:{column}"),
-        ("vscodium", "vscodium://file{path}:{line}:{column}"),
-        ("zed", "zed://file{path}:{line}:{column}"),
+        ("cursor", "Cursor", "cursor://file{path}:{line}:{column}"),
+        (
+            "vscodium",
+            "VSCodium",
+            "vscodium://file{path}:{line}:{column}",
+        ),
+        ("zed", "Zed", "zed://file{path}:{line}:{column}"),
         (
             "idea",
+            "IntelliJ IDEA",
             "idea://open?file={path}&line={line}&column={column}",
         ),
         (
             "macvim",
+            "MacVim",
             "mvim://open?url=file://{path}&line={line}&column={column}",
         ),
         (
             "textmate",
+            "TextMate",
             "txmt://open?url=file://{path}&line={line}&column={column}",
         ),
     ];
+
+    /// The editor's name for a person an alias of [`LinkFormat::ALIASES`]
+    /// stands for; None for another word.
+    pub fn editor_name(alias: &str) -> Option<&'static str> {
+        Self::ALIASES
+            .iter()
+            .find(|(name, _, _)| *name == alias)
+            .map(|(_, editor, _)| *editor)
+    }
 
     /// `none`, an alias, or a template naming `{path}`. Never a `file://`
     /// one (`file`, kitty's): the system would open the file with whatever
@@ -176,19 +193,19 @@ impl LinkFormat {
                  which may run it; name an editor ({}), or none",
                 Self::ALIASES
                     .iter()
-                    .map(|(name, _)| *name)
+                    .map(|(name, _, _)| *name)
                     .collect::<Vec<_>>()
                     .join(", ")
             ));
         }
-        if let Some((_, template)) = Self::ALIASES.iter().find(|(name, _)| *name == value) {
+        if let Some((_, _, template)) = Self::ALIASES.iter().find(|(name, _, _)| *name == value) {
             return Ok(LinkFormat::Template(template.to_string()));
         }
         if value.contains("{path}") && value.contains("://") {
             return Ok(LinkFormat::Template(value.to_string()));
         }
         let names: Vec<&str> = std::iter::once("none")
-            .chain(Self::ALIASES.iter().map(|(name, _)| *name))
+            .chain(Self::ALIASES.iter().map(|(name, _, _)| *name))
             .collect();
         Err(format!(
             "{value:?} is not a hyperlink format: expected auto, {}, or a URL template naming {{path}}",
@@ -1289,6 +1306,16 @@ pub(crate) fn hostname() -> String {
 
 #[cfg(test)]
 mod tests {
+
+    /// Every editor `auto` may pick is an alias with a name for a person.
+    #[test]
+    fn every_editor_has_a_name() {
+        for (_, alias) in LinkFormat::EDITORS {
+            assert!(LinkFormat::editor_name(alias).is_some(), "{alias}");
+        }
+        assert_eq!(LinkFormat::editor_name("cursor"), Some("Cursor"));
+        assert_eq!(LinkFormat::editor_name("file"), None);
+    }
     use super::*;
 
     fn linker() -> (tempfile::TempDir, Linker) {

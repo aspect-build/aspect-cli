@@ -376,17 +376,6 @@ static EXIT_TAIL: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
 /// out for a line of the tool's own.
 const SANDBOX_HINT: &str = "Use --sandbox_debug to see verbose messages from the sandbox";
 
-/// The history's note of where it kept a failed action's output, which the
-/// console writes between Bazel's lines (`bes::sink::keep`): never part of
-/// an error's body, which names the kept output itself.
-static KEPT_NOTE: std::sync::LazyLock<Regex> =
-    std::sync::LazyLock::new(|| Regex::new(r"^INFO: \S+ \S+ std(?:err|out): ").unwrap());
-
-/// Bazel's status row with nothing after its label (`FAILED:`), as curses
-/// draws it: never part of an error's body.
-static BARE_STATUS: std::sync::LazyLock<Regex> =
-    std::sync::LazyLock::new(|| Regex::new(r"^[A-Z]+:$").unwrap());
-
 /// Bazel's default `--experimental_ui_max_stdouterr_bytes`: the most of an
 /// action's stdout or stderr Bazel relays to its console, past which it
 /// writes a line saying it skipped that file instead.
@@ -916,10 +905,12 @@ impl LineProcessor for RecapErrors {
             && !line.drawn
             && !line.fresh
         {
+            // The CLI's own note between Bazel's lines (where the history
+            // kept a log) and curses' bare status row are no part of it.
             if line.kind == Kind::Other
+                && !line.note
                 && !text.starts_with(SANDBOX_HINT)
-                && !KEPT_NOTE.is_match(text)
-                && !BARE_STATUS.is_match(text)
+                && !line::is_bare_status(text)
             {
                 let quoted = quote(text);
                 let links = self.links(record, &quoted);
@@ -1711,7 +1702,23 @@ mod tests {
             ("the note right after", [&toolchain[..], &[note, "\x1b[32m[4 / 4]\x1b[0m no actions running", analyzed]].concat()),
         ];
         for (name, records) in cases {
-            let out = recap_of(&records);
+            // The note as the forwarder writes it, classified on its own and
+            // marked as the CLI's.
+            let mut p = RecapErrors::new(10, 0, Style::default());
+            let mut c = super::super::line::Classifier::default();
+            for r in &records {
+                let r = bazel(r);
+                let mut line = if r == bazel(note) {
+                    super::super::line::Classifier::default().classify(r.as_bytes())
+                } else {
+                    c.classify(r.as_bytes())
+                };
+                line.note = r == bazel(note);
+                p.see(&line);
+                p.process(r.as_bytes());
+            }
+            let out = String::from_utf8(p.report().unwrap_or_default()).unwrap();
+            let out = String::from_utf8_lossy(&ansi::strip(out.as_bytes())).into_owned();
             assert!(
                 out.ends_with(
                     "    //tc:toolchain_type\n    To debug, rerun with --toolchain_resolution_debug='//tc:toolchain_type'\n    For more information on platforms or toolchains see https://bazel.build/concepts/platforms-intro.\n"

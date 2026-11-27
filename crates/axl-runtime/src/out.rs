@@ -1343,7 +1343,9 @@ fn repository_may_choose(value: &str, format: &bazel::console::links::LinkFormat
     use bazel::console::links::LinkFormat;
     match format {
         LinkFormat::None => true,
-        LinkFormat::Template(_) => LinkFormat::ALIASES.iter().any(|(name, _)| *name == value),
+        LinkFormat::Template(_) => LinkFormat::ALIASES
+            .iter()
+            .any(|(name, _, _)| *name == value),
     }
 }
 

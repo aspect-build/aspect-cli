@@ -1584,11 +1584,17 @@ impl Build {
         // flag they do not know and write no stream for one after it, so a
         // build refused for a bad flag still has its events. They go again
         // after, where they outrank a caller's own.
-        if let Some(file) = &bes_file {
-            cmd.arg("--build_event_binary_file_upload_mode=fully_async")
-                .arg(bazel::bes::binary_file::FLAG)
-                .arg(file.path());
-        }
+        let bep_args: Vec<std::ffi::OsString> = bes_file
+            .iter()
+            .flat_map(|file| {
+                [
+                    "--build_event_binary_file_upload_mode=fully_async".into(),
+                    bazel::bes::binary_file::FLAG.into(),
+                    file.path().as_os_str().to_owned(),
+                ]
+            })
+            .collect();
+        cmd.args(&bep_args);
         cmd.args(flags);
 
         if let Some(directory) = directory {
@@ -1632,13 +1638,9 @@ impl Build {
         // Bazel's default action publishing (failed actions only) is left
         // alone, per-action data coming from the execution log, unless the
         // CLI's own readers need every action (above).
-        if let Some(file) = &bes_file {
-            cmd.arg("--build_event_binary_file_upload_mode=fully_async")
-                .arg(bazel::bes::binary_file::FLAG)
-                .arg(file.path());
-            if cli_publishes_all_actions {
-                cmd.arg(bazel::bes::sink::downstream::PUBLISH_ALL_ACTIONS);
-            }
+        cmd.args(&bep_args);
+        if bes_file.is_some() && cli_publishes_all_actions {
+            cmd.arg(bazel::bes::sink::downstream::PUBLISH_ALL_ACTIONS);
         }
 
         // Bazel writes the profile into the history, where it stays, as the

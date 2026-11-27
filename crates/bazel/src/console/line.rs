@@ -149,12 +149,13 @@ static GRAPH_ERROR: LazyLock<Regex> = LazyLock::new(|| {
     .unwrap()
 });
 
-/// Whether `text` (escapes stripped) is bare: a label and nothing after it,
-/// as Bazel's own colon-inside status row always is (curses draws the
-/// label, then erases it).
-fn is_bare_status(text: &str) -> bool {
-    text.split_once(':')
-        .is_some_and(|(_, rest)| rest.trim().is_empty())
+/// Whether `text` (escapes stripped) is a status row's label and nothing
+/// after it (`FAILED:`), as Bazel's own colon-inside status row always is
+/// (curses draws the label, then erases it): never part of an error's body.
+pub fn is_bare_status(text: &str) -> bool {
+    text.trim_end()
+        .strip_suffix(':')
+        .is_some_and(|label| !label.is_empty() && label.bytes().all(|b| b.is_ascii_uppercase()))
 }
 
 /// An `ERROR:` only bazel writes: at a BUILD or `.bzl` file's location (its
