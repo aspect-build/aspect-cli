@@ -1,9 +1,9 @@
  ⠋ aspect build · 12s                         Analyzing: 8000 targets (1 packages loaded, 3879 targets configured) · 16 actions, 15 running
- ▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞─────────────────────────────────────────────────────────────── 3,830 of 8,563+ actions
+ ┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈─────────────────────────────────────────────────────────────── 3,830 of 8,563+ actions
 ┌─ Running (15 of 16 started) ───────────────────────────────────────────────────────────────┐┌─ Results ──────────────────────────────────┐
 │ Compiling src/a.cc; 3s                                                                     ││ Targets  3 configured                      │
 │ Linking //app:bin; 1s                                                                      ││          0 built, 0 failed                 │
-│ … and 13 more                                                                              ││ Actions  ▞ 3,830 other                     │
+│ … and 13 more                                                                              ││ Actions  ? 3,830 unreported                │
 │                                                                                            ││          ─ 15 running · 4,718 pending      │
 │                                                                                            ││                                            │
 │                                                                                            ││                                            │

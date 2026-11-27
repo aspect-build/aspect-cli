@@ -5,11 +5,11 @@
 │                                                                                            ││          3 built, 0 failed                 │
 │                                                                                            ││ Tests    15 passed (9 cached)              │
 │                                                                                            ││ Actions  █ 105 ran                         │
-│                                                                                            ││          cache hits 7,999: ▒ 7,359 local   │
-│                                                                                            ││          ▓ 40 disk · 600 remote            │
+│                                                                                            ││          cache hits 7,999:                 │
+│                                                                                            ││            ▒ 7,359 local action cache      │
+│                                                                                            ││            ▓ 40 disk · 600 remote          │
 │                                                                                            ││          ░ 459 internal                    │
 │                                                                                            ││ Critical path Linking //app:bin 4.1s       │
-│                                                                                            ││                                            │
 │                                                                                            ││                                            │
 └────────────────────────────────────────────────────────────────────────────────────────────┘└────────────────────────────────────────────┘
 ┌─ Console  Failures  Metrics  Invocation  Tips ─────────────────────────────────────────────────────────────────────────────── following ─┐
