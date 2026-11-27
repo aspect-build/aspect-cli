@@ -70,7 +70,13 @@ one() { # <prefix> <extra flags> <strip publish_all: 0|1> [merged]
         kill -9 "$(cat "$OB/server/server.pid.txt" 2>/dev/null)" 2>/dev/null
         [ -s "$RAW/exit" ] || echo "timeout" >"$RAW/exit"
     fi
-    python3 -I "$HERE/fxpost.py" "$FX" "$prefix" "$RAW" "$OB" "$IB" "$RUN" "$FAKEHOME"
+    # It refuses (and so does this) a recording that still names this
+    # machine's host, user or home.
+    python3 -I "$HERE/fxpost.py" "$FX" "$prefix" "$RAW" "$OB" "$IB" "$RUN" "$FAKEHOME" || {
+        echo "record.sh: $case_ $prefix not scrubbed; not kept" >&2
+        rm -rf "$FX/$prefix".{bep.json,console,stdout,exit,files}
+        exit 3
+    }
     echo "$case_ $ver $prefix exit=$(cat "$FX/$prefix.exit" 2>/dev/null)"
 }
 one "$ver" "--color=yes --curses=yes" 0

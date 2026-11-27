@@ -8,7 +8,7 @@ stdout,exit} and copies every action stderr/stdout and test.log/test.xml the BEP
 events the failure summary never reads (`DROPPED`): progress chunks, the command lines, the
 build tool logs; an Aborted one of those stays.
 """
-import json, os, re, shutil, sys, getpass, urllib.parse
+import json, os, re, shutil, socket, sys, getpass, urllib.parse
 fx, prefix, raw, ob, ib, ws, fakehome = sys.argv[1:8]
 home = os.path.expanduser("~")
 def spellings(p):  # macOS reports /private/var and /private/tmp paths both ways
@@ -22,6 +22,7 @@ subs.append((raw, "${RAW}"))
 subs.append((fakehome, "${HOME}"))
 subs.append((home, "${HOME}"))
 user = getpass.getuser()
+host = socket.gethostname()
 def scrub(s):
     for a, b in subs:
         if a: s = s.replace(a, b)
@@ -30,15 +31,41 @@ def scrub(s):
         s = s.replace(k + "=" + user, k + "=${USER}")
     return s
 def scrub_status(e):
-    # BuildStarted and workspaceStatus carry the user and host as values:
-    # the host is scrubbed there alone, never in text or a path, where a
-    # short name like `build` is an ordinary word (a path under the host's
-    # name is under one the path scrubs above already cover).
-    if "user" in e.get("started", {}): e["started"]["user"] = "${USER}"
+    # The fields that carry the host and user as values, by name: the host
+    # is scrubbed there alone, never in text or a path, where a short name
+    # like `build` is an ordinary word (a path under the host's name is
+    # under one the path scrubs above already cover). `guard` checks that
+    # none is left.
+    started = e.get("started", {})
+    if "user" in started: started["user"] = "${USER}"
+    if "host" in started: started["host"] = "${HOST}"
+    info = e.get("testResult", {}).get("executionInfo", {})
+    if "hostname" in info: info["hostname"] = "${HOST}"
     for it in e.get("workspaceStatus", {}).get("item", []):
         if it.get("key") == "BUILD_USER": it["value"] = "${USER}"
         if it.get("key") == "BUILD_HOST": it["value"] = "${HOST}"
     return e
+def guard(paths):
+    """Where this machine's host (short and full), user or home is left in
+    `paths`: as a whole word or a path component, never inside another
+    word. A name in FIXTURE_GUARD_ALLOW (comma-separated) may stand as a
+    whole word of text (a host or user named `build`), never in a path."""
+    allow = [a for a in os.environ.get("FIXTURE_GUARD_ALLOW", "").split(",") if a]
+    names = sorted({n for n in (host, host.split(".")[0], user) if n}, key=len, reverse=True)
+    found = []
+    for p in paths:
+        text = open(p, "rb").read().decode("utf-8", "surrogateescape")
+        for h in spellings(home):
+            if re.search(re.escape(h) + r"(?![\w.-])", text) or (h + "/") in text:
+                found.append((p, h))
+        for n in names:
+            word = r"(?<![\w.-])" + re.escape(n) + r"(?![\w-])"
+            for m in re.finditer(word, text):
+                in_path = (m.start() > 0 and text[m.start() - 1] == "/") or text[m.end():m.end() + 1] == "/"
+                if in_path or n not in allow:
+                    found.append((p, n))
+                    break
+    return found
 def copy(uri):
     if not uri.startswith("file://" + ob + "/"): return
     # A URI's path is percent-encoded, and Bazel spells a non-ASCII name's UTF-8 bytes as
@@ -86,3 +113,12 @@ for root, _, names in os.walk(filesdir):
         p = os.path.join(root, n)
         b = open(p, "rb").read().decode("utf-8", "surrogateescape")
         open(p, "w", encoding="utf-8", errors="surrogateescape").write(scrub(b))
+written = [os.path.join(fx, prefix + "." + k) for k in ("bep.json", "console", "stdout", "exit")]
+written = [p for p in written if os.path.exists(p)]
+for root, _, names in os.walk(filesdir):
+    written += [os.path.join(root, n) for n in names]
+left = guard(written)
+for p, name in left:
+    print("fxpost: %s still names this machine (%r)" % (p, name), file=sys.stderr)
+if left:
+    sys.exit(3)

@@ -660,19 +660,19 @@ def _actions_tests(ctx):
     # and `▓` once, then failed and internal; `local` under 100 columns;
     # at 60 the hits on a row of their own after ran and failed, internal
     # last; whole counts unless nothing else fits, then the whole row's.
-    greg = dict(final, ran = 5705, local = 2836, disk = 300, remote = 12, internal = 33, failed = 4, other = 0, done = 8890, total = 8890, disk_on = True, remote_on = True)
-    _eq("at 100 columns", [_visible(r) for r in action_results(greg, 89, 2)], ["█ 5,705 ran · cache hits 3,148: ▒ 2,836 local action cache · ▓ 300 disk · 12 remote", "╳ 4 failed · ░ 33 internal"])
-    _eq("under 100, local", [_visible(r) for r in action_results(greg, 79, 3, short = True)], ["█ 5,705 ran · cache hits 3,148: ▒ 2,836 local · ▓ 300 disk · 12 remote", "╳ 4 failed · ░ 33 internal"])
-    _eq("at 60: ran and failed, the hits, internal last", [_visible(r) for r in action_results(greg, 49, 3, short = True, stack = True)], ["█ 5,705 ran · ╳ 4 failed", "cache hits 3,148: ▒ 2,836 local · ▓ 300 disk", "12 remote · ░ 33 internal"])
-    _eq("in Results at 100 columns: `hits N:`, the hits wrapping after their first", [_visible(r) for r in action_results(greg, 26, 4, short = True)], ["█ 5,705 ran · ╳ 4 failed", "hits 3,148: ▒ 2,836 local", "▓ 300 disk · 12 remote", "░ 33 internal"])
+    measured = dict(final, ran = 5705, local = 2836, disk = 300, remote = 12, internal = 33, failed = 4, other = 0, done = 8890, total = 8890, disk_on = True, remote_on = True)
+    _eq("at 100 columns", [_visible(r) for r in action_results(measured, 89, 2)], ["█ 5,705 ran · cache hits 3,148: ▒ 2,836 local action cache · ▓ 300 disk · 12 remote", "╳ 4 failed · ░ 33 internal"])
+    _eq("under 100, local", [_visible(r) for r in action_results(measured, 79, 3, short = True)], ["█ 5,705 ran · cache hits 3,148: ▒ 2,836 local · ▓ 300 disk · 12 remote", "╳ 4 failed · ░ 33 internal"])
+    _eq("at 60: ran and failed, the hits, internal last", [_visible(r) for r in action_results(measured, 49, 3, short = True, stack = True)], ["█ 5,705 ran · ╳ 4 failed", "cache hits 3,148: ▒ 2,836 local · ▓ 300 disk", "12 remote · ░ 33 internal"])
+    _eq("in Results at 100 columns: `hits N:`, the hits wrapping after their first", [_visible(r) for r in action_results(measured, 26, 4, short = True)], ["█ 5,705 ran · ╳ 4 failed", "hits 3,148: ▒ 2,836 local", "▓ 300 disk · 12 remote", "░ 33 internal"])
     for room in range(26, 90):
-        _eq("no row wider than %d" % room, [text_width(_visible(r)) <= room for r in action_results(greg, room, 4, short = room < 80)], [True for r in action_results(greg, room, 4, short = room < 80)])
+        _eq("no row wider than %d" % room, [text_width(_visible(r)) <= room for r in action_results(measured, room, 4, short = room < 80)], [True for r in action_results(measured, room, 4, short = room < 80)])
 
     # Out of room (Results at 60 columns, 17 cells, five rows): internal
     # goes first, then a cache with no hits, then counts in thousands, then
     # whole parts; ran, failed, blocked, the hits' total and what is not
     # done stay, and nothing is cut in half.
-    jammed = dict(greg, ran = 30, local = 0, disk = 0, remote = 0, failed = 5, blocked = 10, internal = 1, done = 46, total = 46)
+    jammed = dict(measured, ran = 30, local = 0, disk = 0, remote = 0, failed = 5, blocked = 10, internal = 1, done = 46, total = 46)
     got = [_visible(r) for r in action_results(jammed, 17, 5, short = True, stack = True)]
 
     # Short terminals (round 50's probe): the drop order, failed last.
@@ -719,12 +719,12 @@ def _actions_tests(ctx):
     got = [_visible(r) for r in action_results(live_jam, 17, 5, short = True, stack = True)]
     _eq("live: running, pending and unreported stay", ["─ 4 running" in " ".join(got), "12 pending" in " ".join(got), "? 2 unreported" in " ".join(got), any(["…" in r or text_width(r) > 17 for r in got])], [True, True, True, False])
 
-    _eq("a configured cache with no hits, dimmed at the end", _visible(action_results(dict(greg, remote = 0), 89, 2)[0]).endswith("▓ 300 disk · 0 remote"), True)
-    _eq("dimmed", (_role("muted") + "0 remote") in action_results(dict(greg, remote = 0), 89, 2)[0], True)
-    _eq("an unconfigured one hidden", "remote" in _visible(action_results(dict(greg, remote = 0, remote_on = False), 89, 2)[0]), False)
-    _eq("▓ before remote where disk is none", "cache hits 2,848: ▒ 2,836 local action cache · ▓ 12 remote" in _visible(action_results(dict(greg, disk = 0, disk_on = False), 89, 2)[0]), True)
-    _eq("other only where there is some", "other" in _visible(" ".join(action_results(greg, 89, 2))), False)
-    _eq("the glyph alone coloured", action_results(greg, 89, 2)[0].startswith(_role("accent") + "█" + theme.reset + " 5,705 ran"), True)
+    _eq("a configured cache with no hits, dimmed at the end", _visible(action_results(dict(measured, remote = 0), 89, 2)[0]).endswith("▓ 300 disk · 0 remote"), True)
+    _eq("dimmed", (_role("muted") + "0 remote") in action_results(dict(measured, remote = 0), 89, 2)[0], True)
+    _eq("an unconfigured one hidden", "remote" in _visible(action_results(dict(measured, remote = 0, remote_on = False), 89, 2)[0]), False)
+    _eq("▓ before remote where disk is none", "cache hits 2,848: ▒ 2,836 local action cache · ▓ 12 remote" in _visible(action_results(dict(measured, disk = 0, disk_on = False), 89, 2)[0]), True)
+    _eq("other only where there is some", "other" in _visible(" ".join(action_results(measured, 89, 2))), False)
+    _eq("the glyph alone coloured", action_results(measured, 89, 2)[0].startswith(_role("accent") + "█" + theme.reset + " 5,705 ran"), True)
     _eq("k", [short_count(n) for n in (526, 1999, 48123, 1250000)], ["526", "1.9k", "48k", "1.2M"])
     greg_screen = dict(cached, fails = _failed_records(4), done_total = (8483, 8483, False), inv = {"build_finished": _FAILURE, "build_metrics": struct(action_summary = struct(
         actions_executed = 5649,
