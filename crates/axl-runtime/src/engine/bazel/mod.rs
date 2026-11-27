@@ -1599,7 +1599,10 @@ fn register_build_events(globals: &mut GlobalsBuilder) {
 
     /// Read a build event stream kept on disk: a `--build_event_binary_file`,
     /// such as the `build_events.binpb` the task history keeps in each
-    /// build's folder (`ctx.std.history`'s records name the folders). Iterate
+    /// build's folder (`ctx.std.history`'s records name the folders), or,
+    /// with `format = "json"`, a `--build_event_json_file`, each line an
+    /// event in proto3's JSON form (a field newer than the CLI's protos left
+    /// out, as from the binary form). Iterate
     /// it for the same `BuildEvent` values a live build's `iterator()`
     /// yields, so code written for a build's events reads an earlier one's.
     /// `kinds=` filters as `iterator()`'s does. Read lazily as iterated, it
@@ -1617,7 +1620,11 @@ fn register_build_events(globals: &mut GlobalsBuilder) {
         #[starlark(require = named, default = NoneOr::None)] kinds: NoneOr<
             UnpackList<values::Value>,
         >,
+        #[starlark(require = named, default = "binary")] format: &str,
     ) -> anyhow::Result<stored_events::StoredBuildEvents> {
+        let format = bazel::bes::stored::Format::parse(format).ok_or_else(|| {
+            anyhow::anyhow!("format must be \"binary\" or \"json\", got {format:?}")
+        })?;
         let kinds = match kinds {
             NoneOr::None => None,
             NoneOr::Other(list) => {
@@ -1633,7 +1640,7 @@ fn register_build_events(globals: &mut GlobalsBuilder) {
                 Some(set)
             }
         };
-        stored_events::StoredBuildEvents::open(std::path::Path::new(path), kinds)
+        stored_events::StoredBuildEvents::open(std::path::Path::new(path), kinds, format)
     }
 
     /// `text` from a build event (a label, a description, a failure's
@@ -2097,6 +2104,46 @@ mod tests {
         .repr()
         .unwrap();
         assert_eq!(got, r#"("caf\xe9", "caf\xe9", "/nowhere/a b.log", None)"#);
+    }
+
+    /// A `--build_event_json_file` reads as the binary stream's events; a
+    /// format neither is refused.
+    #[test]
+    fn build_events_read_takes_a_json_stream() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bep.json");
+        std::fs::write(
+            &path,
+            concat!(
+                r#"{"id":{"actionCompleted":{"primaryOutput":"bazel-out/a","label":"//a:b"}},"action":{"success":false,"type":"Genrule","exitCode":1}}"#,
+                "\n",
+                r#"{"id":{"buildFinished":{}},"finished":{"exitCode":{"name":"BUILD_FAILURE","code":1}},"lastMessage":true}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        let got = crate::test::eval(&format!(
+            r#"
+events = bazel.build_events.read({path:?}, format = "json")
+read = [(e.kind, getattr(e.payload, "type", None)) for e in events]
+(read, events.complete, events.error)
+"#,
+            path = path.display().to_string()
+        ))
+        .repr()
+        .unwrap();
+        assert_eq!(
+            got,
+            r#"([("action_completed", "Genrule"), ("build_finished", None)], True, None)"#
+        );
+        let err = crate::test::eval(&format!(
+            "bazel.build_events.read({:?}, format = \"xml\")",
+            path.display().to_string()
+        ))
+        .repr()
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("format must be"), "{err}");
     }
 
     #[test]

@@ -40,6 +40,7 @@ rust_library(
         "@crates//:nix",
         "@crates//:opentelemetry",
         "@crates//:prost",
+        "@crates//:prost-reflect",
         "@crates//:prost-types",
         "@crates//:rand",
         "@crates//:regex",

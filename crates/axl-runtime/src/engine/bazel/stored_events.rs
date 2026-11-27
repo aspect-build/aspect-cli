@@ -1,5 +1,6 @@
 //! `bazel.build_events.read(path)`: a build event stream kept on disk, such
-//! as a build's `build_events.binpb` in the task history, iterated as the
+//! as a build's `build_events.binpb` in the task history or a
+//! `--build_event_json_file`, iterated as the
 //! same `BuildEvent` values a live build's `bazel.build_events.iterator()`
 //! yields, so code written for a build's events reads an earlier build's.
 
@@ -32,8 +33,12 @@ impl std::fmt::Debug for StoredBuildEvents {
 }
 
 impl StoredBuildEvents {
-    pub fn open(path: &Path, kinds: Option<HashSet<i32>>) -> anyhow::Result<Self> {
-        let stored = Stored::open(path).map_err(|e| {
+    pub fn open(
+        path: &Path,
+        kinds: Option<HashSet<i32>>,
+        format: bazel::bes::stored::Format,
+    ) -> anyhow::Result<Self> {
+        let stored = Stored::open(path, format).map_err(|e| {
             anyhow::anyhow!("cannot read the build events at {}: {e}", path.display())
         })?;
         Ok(Self {

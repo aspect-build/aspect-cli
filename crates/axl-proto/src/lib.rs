@@ -6,6 +6,11 @@
 // warnings;
 // See: https://github.com/rust-lang/rust/issues/47219
 
+/// Every message's descriptor, a `FileDescriptorSet`: for reading a message
+/// from its proto3 JSON form, as Bazel's `--build_event_json_file` writes a
+/// build event.
+pub const FILE_DESCRIPTOR_SET: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/descriptor.bin"));
+
 pub use prost_types::Any;
 pub use prost_types::Duration;
 pub use prost_types::Timestamp;

@@ -9,7 +9,7 @@ fn main() -> Result<(), std::io::Error> {
     let descriptor_path =
         PathBuf::from(std::env::var("DESCRIPTOR").unwrap_or("descriptor.bin".into()));
 
-    let fds = FileDescriptorSet::decode(std::fs::read(descriptor_path).unwrap().as_slice())?;
+    let fds = FileDescriptorSet::decode(std::fs::read(&descriptor_path).unwrap().as_slice())?;
 
     let mut config = Config::new();
 
@@ -146,6 +146,9 @@ fn main() -> Result<(), std::io::Error> {
         .compile_fds_with_config(fds, config)?;
 
     let out_dir = env::var("OUT_DIR").unwrap();
+
+    // The descriptors themselves, for reading a message by its JSON form.
+    fs::copy(&descriptor_path, format!("{out_dir}/descriptor.bin"))?;
 
     let build_event_stream = fs::read_to_string(format!("{out_dir}/build_event_stream.rs"))?;
 
