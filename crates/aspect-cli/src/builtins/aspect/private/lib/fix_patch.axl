@@ -12,11 +12,11 @@ where:
 
 - it isn't there, isn't a file, or is larger than `PATCH_CAP`;
 - a hunk's range isn't numbers or its body ends short;
-- a line outside its file sections is one patch could take a file name from:
-  a lone `--- ` or `+++ `, a context diff's `*** `, an `Index:`, or a hunk
-  with no header of its own;
+- a line outside its file sections is part of no plain unified diff: a lone
+  `--- ` or `+++ `, a context diff's `*** `, an `Index:`, or a hunk with no
+  header of its own (a change this would drop, not apply);
 - it has a binary patch, a git mode, rename or copy line, or a file mode
-  other than a regular file's;
+  other than a regular file's (a change the copy-back doesn't make);
 - a header's name is quoted, empty, or not UTF-8;
 - a path it names, its first component dropped as `patch -p1` does, starts
   with `/`, goes through `..`, has a `.` or empty component, leads out of
@@ -97,25 +97,25 @@ def _header_name(raw: str) -> tuple:
         return None, None
     return (name.partition("/")[2] if "/" in name else name), None
 
-# Git extended header lines patch acts on that the copy-back by bytes would
-# not carry: a mode change, a rename or copy.
+# Git extended header lines asking for a change the copy-back doesn't make:
+# a mode change, a rename or copy.
 _GIT_HEADERS = ("old mode ", "new mode ", "rename from ", "rename to ", "copy from ", "copy to ")
 
 def _stray_why(line: str) -> str | None:
     """Why a line outside the file sections refuses the patch, or None."""
     if line.startswith("--- ") or line.startswith("+++ "):
-        return "a lone `%s` line, which patch could take a file name from" % line[:3]
+        return "a lone `%s` line, part of no file's header pair" % line[:3]
     if line.startswith("*** "):
-        return "a context diff's `***` header, which patch could take a file name from"
+        return "a context diff's `***` header, a format this doesn't apply"
     if line.startswith("Index:"):
-        return "an `Index:` line, which patch could take a file name from"
+        return "an `Index:` line, which this doesn't read"
     if line.startswith("@@ "):
         return "a hunk with no header of its own"
     if line.startswith("GIT binary patch") or line.startswith("Binary files "):
         return "a binary patch, which patch can't apply"
     for header in _GIT_HEADERS:
         if line.startswith(header):
-            return "a git `%s` line, which the copy-back would not carry" % header.strip()
+            return "a git `%s` line, a change the copy-back doesn't make" % header.strip()
     if line.startswith("new file mode ") or line.startswith("deleted file mode ") or line.startswith("index "):
         mode = line.rpartition(" ")[2].strip()
         if mode.isdigit() and len(mode) == 6 and not mode.startswith("100"):
@@ -239,15 +239,16 @@ def _refusal(fs, cwd: str, paths: list, removed: list) -> tuple:
     """`(why, keys, real)`: why a patch naming `paths` (removing `removed`)
     is refused before anything is copied or patched, or None, and then each
     path's identity in the workspace (`_identity`) and the absolute path it
-    resolves to, its symlinks followed, else `{}` twice. Refused: a
-    path with a `.` or empty component; two paths that are one file, their
-    symlinks followed (a type change, two creations, a rename onto a made
-    file, a case-only or normalization-only rename where the disk takes the
-    two as one, a hard link); one whose symlinks lead out of the workspace,
-    or can't be followed; one there that isn't a regular file; or a file
-    removed through a symlink naming it. A symlink within the workspace is
-    followed. Two new names no file has yet are told apart as spelled here;
-    `_copy_collision` catches them where the copies' directory folds them."""
+    resolves to, its symlinks followed, else `{}` twice. `paths` are
+    spelled apart (`_named_twice`). Refused: a path with a `.` or empty
+    component; two spellings of one file, their symlinks followed (a
+    case-only or normalization-only rename where the disk takes the two as
+    one, a hard link, a symlink to a file named beside it); one whose
+    symlinks lead out of the workspace, or can't be followed; one there that
+    isn't a regular file; or a file removed through a symlink naming it. A
+    symlink within the workspace is followed. Two new names no file has yet
+    are told apart as spelled here; `_copy_collision` catches them where the
+    copies' directory folds them."""
     root, why = _resolved(fs, cwd)
     if root == None:
         return "the workspace %s" % why, {}, {}
@@ -390,7 +391,9 @@ def apply_fix_patch(
     - A file the patch makes that is there already, not empty, is never
       written over: the same bytes count as applied, other bytes are a
       reject.
-    - A fix to a file that isn't there is named in an INFO line.
+    - A fix to a file that isn't there is named in an INFO line, and so is
+      a patch with no file sections (an ed script, garbage); an empty one
+      is passed over.
     - Files are copied in by their bytes and mode alone, so a flag like
       macOS's `uchg` never reaches a copy. A result is renamed into place,
       so a symlink in the tree stays one, a hard link to a file elsewhere is
@@ -437,6 +440,10 @@ def apply_fix_patch(
     files, why = _scan(text)
     if why:
         return refuse(why)
+    if not files:
+        if text.strip():
+            tell("INFO", "%s holds no unified diff of a file: nothing in it was applied" % ascii_escaped(patch))
+        return None
     paths = _files_of(files)
     outside = [p for p in paths if not _inside(p)]
     if outside:
