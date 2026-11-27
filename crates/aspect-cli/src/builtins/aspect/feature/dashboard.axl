@@ -3669,8 +3669,8 @@ def action_results(split: dict, room: int, rows = 3, short = False, stack = Fals
     columns) or the whole words fit no `rows`. Where nothing fits, parts
     go by priority: the caches with no hits first, then internal, then
     every count is `short_count`; then whole parts from the end, never
-    ran, failed, blocked, unreported, running or pending while another can
-    go. No part is cut in half but one wider than a row alone."""
+    ran, failed, blocked, a hit, unreported, running or pending while
+    another can go. No part is cut in half but one wider than a row alone."""
     parts = action_parts(split)
     if not parts:
         return []
@@ -3762,7 +3762,7 @@ def action_results(split: dict, room: int, rows = 3, short = False, stack = Fals
     if best == None:
         # Whole parts from the end until what is left fits, the ones that
         # say what happened last to go.
-        keep = ("ran", "failed", "blocked", "unreported", "running", "pending")
+        keep = ("ran", "failed", "blocked", "unreported", "running", "pending") + tuple(_HITS)
         kept = no_internal
         form[0] = 2
         names = [p[2] for p in kept]
