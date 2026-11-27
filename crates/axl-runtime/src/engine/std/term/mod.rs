@@ -33,6 +33,7 @@ mod dump;
 mod fd;
 mod keys;
 mod replies;
+mod width;
 
 use std::fs::File;
 use std::io::Write;
@@ -68,6 +69,7 @@ use replies::{
     WHEEL_WAS_OFF, WHEEL_WAS_ON, alternate_scroll, drop_answers_due, query_background,
     wheel_restore,
 };
+use width::{fit as fit_text, width as text_width};
 
 pub use capture::route_cli_output;
 pub(crate) use capture::{feed_screen, forwarding, write_std_unit};
@@ -691,6 +693,26 @@ pub(crate) fn register_globals(globals: &mut GlobalsBuilder) {
     /// that keeps its own log keeps as many, so the dump and the screen
     /// show the same lines.
     const dump_lines: i32 = DUMP_LINES as i32;
+
+    /// How many cells a terminal draws `text` in: a wide character (`✅`,
+    /// CJK) two, a combining mark or a zero-width character none, a
+    /// one-cell character with U+FE0F after it (`⚠️`) two, and every code
+    /// point below U+0300 one, a control character or a tab among them.
+    fn width(#[starlark(require = pos)] text: &str) -> anyhow::Result<i32> {
+        Ok(i32::try_from(text_width(text)).unwrap_or(i32::MAX))
+    }
+
+    /// `text` cut or padded with spaces to exactly `width` cells, as
+    /// `width()` counts them, a tab written as two spaces; "" for a `width`
+    /// of 0 or less: a row wider than the screen would wrap and scroll it.
+    /// Cut, it keeps what fits in one cell less, then `…` (no `…` at a
+    /// `width` of 1); a wide character that would cross the edge is left
+    /// out with what follows it, padding in its place, and zero-width
+    /// characters right after the last one kept stay. Only as much of a
+    /// long `text` is measured as could show.
+    fn fit(#[starlark(require = pos)] text: &str, width: i32) -> anyhow::Result<String> {
+        Ok(fit_text(text, width.into()))
+    }
 }
 
 /// `ctx.std.term`.
@@ -1105,6 +1127,21 @@ mod tests {
         assert_eq!(
             crate::axl_eval!("x = std.term.dump_lines\nx").unwrap(),
             DUMP_LINES.to_string()
+        );
+    }
+
+    /// `std.term.width` and `std.term.fit` are the namespace's functions,
+    /// `fit`'s width by position or by name.
+    #[test]
+    fn width_and_fit_are_read_at_the_top_level() {
+        assert_eq!(crate::axl_eval!("std.term.width('⚠️ x')").unwrap(), "4");
+        assert_eq!(
+            crate::axl_eval!("std.term.fit('a✅b', 3) == 'a… '").unwrap(),
+            "True"
+        );
+        assert_eq!(
+            crate::axl_eval!("std.term.fit('ab', width = -1)").unwrap(),
+            "\"\""
         );
     }
 

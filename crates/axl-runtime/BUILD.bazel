@@ -76,6 +76,7 @@ rust_library(
         "@crates//:tokio-util",
         "@crates//:tonic",
         "@crates//:tracing",
+        "@crates//:unicode-width",
         "@crates//:url",
         "@crates//:uuid",
         "@crates//:wasmi",
