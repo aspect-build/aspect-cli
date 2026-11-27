@@ -33,7 +33,12 @@
 //! own labels and progress ([`recolour`]), so each stage, a user's
 //! `rewrite` included, sees the theme's colours. Each record is classified
 //! from Bazel's bytes before the chain runs, so what a stage knows of a
-//! record ([`line::Line`]) is the same in either mode.
+//! record ([`line::Line`]) is the same in either mode. Before all of them,
+//! one error collector ([`report::ErrorCollector`]), however many
+//! `collect_errors()` stages ask for it, reads each record raw, as Bazel
+//! wrote it, for the failure summary; it never sees the CLI's own notes,
+//! which the forwarder runs through the other stages alone
+//! ([`forward::Notes`]).
 //!
 //! # Curses, and what is shown
 //!
@@ -823,8 +828,9 @@ mod tests {
     }
 
     /// Bazel's `FAILED:` status row after an error about the build, not an
-    /// action, is never its body (r44's syntax error under curses, Bazel
-    /// 7.7, 8.9 and 9.3 alike), on the screen's lines or as written.
+    /// action, is never its body (a BUILD file's syntax error under curses,
+    /// as Bazel 7.7, 8.9 and 9.3 alike end it), on the screen's lines or as
+    /// written.
     #[test]
     fn a_status_row_is_no_errors_body() {
         let input: &[u8] = b"\x1b[31m\x1b[1mERROR: \x1b[0mBuild did NOT complete successfully\r\n\x1b[31m\x1b[1mFAILED:\x1b[0m \r\n\r\x1b[1A\x1b[K\x1b[31m\x1b[1mFAILED:\x1b[0m \r\n\r\x1b[1A\x1b[K\x1b[31m\x1b[1mERROR: \x1b[0mCouldn't start the build. Unable to run tests\r\n\x1b[31m\x1b[1mFAILED:\x1b[0m \r\n\r\x1b[1A\x1b[K\x1b[32mINFO: \x1b[0mBuild Event Protocol files produced successfully.\r\n";

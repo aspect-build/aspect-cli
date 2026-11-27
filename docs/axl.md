@@ -249,6 +249,22 @@ ctx.hooks.post_task(_keep_scratch_on_failure)
 Use `ctx.defer` for cleanup that needs no knowledge of how the task ended;
 use a post-task hook when the outcome matters.
 
+`ctx.hooks.idle(fn)` runs `fn(ctx)` about every 100ms while the task blocks in
+the runtime: in `sleep`, or waiting on a child process (`wait`, `try_wait` with
+a timeout, `wait_with_output`, `status`). It is for a screen that has to keep
+redrawing while the task waits, such as a full-screen feature's frame. A
+blocking call then waits in 100ms slices, the idle hooks between them, in
+registration order. Idle hooks never run inside one another, so a `sleep` in
+one runs none. One that fails is reported as a warning, and from then on no
+idle hook runs, since a broken one would fail every tick.
+
+```python
+def _redraw(ctx: TaskContext):
+    screen.draw(frame(state))
+
+ctx.hooks.idle(_redraw)
+```
+
 **§15 Errors.** An error is a value. `error` is the root error type:
 `error("message")` builds one, and `.type(...)` on any error type derives a
 new one. Every error has three attributes: `message`, `cause` (the error that

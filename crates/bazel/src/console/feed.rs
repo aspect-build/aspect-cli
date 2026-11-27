@@ -5,7 +5,7 @@
 //! is not joined to the other's: the console's forwarder as stderr, and
 //! `std.term`'s capture of the process's stdout and stderr as both. The
 //! caller drains it whenever it redraws. Lines are kept as text a screen can
-//! draw in one row ([`plain_line`]: escape sequences stripped once the line
+//! draw in one row (`plain_line`: escape sequences stripped once the line
 //! has ended, so one split across writes is still whole; what a carriage
 //! return wrote over dropped, as a terminal would; other control characters,
 //! a backspace among them, removed), up to [`MAX_LINES`] between drains;
@@ -81,7 +81,7 @@ pub struct Drained {
     pub lines: Vec<String>,
     /// Each of `lines`' links, at the same index.
     pub links: Vec<Vec<Link>>,
-    /// Each of `lines` with its colour kept ([`coloured_line`]), at the same
+    /// Each of `lines` with its colour kept (`coloured_line`), at the same
     /// index: the same text, for a screen that shows the colour.
     pub colours: Vec<String>,
     /// Each of `lines`' kind, at the same index: `error`, `warning` or ``
@@ -188,13 +188,13 @@ fn plain_line(raw: &[u8]) -> String {
         .collect()
 }
 
-/// A line as [`linked_line`] makes it, and as [`coloured_line`] does.
+/// A line as [`linked_line`] makes it, and as `coloured_line` does.
 fn line_of(raw: &[u8]) -> (String, Vec<Link>, String) {
     let (text, links) = linked_line(raw);
     (text, links, coloured_line(raw))
 }
 
-/// [`plain_line`] with its colour (SGR) kept: the same visible text, every
+/// `plain_line` with its colour (SGR) kept: the same visible text, every
 /// other escape and control character but a tab dropped, the colour set
 /// before a redraw (`\r`) carried over it.
 fn coloured_line(raw: &[u8]) -> String {
@@ -220,7 +220,7 @@ fn coloured_line(raw: &[u8]) -> String {
         .collect()
 }
 
-/// [`plain_line`], with the line's OSC 8 links as spans of that text: none
+/// `plain_line`, with the line's OSC 8 links as spans of that text: none
 /// for a line that is not UTF-8, whose text is a lossy copy.
 fn linked_line(raw: &[u8]) -> (String, Vec<Link>) {
     let text = plain_line(raw);
@@ -300,7 +300,7 @@ const STARTS: &[&str] = &[
 
 /// Each line's kind as a screen filtering the console by errors and
 /// warnings reads it, in order: a line's own ([`severity`]); a line that
-/// starts no line of Bazel's own ([`STARTS`]) and has none takes the kind
+/// starts no line of Bazel's own (`STARTS`) and has none takes the kind
 /// the last that did left, an `ERROR:`'s `error` (so a compiler's
 /// diagnostic under its action's `ERROR:` is an error too), any other's
 /// none (a `WARNING:` is its line alone, Bazel's one line, a tool's among
@@ -327,8 +327,8 @@ impl Kinds {
         }
     }
 
-    /// Whether `text`, written as `coloured` ([`coloured_line`]), is one of
-    /// Bazel's own lines: it starts as one does ([`STARTS`]), and is not
+    /// Whether `text`, written as `coloured` (`coloured_line`), is one of
+    /// Bazel's own lines: it starts as one does (`STARTS`), and is not
     /// coloured as a tool colours `INFO:` (the colon inside the colour,
     /// which Bazel puts after its space).
     pub fn bazel(text: &str, coloured: &str) -> bool {

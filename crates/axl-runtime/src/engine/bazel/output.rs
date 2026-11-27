@@ -988,8 +988,9 @@ pub(crate) fn register_output(globals: &mut GlobalsBuilder) {
     /// Repeat the first `max` distinct `ERROR:` lines once the console ends,
     /// when at least `after` lines followed the first error, enough to have
     /// scrolled it away (blank and progress lines do not count; 0 always
-    /// recaps). Bazel's closing `Build did NOT complete successfully` and
-    /// `Build failed. Not running tests` are never repeated.
+    /// recaps). Bazel's closing lines, `Build did NOT complete
+    /// successfully`, `Build failed. Not running tests` and `command
+    /// succeeded, but …`, are never repeated.
     ///
     /// With `summary = True` it writes nothing: a failure summary tells the
     /// errors instead (the Console feature's reads Bazel's build events and,
@@ -1020,11 +1021,12 @@ pub(crate) fn register_output(globals: &mut GlobalsBuilder) {
         })
     }
 
-    /// Keep, for the failure summary and the Dashboard, Bazel's own `ERROR:`
-    /// messages and what may be an action's held last line, as Bazel wrote
-    /// them, and of each action's `INFO: From` output its header, length
-    /// and last line: `build.output_collected_errors()`. It writes nothing and
-    /// changes nothing shown; however many are added, one collects.
+    /// Collect, for the failure summary and the Dashboard, Bazel's own
+    /// `ERROR:` messages and what may be an action's held last line, as
+    /// Bazel wrote them, and of each action's `INFO: From` output its header,
+    /// its body's length (`body_len`) and its last line (`last_line`):
+    /// `build.output_collected_errors()`. It writes nothing and changes
+    /// nothing shown; however many are added, one collects.
     fn collect_errors() -> anyhow::Result<OutputStage> {
         Ok(OutputStage {
             stage: Stage::CollectErrors,

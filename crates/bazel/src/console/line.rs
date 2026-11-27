@@ -17,8 +17,11 @@
 //! * bazel's colour marks it: a coloured severity immediately followed by a
 //!   reset, as bazel writes `ESC[35mWARNING: ESC[0m` ([`Line::coloured`]). A
 //!   capture asks bazel for colour for this reason, unless a processor says
-//!   not to (the user's `--color` only decides what is shown); a console
-//!   without colour has no headers, and nothing in it is hidden;
+//!   not to (the user's `--color` only decides what is shown). In a console
+//!   without colour, only the plain lines shaped like a header before
+//!   Bazel's first line that is not one (its `INFO:` lines at the start)
+//!   are headers, and none after: in such a console a stage can tell
+//!   little of Bazel's from a tool's;
 //! * and it is not in an action's output. That output runs from its header
 //!   (`INFO: From …`, or an `ERROR:` about an action rather than the build
 //!   graph) until bazel itself ends it: under curses by moving the cursor up

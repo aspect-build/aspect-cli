@@ -547,6 +547,18 @@ const MAX_FORWARD_LINE: usize = 64 * 1024;
 /// stream that takes no more (a closed pipe, `| head -1`) ends it and closes
 /// `pipe`, so the child's next write fails, as it would have written there
 /// itself.
+///
+/// - A screen takes whole lines (a line begun before it was taken, from its
+///   start); without one, what comes is shown as it comes, never while a
+///   screen is being released.
+/// - The route is decided, and a screen fed, under the order lock, which a
+///   release holds while it replays; a write to the terminal is made after,
+///   without it, so a stream nobody reads holds up only this child's
+///   output. A line fed to the screen is copied to the output under the
+///   same lock, so a release, which holds it for its dump, has it.
+/// - An unended tail waits while more is already there to read: it is shown
+///   once the child goes quiet (a progress line), so a flood leaves its
+///   stream at a line's end.
 fn forward(
     mut pipe: impl std::io::Read + std::os::fd::AsRawFd + Send + 'static,
     stderr: bool,
@@ -577,15 +589,6 @@ fn forward(
                         .rposition(|&b| b == b'\n')
                         .map(|end| end + 1)
                         .or((line.len() > MAX_FORWARD_LINE).then_some(line.len()));
-                    // A screen takes whole lines (a line begun before it was
-                    // taken, from its start); without one, it is shown as it
-                    // comes. Never while a screen is being released.
-                    // The route is decided, and a screen fed, under the order
-                    // lock, which a release holds while it replays; a write to
-                    // the terminal is made after, without it, so a stream
-                    // nobody reads holds up only this child's output.
-                    // A line fed to the screen is copied under the same lock,
-                    // so a release (which holds it to its dump) has it.
                     let mut copied = false;
                     let fed = crate::engine::std::term::forwarding(stderr, || {
                         let fed = crate::engine::std::term::feed_screen(
@@ -602,9 +605,6 @@ fn forward(
                         }
                         fed
                     });
-                    // An unended tail waits while more is already there to
-                    // read: it is shown once the child goes quiet (a progress
-                    // line), so a flood leaves its stream at a line's end.
                     let upto = if crate::engine::std::term::pipe_readable(
                         pipe.as_raw_fd(),
                         Duration::ZERO,

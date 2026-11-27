@@ -8,7 +8,8 @@
 //! crossing into Rust, not one per line. Starlark has no `try`, so a pattern
 //! that may be invalid (one being typed) is checked first with
 //! `std.re.check`, under the same options, which returns the error rather
-//! than raising it.
+//! than raising it; and `std.re.has_uppercase` says whether a search of it
+//! should match case, by ripgrep's smart-case rule.
 
 use allocative::Allocative;
 use derive_more::Display;
@@ -35,9 +36,9 @@ impl<'v> values::StarlarkValue<'v> for Re {
     }
 }
 
-/// The regex `pattern` means with the options: case-insensitive unless
-/// `case_sensitive`, and matching only whole words with `whole_word` (the
-/// pattern between word boundaries).
+/// The regex `pattern` means with the options: case-sensitive unless
+/// `case_sensitive` is false, and matching only whole words with
+/// `whole_word` (the pattern between word boundaries).
 fn compile_regex(
     pattern: &str,
     case_sensitive: bool,
@@ -112,9 +113,9 @@ fn has_uppercase(pattern: &str) -> bool {
 
 #[starlark_module]
 fn re_methods(registry: &mut MethodsBuilder) {
-    /// Compile `pattern` (Rust `regex` syntax). Case-insensitive unless
-    /// `case_sensitive`; with `whole_word`, a match must start and end at a
-    /// word boundary. Fails on an invalid pattern; see `check`.
+    /// Compile `pattern` (Rust `regex` syntax). Case-sensitive unless
+    /// `case_sensitive = False`; with `whole_word`, a match must start and
+    /// end at a word boundary. Fails on an invalid pattern; see `check`.
     fn compile<'v>(
         #[allow(unused)] this: values::Value<'v>,
         #[starlark(require = pos)] pattern: &str,

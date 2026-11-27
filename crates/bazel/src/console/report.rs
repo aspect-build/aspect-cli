@@ -1,6 +1,8 @@
 //! What the console says once it ends: the stages that only report
 //! ([`RecapErrors`]) and the [`Summary`] of what the others hid, with the
-//! raw log and the files of each collapsed kind.
+//! raw log and the files of each collapsed kind; and what the task's own
+//! failure summary reads instead of a recap, the errors an
+//! [`ErrorCollector`] collects from Bazel's records as it wrote them.
 //!
 //! Each writes its lines from [`LineProcessor::report`], after every stage has
 //! flushed what it held, so the report follows bazel's last line. A report
@@ -11,8 +13,9 @@
 //! rule in `label.error`; the recap's quoted errors stay as Bazel wrote them
 //! but for each header's `ERROR` label, coloured as the live line's is, with
 //! what they name linked on a terminal ([`super::links`]). Where the task
-//! prints a failure summary instead (`RecapInSummary`), there is no recap
-//! and the summary leaves the raw log for that summary to name
+//! prints a failure summary instead (`recap_errors(summary = True)`,
+//! [`super::Stage::RecapInSummary`]), there is no recap and the summary
+//! leaves the raw log for that summary to name
 //! ([`Summary::log_named_elsewhere`]).
 
 use std::collections::{HashSet, VecDeque};
@@ -345,7 +348,7 @@ const BOILERPLATE: &[&str] = &[
 ];
 
 /// Whether `message`, an `ERROR:` line's text after `ERROR: `, is one of
-/// Bazel's closing lines ([`BOILERPLATE`]).
+/// Bazel's closing lines (`BOILERPLATE`).
 pub fn is_boilerplate(message: &str) -> bool {
     BOILERPLATE.iter().any(|b| message.starts_with(b))
 }
@@ -433,31 +436,41 @@ pub const MAX_HELD_LINE_BYTES: usize = 64 * 1024;
 /// [`CollectedErrors::froms_not_kept`]: super::processors::CollectedErrors::froms_not_kept
 pub const MAX_FROM_BYTES: usize = 16 * 1024 * 1024;
 
-/// Keeps, for the task's failure summary, each of Bazel's own `ERROR:`
-/// messages (a header, one in Bazel's colours after its redraw, or, before
-/// Bazel has coloured anything, any) and each record that may be an
-/// output's held last line (a [`BlockKind::Tail`]: the first Bazel wrote
-/// after its redraw once a block ended, or the classifier's), with
-/// the records that follow it before Bazel's next message or redraw (a body
-/// as [`RecapErrors`] reads one: other and blank lines no progress area
-/// drew), each record as Bazel wrote it with its line ending ([`Block`]), so the
-/// summary's exact ties hold however long the console is. Of each action's
-/// `INFO: From …:` output it keeps the header, the body's length and its
-/// last line (up to [`MAX_HELD_LINE_BYTES`]), never the body, so a chatty
-/// build costs no more than its errors, within [`MAX_FROM_BYTES`]. One of
-/// Bazel's blocks keeps at most what Bazel relays of an action's output
-/// ([`ErrorCollector::relaying`], [`BAZEL_UI_MAX_STDOUTERR_BYTES`] by
-/// default) and room for its message, and all of them [`MAX_BLOCKS_BYTES`];
-/// what of Bazel's the caps leave out is counted ([`CollectedErrors::not_kept`]). A tail whose last record ended in a bare
-/// `\r` goes on with the next record when no redraw came between: Bazel
-/// ends a held line only with the newline it adds. It writes
-/// nothing, and reads each record as Bazel wrote it
-/// ([`LineProcessor::reads_raw`]), before any stage rewrites it or curses
-/// is rendered into lines.
+/// Collects, for the task's failure summary and the Dashboard, what ties
+/// Bazel's console to its build events, each record as Bazel wrote it with
+/// its line ending ([`Block`]), so the summary's exact ties hold however
+/// long the console is:
+///
+/// - each of Bazel's own `ERROR:` messages: a header, one in Bazel's
+///   colours right after its redraw, or, before Bazel has coloured
+///   anything, any (`--color=no`);
+/// - each record that may be an output's held last line
+///   ([`BlockKind::Tail`]): the first Bazel wrote after its redraw once a
+///   block ended, or the classifier's;
+/// - with each, the records that follow it before Bazel's next message or
+///   redraw (a body as [`RecapErrors`] reads one: other and blank lines no
+///   progress area drew); a tail whose last record ended in a bare `\r`
+///   goes on with the next record when no redraw came between, as Bazel
+///   ends a held line only with the newline it adds;
+/// - of each action's `INFO: From …:` output, the header, the body's
+///   length and its last line (up to [`MAX_HELD_LINE_BYTES`]), never the
+///   body, so a chatty build costs no more than its errors, within
+///   [`MAX_FROM_BYTES`].
+///
+/// One of Bazel's blocks keeps at most what Bazel relays of an action's
+/// output ([`ErrorCollector::relaying`], [`BAZEL_UI_MAX_STDOUTERR_BYTES`] by
+/// default) and room for its message, and all of them `MAX_BLOCKS_BYTES`;
+/// what the caps leave out is counted ([`CollectedErrors::not_kept`],
+/// [`CollectedErrors::froms_not_kept`]). It also notes whether Bazel
+/// coloured its console. It writes nothing, and reads each record as
+/// Bazel wrote it ([`LineProcessor::reads_raw`]), before any stage rewrites
+/// it or curses is rendered into lines, so it never sees the CLI's own
+/// notes between Bazel's lines.
 ///
 /// [`Block`]: super::processors::Block
 /// [`BlockKind::Tail`]: super::processors::BlockKind::Tail
 /// [`CollectedErrors::not_kept`]: super::processors::CollectedErrors::not_kept
+/// [`CollectedErrors::froms_not_kept`]: super::processors::CollectedErrors::froms_not_kept
 pub struct ErrorCollector {
     given: Given,
     pty: bool,
@@ -1736,7 +1749,8 @@ mod tests {
     /// What Bazel and the CLI write after an error is never part of its
     /// body: the history's note of a kept log, in the CLI's own colours
     /// (`INFO` then a reset, then the colon), and Bazel's status rows after
-    /// its progress lines (w44's `//tc:tc`, Bazel 9.3.3).
+    /// its progress lines (a target no toolchain matches, as Bazel 9.3.3
+    /// ends its error).
     #[test]
     fn notes_and_status_rows_stay_out_of_a_body() {
         let toolchain = [

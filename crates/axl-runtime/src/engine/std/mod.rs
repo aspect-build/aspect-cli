@@ -87,6 +87,10 @@ pub(crate) fn std_methods(registry: &mut MethodsBuilder) {
         Ok(process::Process::new())
     }
 
+    /// Regular expressions in Rust's `regex` syntax, which run in time
+    /// linear in their input, compiled once and applied to many lines in
+    /// one call (search, filter, replace, highlight), with ripgrep's smart
+    /// case (`has_uppercase`); see `std.re.Re`.
     #[starlark(attribute)]
     fn re<'v>(#[allow(unused)] this: values::Value<'v>) -> anyhow::Result<re::Re> {
         Ok(re::Re)

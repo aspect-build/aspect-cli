@@ -453,11 +453,15 @@ pub enum BlockKind {
     Error,
     /// An action's output, under Bazel's `INFO: From …:`.
     From,
-    /// The first record Bazel wrote after its redraw once a block ended, or
-    /// one the classifier calls an output's held last line: Bazel's next
-    /// message, or that held line, which Bazel writes after its next
-    /// redraw and the bytes cannot tell apart (see [`crate::console::line`]);
-    /// the summary tells them by the action's own output.
+    /// A record that may be an action output's held last line: the first
+    /// past Bazel's progress area once a block ended, written after Bazel's
+    /// redraw, or one the classifier calls a held last line (the first after
+    /// an action's output ended that starts in Bazel's colours for a
+    /// severity, a coloured `ERROR:` say). It is Bazel's next message or
+    /// that held line, which Bazel writes after its next redraw; the bytes
+    /// cannot tell them apart (see [`crate::console::line`]), and the
+    /// summary tells them by the action's own output. A tail that is an
+    /// `ERROR:` has its header read too ([`Block::error_header`]).
     Tail,
 }
 

@@ -485,15 +485,15 @@ const SECRET_WORDS: &[&str] = &[
 ];
 
 /// Whether a flag's or a setting's `name` reads as one that may hold a
-/// secret ([`SECRET_WORDS`]).
+/// secret (`SECRET_WORDS`).
 fn secret_name(name: &str) -> bool {
     let lower = name.to_lowercase();
     SECRET_WORDS.iter().any(|w| lower.contains(w))
 }
 
 /// [`redact_command_args`] for a screen that shows the args, which also
-/// hides what a setting named like a secret ([`SECRET_WORDS`]) holds,
-/// whatever flag carries it ([`hide_secret_setting`]): `--client_secret=x`,
+/// hides what a setting named like a secret (`SECRET_WORDS`) holds,
+/// whatever flag carries it (`hide_secret_setting`): `--client_secret=x`,
 /// `--define=API_TOKEN=x`, `--test_arg=--password=x`, `--copt=-DKEY=x`,
 /// `--test_arg=--token x`, and a positional `API_TOKEN=x` (a workspace
 /// status or build metadata entry, given as `key=value`). A flag whose value

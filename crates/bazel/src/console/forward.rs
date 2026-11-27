@@ -26,6 +26,19 @@
 //! ([`super::ansi::is_neutral`]) are left out, as they would only clutter the
 //! next line.
 //!
+//! # Stage order
+//!
+//! A stage that reads raw ([`LineProcessor::reads_raw`], the error
+//! collector) is given each of Bazel's records as Bazel wrote it, classified,
+//! before any other stage runs and before a rendering makes rows of it; what
+//! it returns is not used. The others then run in the chain's order on what
+//! the stages before them passed. The CLI's own notes between Bazel's lines
+//! ([`Notes`]: where the history kept a log) are written where nothing
+//! redraws (after a message Bazel ended, before its progress area or the
+//! next output's header, and at the end), each classified on its own and
+//! marked [`super::line::Line::note`], through the chain alone: a raw reader
+//! never sees one.
+//!
 //! # Rendered lines
 //!
 //! Given [`Shape::lines`], each record is classified, then fed with its

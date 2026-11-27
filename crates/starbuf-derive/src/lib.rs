@@ -515,7 +515,8 @@ fn try_message(input: TokenStream) -> Result<TokenStream, Error> {
         };
 
         // A duration reads as its whole milliseconds, `<field>_ms`: AXL has no
-        // duration type, and every use so far is a time to show or compare.
+        // duration type, and a whole millisecond count is what showing or
+        // comparing a time needs.
         if sattrs.duration && !attrs.repeated && !sattrs.skip {
             let fident = field.ident.clone().unwrap();
             let name = Ident::new(&format!("{fident}_ms"), Span::call_site());
