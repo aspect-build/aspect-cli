@@ -241,7 +241,7 @@ printf 'caf\\352\\n' > tree/src/l1.txt
     said = []
     fs.write(root + "/deep.patch", "--- /dev/null\n+++ b/src/%sf\n@@ -0,0 +1 @@\n+x\n" % ("d/" * 2100))
     _eq("a path too long", apply_fix_patch(ctx, root + "/deep.patch", cwd = tree, say = _noted(said)), None)
-    _eq("refused with the system's reason", [l.startswith("File name too long") for l in said], [True])
+    _eq("refused, naming the path, with the system's reason", [l.startswith("'src/d/d/") and "File name too long" in l for l in said], [True])
     fs.write(root + "/next.patch", "--- a/src/kept.txt\n+++ b/src/kept.txt\n@@ -1 +1 @@\n-b\n+c\n")
     _eq("the next patch", (apply_fix_patch(ctx, root + "/next.patch", cwd = tree), fs.read_to_string(tree + "/src/kept.txt")), (None, "c\n"))
 
@@ -577,6 +577,20 @@ printf 'l\\n' > back/src/target.txt && ln -s target.txt back/src/lnk.txt
         _eq("an unreadable file", apply_fix_patch(ctx, root + "/secret.patch", cwd = tree, say = _noted(said)), None)
         _eq("refuses its patch, its reason the system's", [l.startswith("'src/secret.txt' can't be read: ") and "Error(" not in l for l in said], [True])
         _eq("and the run goes on", (apply_fix_patch(ctx, root + "/after.patch", cwd = tree), fs.read_to_string(tree + "/src/ok.txt")), (None, "A\n"))
+    if unreadable != None:
+        # A file that becomes unreadable while patch runs: the compare
+        # before any write fails, so nothing is written, and the warning
+        # names it.
+        fs.write(tree + "/src/a.txt", "a\n")
+        fs.write(tree + "/src/b.txt", "b\n")
+        shim = _stand_in(fs, root, "unreadable-patch", 'case "$*" in *./src/b.txt*) chmod 000 \'%s/src/b.txt\';; esac\nexec patch "$@"\n' % tree)
+        ctx.defer(fs.set_permissions, tree + "/src/b.txt", 0o644)
+        said.clear()
+        fs.write(root + "/two.patch", fix("src/a.txt", "a", "A") + fix("src/b.txt", "b", "B"))
+        _eq("a file unreadable mid-run", apply_fix_patch(ctx, root + "/two.patch", cwd = tree, program = shim, say = _noted(said)), None)
+        _eq("refuses, naming it", [l.startswith("'src/b.txt': ") for l in said], [True])
+        _eq("nothing written", fs.read_to_string(tree + "/src/a.txt"), "a\n")
+        fs.set_permissions(tree + "/src/b.txt", 0o644)
     if unwritable != None:
         said.clear()
         fs.write(root + "/ro.patch", "--- /dev/null\n+++ b/src/ro/new.txt\n@@ -0,0 +1 @@\n+n\n" + fix("src/ok.txt", "A", "B"))

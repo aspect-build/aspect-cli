@@ -6,7 +6,9 @@ on that section's bytes alone, naming the copy to change: patch never takes a
 file name from the diff. Each copy patch changed or made is then renamed
 onto the workspace file its path resolves to, keeping its mode but setuid
 and setgid, and one patch emptied for a removal is removed there: nothing
-else reaches the workspace.
+else reaches the workspace. Everything is read, compared and kept before
+the first of those writes; a write or removal that fails is named in a
+WARNING, and the rest still happen.
 
 A patch is refused whole, every file as it was, with a warning saying why,
 where:
@@ -29,7 +31,9 @@ where:
 - two of its files are one in the copies' directory, once copied or once
   patched;
 - patch exits with trouble, or leaves a copy that isn't a regular file, or
-  takes one away unasked.
+  takes one away unasked;
+- reading, copying or comparing fails before anything is written (the
+  warning names the path).
 """
 
 load("./environment.axl", "info", "warn")
@@ -393,6 +397,144 @@ def _write_section(fs, path: str, raw: bytes, starts: list, section: Section) ->
         out.write(raw[starts[first]:starts[end]])
     out.close()
 
+def _apply(
+        ctx: TaskContext,
+        fs,
+        patch: str,
+        cwd: str,
+        raw: bytes,
+        text: str,
+        files: list,
+        paths: list,
+        program: str,
+        mkdtemp: typing.Callable[[], str],
+        tell: typing.Callable[[str, str], None],
+        refuse: typing.Callable[[str], None],
+        at: list) -> str | None:
+    """`apply_fix_patch` from its workspace checks on: copy, patch, check,
+    then write back. Every read, compare and reject it keeps comes before
+    the first write to the workspace, so an I/O failure it doesn't handle
+    itself (which the caller turns into a refusal naming `at[0]`, the path
+    it was on) leaves the workspace as it was; after that, each write or
+    removal that fails is named in a WARNING of its own."""
+    removed = [f.old for f in files if f.old and not f.new]
+    refused, keys, real = _refusal(fs, cwd, paths, removed)
+    if refused:
+        return refuse(refused)
+    made = [f.new for f in files if not f.old and f.new]
+
+    work = mkdtemp()
+    ctx.defer(fs.remove_dir_all, work)
+    scratch = fs.mkdtemp()
+    ctx.defer(fs.remove_dir_all, scratch)
+    had = {}
+    for path in paths:
+        at[0] = path
+        parent = path.rpartition("/")[0]
+        if parent:
+            fs.create_dir_all(work + "/" + parent)
+        if not _is_file(fs, cwd + "/" + path):
+            continue
+        if path in made:
+            err, _ = catch(lambda: fs.open(cwd + "/" + path).read(1), types = [std.io.Error])
+        else:
+            err, _ = catch(_copy_in, fs, cwd + "/" + path, work + "/" + path, types = [std.io.Error])
+            had[path] = True
+        if err != None:
+            return refuse("%s can't be read: %s" % (_q(path), err.message))
+    at[0] = ""
+    collision = _copy_collision(fs, work, keys)
+    if collision:
+        return refuse(collision)
+
+    starts = _line_starts(raw, text.split("\n"))
+    runs = []
+    for n, f in enumerate(files):
+        if not f.section.hunks:
+            continue
+        target = f.old if f.old in had else f.new if f.new in had else f.new if _creates(f) else None
+        if target == None:
+            if f.new != None:
+                tell("INFO", "%s changes %s, which isn't there: its hunks for it were not applied" % (_q(patch), _q(f.old)))
+            continue
+        at[0] = target
+        section = "%s/%d.diff" % (scratch, n)
+        _write_section(fs, section, raw, starts, f.section)
+
+        # Backups as patch makes them by default, files only from the copies
+        # (no version control checkout), names quoted its default way and
+        # messages in English, which `_ignored` reads.
+        out = ctx.std.process.command(program).args(["--forward", "--batch", "--input=" + section, "./" + target]) \
+            .current_dir(work).env("TMPDIR", scratch).env("LC_ALL", "C").env("LANGUAGE", None) \
+            .env("VERSION_CONTROL", None).env("PATCH_VERSION_CONTROL", None).env("SIMPLE_BACKUP_SUFFIX", None) \
+            .env("PATCH_GET", None).env("POSIXLY_CORRECT", None).env("QUOTING_STYLE", None) \
+            .stdin("null").stdout("piped").stderr("piped").spawn().wait_with_output()
+        said = out.stdout + out.stderr
+        if said:
+            ctx.std.io.stderr.write(said if said.endswith("\n") else said + "\n")
+        code = out.status.code
+        if code not in (0, 1):
+            return refuse("patch exited with %d" % code if code != None else "patch was ended by a signal")
+        runs.append((f, target, section, _ignored(said)))
+    at[0] = ""
+    collision = _copy_collision(fs, work, keys)
+    if collision:
+        return refuse(collision)
+
+    # Nothing but regular files copied back: a symlink patch made would be
+    # followed, and a file it took away unasked lost.
+    for path in paths:
+        meta, err = _look(fs, work + "/" + path)
+        if err != None:
+            return refuse("%s can't be looked at after patch ran: %s" % (_q(path), err))
+        if meta != None and not meta.is_file:
+            return refuse("%s isn't a regular file after patch ran" % _q(path))
+        if meta == None and path in had and path not in removed:
+            return refuse("%s is gone after patch ran" % _q(path))
+
+    # Everything read and compared, every reject kept, before anything is
+    # written.
+    rejects = []
+    removals = []
+    writes = []
+    for f, target, section, ignored in runs:
+        at[0] = target
+        patched = work + "/" + target
+        mine = real[target]
+        if target in made and _is_file(fs, mine) and fs.metadata(mine).size > 0:
+            if not (_is_file(fs, patched) and _same_bytes(fs, patched, mine)):
+                fs.copy(section, patched + ".rej")
+                rejects.append(target + ".rej")
+            continue
+        if _is_file(fs, patched + ".rej") and not ignored:
+            rejects.append(target + ".rej")
+        if f.new == None and target in had and (not _is_file(fs, patched) or fs.metadata(patched).size == 0):
+            removals.append((target, mine))
+        elif _is_file(fs, patched) and not (target in had and _same_bytes(fs, patched, mine)):
+            writes.append((target, patched, mine))
+    kept = None
+    if rejects:
+        kept = fs.mkdtemp()
+        for rej in rejects:
+            at[0] = rej
+            parent = rej.rpartition("/")[0]
+            if parent:
+                fs.create_dir_all(kept + "/" + parent)
+            fs.copy(work + "/" + rej, kept + "/" + rej)
+    at[0] = ""
+
+    for target, mine in removals:
+        err, _ = catch(fs.remove_file, mine, types = [std.io.Error])
+        if err != None:
+            tell("WARNING", "%s: %s was not removed: %s" % (_q(patch), _q(target), err.message))
+    for target, patched, mine in writes:
+        err, _ = catch(_replace, fs, patched, mine, types = [std.io.Error])
+        if err != None:
+            tell("WARNING", "%s: %s was not written: %s" % (_q(patch), _q(target), err.message))
+    if kept != None:
+        tell("INFO", "%s did not apply in full; its rejected hunks are in %s" % (_q(patch), _q(kept)))
+    return kept
+
 def apply_fix_patch(
         ctx: TaskContext,
         patch: str,
@@ -425,8 +567,11 @@ def apply_fix_patch(
       macOS's `uchg` never reaches a copy, and setuid and setgid are
       dropped. A result is renamed into place, so a symlink in the tree
       stays one, a hard link to a file elsewhere is broken off, and a
-      read-only file is fixed as patch fixes it, its other mode bits kept. One that can't be written or removed is named in a WARNING, and
-      the rest still are; any other I/O failure refuses the patch.
+      read-only file is fixed as patch fixes it, its other mode bits kept.
+    - Everything is read and compared, and every reject kept, before the
+      first write: an I/O failure until then refuses the patch, naming the
+      path it was on where there is one. A write or removal that fails
+      after is named in a WARNING, and the rest still happen.
     - Rejects for hunks that failed are kept in a directory an INFO line
       names. The copies go when the task ends, however it ends.
     - For a test to stand in for them: `program` is the `patch` run, `say`
@@ -488,115 +633,10 @@ def apply_fix_patch(
             if other != path and other.startswith(path) and (tail in (".rej", ".orig") or numbered):
                 return refuse("it names %s and %s, which patch writes its own output to" % (_q(path), _q(other)))
 
-    # Everything from here touches the filesystem: one I/O failure the steps
-    # below don't handle themselves (a name too long for it, say) refuses
-    # the patch, never the task.
-    def apply() -> str | None:
-        removed = [f.old for f in files if f.old and not f.new]
-        refused, keys, real = _refusal(fs, cwd, paths, removed)
-        if refused:
-            return refuse(refused)
-        made = [f.new for f in files if not f.old and f.new]
-
-        work = (mkdtemp or fs.mkdtemp)()
-        ctx.defer(fs.remove_dir_all, work)
-        scratch = fs.mkdtemp()
-        ctx.defer(fs.remove_dir_all, scratch)
-        had = {}
-        for path in paths:
-            parent = path.rpartition("/")[0]
-            if parent:
-                fs.create_dir_all(work + "/" + parent)
-            if not _is_file(fs, cwd + "/" + path):
-                continue
-            if path in made:
-                err, _ = catch(lambda: fs.open(cwd + "/" + path).read(), types = [std.io.Error])
-            else:
-                err, _ = catch(_copy_in, fs, cwd + "/" + path, work + "/" + path, types = [std.io.Error])
-                had[path] = True
-            if err != None:
-                return refuse("%s can't be read: %s" % (_q(path), err.message))
-        collision = _copy_collision(fs, work, keys)
-        if collision:
-            return refuse(collision)
-
-        starts = _line_starts(raw, text.split("\n"))
-        runs = []
-        for n, f in enumerate(files):
-            if not f.section.hunks:
-                continue
-            target = f.old if f.old in had else f.new if f.new in had else f.new if _creates(f) else None
-            if target == None:
-                if f.new != None:
-                    tell("INFO", "%s changes %s, which isn't there: its hunks for it were not applied" % (_q(patch), _q(f.old)))
-                continue
-            section = "%s/%d.diff" % (scratch, n)
-            _write_section(fs, section, raw, starts, f.section)
-
-            # Backups as patch makes them by default, files only from the copies
-            # (no version control checkout), names quoted its default way and
-            # messages in English, which `_ignored` reads.
-            out = ctx.std.process.command(program).args(["--forward", "--batch", "--input=" + section, "./" + target]) \
-                .current_dir(work).env("TMPDIR", scratch).env("LC_ALL", "C").env("LANGUAGE", None) \
-                .env("VERSION_CONTROL", None).env("PATCH_VERSION_CONTROL", None).env("SIMPLE_BACKUP_SUFFIX", None) \
-                .env("PATCH_GET", None).env("POSIXLY_CORRECT", None).env("QUOTING_STYLE", None) \
-                .stdin("null").stdout("piped").stderr("piped").spawn().wait_with_output()
-            said = out.stdout + out.stderr
-            if said:
-                ctx.std.io.stderr.write(said if said.endswith("\n") else said + "\n")
-            code = out.status.code
-            if code not in (0, 1):
-                return refuse("patch exited with %d" % code if code != None else "patch was ended by a signal")
-            runs.append((f, target, section, _ignored(said)))
-        collision = _copy_collision(fs, work, keys)
-        if collision:
-            return refuse(collision)
-
-        # Nothing but regular files copied back: a symlink patch made would be
-        # followed, and a file it took away unasked lost.
-        for path in paths:
-            meta, err = _look(fs, work + "/" + path)
-            if err != None:
-                return refuse("%s can't be looked at after patch ran: %s" % (_q(path), err))
-            if meta != None and not meta.is_file:
-                return refuse("%s isn't a regular file after patch ran" % _q(path))
-            if meta == None and path in had and path not in removed:
-                return refuse("%s is gone after patch ran" % _q(path))
-        rejects = []
-        for f, target, section, ignored in runs:
-            patched = work + "/" + target
-            mine = real[target]
-            if target in made and _is_file(fs, mine) and fs.metadata(mine).size > 0:
-                if not (_is_file(fs, patched) and _same_bytes(fs, patched, mine)):
-                    fs.copy(section, patched + ".rej")
-                    rejects.append(target + ".rej")
-                continue
-            if _is_file(fs, patched + ".rej") and not ignored:
-                rejects.append(target + ".rej")
-            if f.new == None and target in had and (not _is_file(fs, patched) or fs.metadata(patched).size == 0):
-                err, _ = catch(fs.remove_file, mine, types = [std.io.Error])
-                if err != None:
-                    tell("WARNING", "%s: %s was not removed: %s" % (_q(patch), _q(target), err.message))
-                continue
-            if not _is_file(fs, patched) or (target in had and _same_bytes(fs, patched, mine)):
-                continue
-            err, _ = catch(_replace, fs, patched, mine, types = [std.io.Error])
-            if err != None:
-                tell("WARNING", "%s: %s was not written: %s" % (_q(patch), _q(target), err.message))
-        if rejects:
-            kept = fs.mkdtemp()
-            for rej in rejects:
-                parent = rej.rpartition("/")[0]
-                if parent:
-                    fs.create_dir_all(kept + "/" + parent)
-                fs.copy(work + "/" + rej, kept + "/" + rej)
-            tell("INFO", "%s did not apply in full; its rejected hunks are in %s" % (_q(patch), _q(kept)))
-            return kept
-        return None
-
-    err, kept = catch(apply, types = [std.io.Error])
+    at = [""]
+    err, kept = catch(_apply, ctx, fs, patch, cwd, raw, text, files, paths, program, mkdtemp or fs.mkdtemp, tell, refuse, at, types = [std.io.Error])
     if err != None:
-        return refuse(err.message)
+        return refuse("%s: %s" % (_q(at[0]), err.message) if at[0] else err.message)
     return kept
 
 testonly_scan = _scan
