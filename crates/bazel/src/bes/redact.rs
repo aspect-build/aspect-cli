@@ -533,8 +533,10 @@ pub fn redact_shown_args<'a>(args: impl IntoIterator<Item = &'a str> + Clone) ->
 /// `-DKEY=x`) or a flag and its value (`--token x`) whose name reads as
 /// one, that setting's value. A header flag keeps the name [`redact_flag`]
 /// leaves it, and a flag whose name ends in `_env` takes the
-/// env-passthrough rule, `allow_env` included; a `--default_override`'s
-/// option is hidden as itself; a URL is never read as a name.
+/// env-passthrough rule, `allow_env` included, but for a variable whose
+/// name reads as a secret's, hidden whatever `allow_env` lets through; a
+/// `--default_override`'s option is hidden as itself; a URL is never read
+/// as a name.
 fn hide_secret_setting<'a>(arg: &'a str, allow_env: &[&str]) -> Cow<'a, str> {
     if let Some(payload) = crate::rc::override_payload(arg) {
         let wrapper = &arg[..arg.len() - payload.len()];
@@ -551,6 +553,11 @@ fn hide_secret_setting<'a>(arg: &'a str, allow_env: &[&str]) -> Cow<'a, str> {
         return Cow::Borrowed(arg);
     }
     if name.starts_with("--") && name.to_lowercase().ends_with("_env") {
+        if let Some((key, _)) = value.split_once('=')
+            && secret_name(key)
+        {
+            return Cow::Owned(format!("{name}={key}={REDACTED}"));
+        }
         return match redact_env_value(value, allow_env) {
             Cow::Owned(v) => Cow::Owned(format!("{name}={v}")),
             Cow::Borrowed(_) => Cow::Borrowed(arg),
@@ -1249,6 +1256,20 @@ mod tests {
             vec!["build", "--remote_header"],
             "a flag at the end, its value missing"
         );
+    }
+
+    /// An allowlisted variable (`ALLOW_ENV=MY_*`) named like a secret is
+    /// hidden all the same where the args are shown; another keeps its
+    /// value.
+    #[test]
+    fn shown_args_hide_an_allowlisted_secret_named_variable() {
+        let got = redact_shown_args([
+            "--build_metadata=ALLOW_ENV=MY_*",
+            "--action_env=MY_TOKEN=leak",
+            "--action_env=MY_VAR=kept",
+        ]);
+        assert_eq!(got[1], format!("--action_env=MY_TOKEN={REDACTED}"));
+        assert_eq!(got[2], "--action_env=MY_VAR=kept");
     }
 
     /// What a screen shows of the flags: the stream's rules, then a setting
