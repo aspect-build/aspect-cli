@@ -3063,7 +3063,7 @@ def test_parse_patch_hunks(tc: int) -> int:
     patch = "\n".join([
         "--- a/src/x.ts",
         "+++ b/src/x.ts",
-        "@@ -1,2 +1,3 @@",
+        "@@ -1,1 +1,3 @@",
         " ctx",
         "+added one",
         "+added two",
@@ -3075,18 +3075,19 @@ def test_parse_patch_hunks(tc: int) -> int:
     tc = test_case(tc, hunks[0]["end_line"] == 3, "parse_patch_hunks: end line = start + count - 1")
 
     # `,B` omitted means a single line.
-    single = parse_patch_hunks("--- a/y\n+++ b/y\n@@ -5 +7 @@\n+z")
+    single = parse_patch_hunks("--- a/y\n+++ b/y\n@@ -5 +7 @@\n-y\n+z")
     tc = test_case(tc, len(single) == 1 and single[0]["start_line"] == 7, "parse_patch_hunks: implicit count start")
     tc = test_case(tc, single[0]["end_line"] == 7, "parse_patch_hunks: implicit count spans one line")
 
-    # A declared count far larger than the patch body is clamped to the number
-    # of lines actually present. Callers expand hunks one entry per line, so an
-    # unclamped count from a truncated/malformed patch would allocate without
-    # bound.
+    # A declared count far larger than the patch body yields no hunk. Callers
+    # expand hunks one entry per line, so a span from a truncated or malformed
+    # patch's count would allocate without bound.
     huge = parse_patch_hunks("--- a/z\n+++ b/z\n@@ -1,1 +1,200000000 @@\n+only one line")
-    tc = test_case(tc, len(huge) == 1, "parse_patch_hunks: bogus count still yields a hunk")
-    span = huge[0]["end_line"] - huge[0]["start_line"] + 1
-    tc = test_case(tc, span <= 4, "parse_patch_hunks: clamps count to lines present (got %d)" % span)
+    tc = test_case(tc, huge == [], "parse_patch_hunks: a count past the body yields no hunk")
+
+    # A `+++ ` line inside a hunk's body is an added line, not a header.
+    inner = parse_patch_hunks("--- a/w\n+++ b/w\n@@ -1,1 +1,2 @@\n a\n+++ added\n@@ -5 +6 @@\n-x\n+y\n")
+    tc = test_case(tc, [(h["file"], h["start_line"], h["end_line"]) for h in inner] == [("w", 1, 2), ("w", 6, 6)], "parse_patch_hunks: a body's `+++` line is no header")
 
     # Non-numeric and non-positive counts are skipped outright.
     tc = test_case(tc, parse_patch_hunks("--- a/q\n+++ b/q\n@@ -1,1 +x,y @@\n+a") == [], "parse_patch_hunks: non-numeric skipped")
