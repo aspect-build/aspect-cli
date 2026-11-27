@@ -49,6 +49,7 @@ load("@aspect//private/lib/duration_test.axl", "duration_tests")
 load("@aspect//private/lib/environment.axl", "info")
 load("@aspect//private/lib/errors_test.axl", "errors_tests")
 load("@aspect//private/lib/execlog_test.axl", "execlog_tests")
+load("@aspect//private/lib/failures_test.axl", "failures_tests")
 load("@aspect//private/lib/format_results_test.axl", "format_default_preset_snapshot_tests", "format_template_snapshot_tests")
 load("@aspect//private/lib/format_spawn_test.axl", "format_spawn_tests")
 load("@aspect//private/lib/gazelle_results_test.axl", "gazelle_default_preset_snapshot_tests", "gazelle_template_snapshot_tests")
@@ -636,6 +637,11 @@ def config(ctx: ConfigContext):
     # Recorded Bazel failures through the failure summary and the Failures tab.
     # Run with: aspect dev test-failure-replay
     ctx.tasks.add(failure_replay_tests)
+
+    # failure_records.axl, failure_ties.axl and failures.axl: one synthetic
+    # case per rule.
+    # Run with: aspect dev test-failures
+    ctx.tasks.add(failures_tests)
 
     # aspect_endpoint_auth.axl: host parsing, suffix matching, credential gate.
     # Run with: aspect dev test-aspect-endpoint-auth

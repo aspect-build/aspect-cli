@@ -260,6 +260,20 @@ def _status_word(status: str) -> str:
     `killed`."""
     return "exit " + status[len("Exit "):] if status.startswith("Exit ") else status.lower()
 
+def _failed_label(what: str) -> str:
+    """The label a `… <label> failed: ` header names, `what` the text before
+    ` failed: `: its last word, before a test's `(shard 2 of 3)`, `(run 1 of
+    2)` or both (`Testing //t:t (shard 2 of 3) failed: …`)."""
+    head, sep, tail = what.rpartition(" (")
+    if sep and tail.endswith(")") and all([_n_of_m(p) for p in tail[:-1].split(", ")]):
+        what = head
+    return what.rpartition(" ")[2]
+
+def _n_of_m(text: str) -> bool:
+    """Whether `text` is a test's `shard 2 of 3` or `run 1 of 2`."""
+    words = text.split(" ")
+    return len(words) == 4 and words[0] in ("shard", "run") and words[1].isdigit() and words[2] == "of" and words[3].isdigit()
+
 def console_ties(state: dict) -> dict:
     """What Bazel's console adds to the failure entries, by exact ties
     alone, once the build has ended: from the blocks a `collect_errors()`
@@ -352,7 +366,7 @@ def console_ties(state: dict) -> dict:
         what, failed, reason = said.partition(" failed: ")
         if failed:
             by["reason"].setdefault(reason, []).append(k)
-            by["failed"].setdefault(what.rpartition(" ")[2], []).append(k)
+            by["failed"].setdefault(_failed_label(what), []).append(k)
             if reason.startswith("("):
                 by["status"].setdefault(reason.partition("): ")[2], []).append(k)
         for marker in (" rule target ", "(from target "):

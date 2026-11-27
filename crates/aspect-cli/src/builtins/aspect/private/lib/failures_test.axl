@@ -1,0 +1,56 @@
+"""Tests for the failure summary's libraries, one small synthetic case per
+rule: the records (`failure_records.axl`), the console ties
+(`failure_ties.axl`), and the entries and counts (`failures.axl`).
+
+Run with:
+  aspect dev test-failures
+"""
+
+load("./failure_ties.axl", "failure_ties")
+load("./failures.axl", "failures")
+load("./term_text.axl", "term_text")
+
+def _eq(label, got, want):
+    if got != want:
+        fail("%s: got %r, want %r" % (label, got, want))
+
+def _event(kind: str, id, payload, children = [], aborted = False):
+    """A build event as the build event hooks get it."""
+    return struct(kind = kind, id = id, payload = payload, payload_kind = "aborted" if aborted else "", children = children)
+
+def _ended(ctx, events: list, console: str):
+    """A state the build event hooks collected `events` into, its build
+    ended with `console`, as Bazel wrote it to a terminal."""
+    state = failures.new_state(lambda path, n: None, None, ctx.std.re.compile(term_text.ANSI))
+    for e in events:
+        failures.collect_event(state, e)
+    state.update(building = False, bazel_errors = bazel.output.bazel_errors(console))
+    return state
+
+def _error(text: str) -> str:
+    """One of Bazel's own `ERROR:` lines, coloured as on a terminal."""
+    return "\x1b[31m\x1b[1mERROR: \x1b[0m" + text + "\n"
+
+def _test_shard_tie(ctx):
+    # A test shard's header names its label before `(shard 2 of 3)`.
+    tid = struct(label = "//tp:shards", run = 1, shard = 2, attempt = 1, configuration = struct(id = "c1"))
+    state = _ended(ctx, [
+        _event("test_result", tid, struct(status = "failed", test_action_output = [])),
+    ], _error("/ws/tp/BUILD:3:8: Testing //tp:shards (shard 2 of 3) failed: (Exit 1): test.sh failed: error executing TestRunner command"))
+    _eq("a failed shard's header is its test's", failure_ties.console_ties(state)["others"], [])
+    state = _ended(ctx, [
+        _event("test_result", tid, struct(status = "failed", test_action_output = [])),
+    ], _error("/ws/tp/BUILD:3:8: Testing //tp:shards (shard 2 of 3, run 1 of 2) failed: (Exit 1): test.sh failed"))
+    _eq("and a shard's run's", failure_ties.console_ties(state)["others"], [])
+
+def _impl(ctx: TaskContext) -> int:
+    _test_shard_tie(ctx)
+    print("failures_test.axl: OK")
+    return 0
+
+failures_tests = task(
+    summary = "Run the failure summary libraries' tests.",
+    kind = "test-failures",
+    group = ["dev"],
+    implementation = _impl,
+)
