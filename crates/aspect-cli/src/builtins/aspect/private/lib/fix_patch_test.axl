@@ -508,6 +508,29 @@ printf 'l\\n' > back/src/target.txt && ln -s target.txt back/src/lnk.txt
         _eq("a file in a directory it can't write", apply_fix_patch(ctx, root + "/ro.patch", cwd = tree, say = lambda label, text: said.append((label, text.partition(": ")[2]))), None)
         _eq("is named", [(label, text.startswith("src/ro/new.txt was not written: ") and "Error(" not in text) for label, text in said], [("WARNING", True)])
         _eq("the rest is written", (fs.exists(tree + "/src/ro/new.txt"), fs.read_to_string(tree + "/src/ok.txt")), (False, "B\n"))
+    fs.set_permissions(tree + "/src/ro", 0o755)
+
+    # macOS's `uchg` flag: the copy is made without it, so patch changes it
+    # and it goes with the rest; the file it stands for can't be replaced,
+    # and is named.
+    fs.write(tree + "/src/locked.txt", "u\n")
+    locked = ctx.std.process.command("chflags").args(["uchg", tree + "/src/locked.txt"]).stderr("null").spawn().wait()
+    if locked.success:
+        ctx.defer(lambda: ctx.std.process.command("chflags").args(["nouchg", tree + "/src/locked.txt"]).spawn().wait())
+        copies = []
+
+        def kept_copies():
+            work = fs.mkdtemp()
+            copies.append(work)
+            return work
+
+        said.clear()
+        fs.write(root + "/locked.patch", fix("src/locked.txt", "u", "U"))
+        _eq("a locked file", apply_fix_patch(ctx, root + "/locked.patch", cwd = tree, mkdtemp = kept_copies, say = lambda label, text: said.append((label, text.partition(": ")[2].partition(": ")[0]))), None)
+        _eq("is named", said, [("WARNING", "src/locked.txt was not written")])
+        _eq("and left as it was", fs.read_to_string(tree + "/src/locked.txt"), "u\n")
+        err, _ = catch(fs.remove_file, copies[0] + "/src/locked.txt", types = [std.io.Error])
+        _eq("its copy carries no flag", err, None)
 
 def _impl(ctx: TaskContext) -> int:
     fs = ctx.std.fs

@@ -98,7 +98,8 @@ starlark_simple_value!(FrozenDirEntry);
 )]
 /// A file's metadata. `dev` and `ino` (None off Unix) say which file it is:
 /// two paths with the same pair are one file, whatever their spelling (case,
-/// Unicode normalization, a hard link).
+/// Unicode normalization, a hard link). `mode` is its permission bits, such
+/// as `0o644` (None off Unix), what `set_permissions` takes.
 pub struct Metadata<'v> {
     is_dir: values::Value<'v>,
     is_file: values::Value<'v>,
@@ -111,6 +112,7 @@ pub struct Metadata<'v> {
     readonly: values::Value<'v>,
     dev: values::Value<'v>,
     ino: values::Value<'v>,
+    mode: values::Value<'v>,
 }
 
 #[starlark_value(type = "fs.Metadata")]
@@ -128,6 +130,7 @@ impl<'v> values::StarlarkValue<'v> for Metadata<'v> {
             "readonly" => Some(self.readonly),
             "dev" => Some(self.dev),
             "ino" => Some(self.ino),
+            "mode" => Some(self.mode),
             _ => None,
         }
     }
@@ -144,6 +147,7 @@ impl<'v> values::StarlarkValue<'v> for Metadata<'v> {
             "readonly".into(),
             "dev".into(),
             "ino".into(),
+            "mode".into(),
         ]
     }
 }
@@ -168,6 +172,7 @@ pub struct FrozenMetadata {
     readonly: values::FrozenValue,
     dev: values::FrozenValue,
     ino: values::FrozenValue,
+    mode: values::FrozenValue,
 }
 
 #[starlark_value(type = "fs.Metadata")]
@@ -190,6 +195,7 @@ impl<'v> values::Freeze for Metadata<'v> {
             readonly: freezer.freeze(self.readonly)?,
             dev: freezer.freeze(self.dev)?,
             ino: freezer.freeze(self.ino)?,
+            mode: freezer.freeze(self.mode)?,
         })
     }
 }
@@ -1087,6 +1093,13 @@ fn marshal_metadata<'v>(m: &fs::Metadata, heap: Heap<'v>) -> Metadata<'v> {
     #[cfg(not(unix))]
     let executable = heap.alloc(false);
     #[cfg(unix)]
+    let mode = {
+        use std::os::unix::fs::PermissionsExt;
+        heap.alloc(permissions.mode() & 0o7777)
+    };
+    #[cfg(not(unix))]
+    let mode = heap.alloc(NoneType);
+    #[cfg(unix)]
     let (dev, ino) = {
         use std::os::unix::fs::MetadataExt;
         (heap.alloc(m.dev()), heap.alloc(m.ino()))
@@ -1105,6 +1118,7 @@ fn marshal_metadata<'v>(m: &fs::Metadata, heap: Heap<'v>) -> Metadata<'v> {
         readonly: heap.alloc(permissions.readonly()),
         dev,
         ino,
+        mode,
     }
 }
 
@@ -1237,6 +1251,9 @@ def _impl(ctx):
         fail("a hard link is another file")
     if (a.dev, a.ino) == (b.dev, b.ino):
         fail("two files are one")
+    fs.set_permissions({b}, 0o640)
+    if fs.metadata({b}).mode != 0o640:
+        fail("mode: got %o" % fs.metadata({b}).mode)
     return 0
 
 Test = task(implementation = _impl)

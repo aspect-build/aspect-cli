@@ -298,6 +298,18 @@ def _creates(f: _File) -> bool:
     isn't there."""
     return f.old == None or (len(f.section.hunks) > 0 and all([h.old_count == 0 for h in f.section.hunks]))
 
+def _copy_in(fs, src: str, dst: str) -> None:
+    """Copy `src`'s bytes and mode to a new `dst`, and nothing else: a flag
+    like macOS's `uchg` that a clone would carry stays behind, so the copy
+    can be patched and removed."""
+    data = fs.open(src).read()
+    out = fs.create(dst)
+    out.write(data)
+    out.close()
+    mode = fs.metadata(src).mode
+    if mode != None:
+        fs.set_permissions(dst, mode)
+
 def _move_in(fs, src: str, tmp: str, dst: str) -> None:
     """Copy `src` to `tmp` and rename that onto `dst`."""
     fs.copy(src, tmp)
@@ -382,10 +394,12 @@ def apply_fix_patch(
       written over: the same bytes count as applied, other bytes are a
       reject.
     - A fix to a file that isn't there is named in an INFO line.
-    - A result is renamed into place, so a symlink in the tree stays one, a
-      hard link to a file elsewhere is broken off, and a read-only file is
-      fixed as patch fixes it, its mode kept. One that can't be written or
-      removed is named in a WARNING, and the rest still are.
+    - Files are copied in by their bytes and mode alone, so a flag like
+      macOS's `uchg` never reaches a copy. A result is renamed into place,
+      so a symlink in the tree stays one, a hard link to a file elsewhere is
+      broken off, and a read-only file is fixed as patch fixes it, its mode
+      kept. One that can't be written or removed is named in a WARNING, and
+      the rest still are.
     - Rejects for hunks that failed are kept in a directory an INFO line
       names. The copies go when the task ends, however it ends.
     - For a test to stand in for them: `program` is the `patch` run, `say`
@@ -462,7 +476,7 @@ def apply_fix_patch(
         if path in made:
             err, _ = catch(lambda: fs.open(cwd + "/" + path).read(), types = [std.io.Error])
         else:
-            err, _ = catch(fs.copy, cwd + "/" + path, work + "/" + path, types = [std.io.Error])
+            err, _ = catch(_copy_in, fs, cwd + "/" + path, work + "/" + path, types = [std.io.Error])
             had[path] = True
         if err != None:
             return refuse("%s can't be read: %s" % (ascii_escaped(path), err.message))
