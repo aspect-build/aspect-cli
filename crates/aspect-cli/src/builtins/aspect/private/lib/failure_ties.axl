@@ -301,9 +301,10 @@ def console_ties(state: dict) -> dict:
     Each of Bazel's `ERROR:` lines (`_bazel_headers`) is given to at most
     one entry and never one of several that match: the actions' ties
     (`_tie_actions`), the targets' (`_tie_targets`), then the lines that
-    repeat an entry (`_claim_restated`) or name one as what failed
-    (`_claim_named_failures`); every other one but Bazel's boilerplate is
-    among `others` (`_other_errors`).
+    repeat an entry (`_claim_restated`), name one as what failed
+    (`_claim_named_failures`) or restate a `Traceback` listed or quoted
+    already (`_claim_restated_tracebacks`); every other one but Bazel's
+    boilerplate is among `others` (`_other_errors`).
 
     Returns `{actions, targets, others, not_kept}`: each tie by record
     index and by label, Bazel's other errors, and the bytes of Bazel's
@@ -344,13 +345,14 @@ def console_ties(state: dict) -> dict:
     # escapes from what it relays too: the collector says which it saw.
     plain = not kept.get("color")
     _absorb_tails(state, text, bounds, froms, spans, stdout, plain)
-    headers = [h for h in _bazel_headers(state, blocks, bounds, text) if not [sp for sp in spans if sp[0] <= h["start"] and h["start"] < sp[1]]]
+    headers = [h for h in _bazel_headers(state, blocks, bounds, text) if not _in_spans(h, spans)]
     claimed = {}
     by = _index_headers(headers)
     result["actions"] = _tie_actions(state, text, headers, by, claimed, spans, tails, stdout, plain)
     result["targets"] = _tie_targets(state, headers, by, claimed)
     _claim_restated(state, result["targets"], headers, claimed)
     _claim_named_failures(state, headers, by, claimed)
+    _claim_restated_tracebacks(state, headers, claimed, spans)
     result["others"] = _other_errors(state, headers, claimed, spans)
     state["ties_cache"] = (key, result)
     return result
@@ -579,6 +581,41 @@ def _claim_named_failures(state: dict, headers: list, by: dict, claimed: dict):
             if h["message"].startswith(_BAZEL.analysis_of % label) and h["message"].endswith(" failed"):
                 claimed[k] = True
 
+def _in_spans(header: dict, spans: list) -> bool:
+    """Whether a header starts inside a tool's output (`spans`)."""
+    return any([s[0] <= header["start"] and header["start"] < s[1] for s in spans])
+
+def _has_run(lines: list, run: list) -> bool:
+    """Whether `run` is a run of consecutive lines of `lines`."""
+    for i in range(len(lines) - len(run) + 1):
+        if lines[i:i + len(run)] == run:
+            return True
+    return False
+
+def _claim_restated_tracebacks(state: dict, headers: list, claimed: dict, spans: list):
+    """Claim Bazel's `package contains errors: <pkg>: <text>` where
+    `<text>` is the first line of a `Traceback` block listed already (an
+    `ERROR: Traceback` no tie claimed, the same lines after it) or quoted
+    (a target of `<pkg>` whose description has those lines): Bazel saying
+    again which error loading `<pkg>` hit."""
+    listed = {}
+    for k, h in enumerate(headers):
+        if h["message"] == _BAZEL.traceback and k not in claimed and not h["boilerplate"] and not _in_spans(h, spans):
+            listed[tuple(h["body"])] = True
+    quoted = {}
+    for rec in state["fails"]:
+        if rec["kind"] == "target" and rec.get("description"):
+            pkg = rec["label"].partition("//")[2].partition(":")[0]
+            quoted.setdefault(pkg, []).append(rec["description"].split("\n"))
+    for k, h in enumerate(headers):
+        if k in claimed or not h["message"].startswith(_BAZEL.package_errors):
+            continue
+        pkg, _, rest = h["message"][len(_BAZEL.package_errors):].partition(": ")
+        if rest != _BAZEL.traceback:
+            continue
+        if tuple(h["body"]) in listed or any([_has_run(lines, [rest] + h["body"]) for lines in quoted.get(pkg, [])]):
+            claimed[k] = True
+
 def _other_errors(state: dict, headers: list, claimed: dict, spans: list) -> list:
     """Bazel's `ERROR:` blocks no tie claimed (`console_ties`), in its
     order, each once: `{"lines": [...]}`, its line then the lines Bazel
@@ -589,7 +626,7 @@ def _other_errors(state: dict, headers: list, claimed: dict, spans: list) -> lis
     out = []
     seen = {}
     for k, h in enumerate(headers):
-        if k in claimed or h["boilerplate"] or [s for s in spans if s[0] <= h["start"] and h["start"] < s[1]]:
+        if k in claimed or h["boilerplate"] or _in_spans(h, spans):
             continue
         lines = [h["plain"]] + h["body"]
         if workspace:

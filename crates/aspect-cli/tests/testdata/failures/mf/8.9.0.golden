@@ -11,12 +11,6 @@ ERROR: Traceback (most recent call last):
   │ …
   │ Error in fail: bad_macro refuses m
   │ … 2 more lines
-ERROR: package contains errors: mf: Traceback (most recent call last):
-  │         File "mf/BUILD.bazel", line 2, column 10, in <toplevel>
-  │                 bad_macro(name = "m")
-  │ …
-  │ Error in fail: bad_macro refuses m
-  │ … 2 more lines
 0 built, 1 failed, 1 blocked · 0 tests passed, 0 failed · Bazel's raw log: ${FIXTURE}/8.9.0.console
 All of it: aspect history show t-replay
 --- Failures tab
@@ -24,4 +18,3 @@ All of it: aspect history show t-replay
   │ no such target '//mf:x': target 'x' not declared in package 'mf' defined by mf/BUILD.bazel
 ○ //q:on_mf  blocked by //mf:x
 ! Traceback (most recent call last):
-! package contains errors: mf: Traceback (most recent call last):

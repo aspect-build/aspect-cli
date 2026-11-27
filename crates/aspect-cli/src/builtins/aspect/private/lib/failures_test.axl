@@ -125,6 +125,24 @@ def _test_package_errors_claim(ctx):
     state = _ended(ctx, [_aborted("configured_label", "//a:b", "")], _error("package contains errors: c: something else"))
     _eq("another package's is Bazel's other error", [o["lines"][0] for o in failure_ties.console_ties(state)["others"]], ["package contains errors: c: something else"])
 
+def _test_restated_traceback(ctx):
+    # A Starlark error loading a package is a `Traceback` block, then Bazel's
+    # `package contains errors: <pkg>: ` with the same lines: listed once.
+    # With other lines after it, it is another error; quoted by an entry of
+    # that package, it is that entry's.
+    body = "\tFile \"/ws/mf/BUILD.bazel\", line 2, column 10, in <toplevel>\n\t\tbad_macro(name = \"m\")\nError in fail: bad_macro refuses m\n"
+    traceback = "Traceback (most recent call last):"
+    restated = _error("package contains errors: mf: " + traceback) + body
+    state = _ended(ctx, [], _error(traceback) + body + restated)
+    _eq("restated: listed once", [o["lines"][0] for o in failure_ties.console_ties(state)["others"]], [traceback])
+    state = _ended(ctx, [], _error(traceback) + body.replace("refuses m", "refuses n") + restated)
+    _eq("another traceback: both listed", [o["lines"][0] for o in failure_ties.console_ties(state)["others"]], [traceback, "package contains errors: mf: " + traceback])
+    description = traceback + "\n" + body.rstrip("\n")
+    state = _ended(ctx, [_aborted("configured_label", "//mf:m", description)], restated)
+    _eq("quoted by its package's entry: no other error", failure_ties.console_ties(state)["others"], [])
+    state = _ended(ctx, [_aborted("configured_label", "//other:m", description)], restated)
+    _eq("quoted by another package's: listed", len(failure_ties.console_ties(state)["others"]), 1)
+
 def _test_an_unclaimed_error_is_listed(ctx):
     # A BUILD file's error, which no event has: under Other errors, a
     # passing build's too.
@@ -299,6 +317,7 @@ def _impl(ctx: TaskContext) -> int:
     _test_label_prefix(ctx)
     _test_missing_source(ctx)
     _test_package_errors_claim(ctx)
+    _test_restated_traceback(ctx)
     _test_an_unclaimed_error_is_listed(ctx)
     _test_timestamps(ctx)
     _test_relay_cap(ctx)
