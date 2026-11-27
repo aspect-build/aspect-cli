@@ -8,7 +8,7 @@ Golden frames of `render` are in crates/aspect-cli/tests/testdata/dashboard;
 `aspect dev test-dashboard --update` writes them anew.
 """
 
-load("@aspect//feature/dashboard.axl", "ANSI", "CONTROLS", "KEYS", "action_bar", "action_counts", "action_parts", "action_results", "action_row", "action_rows", "action_seconds", "action_split", "actions_text", "add_lines", "aged_time", "analysing", "attempt_state", "bazel_line", "bep_progress", "blocked_targets", "blocked_text", "bounded_log", "build_progress", "build_row", "built", "cache_hits", "cache_kinds", "classify", "console_height", "console_lines", "copy_text", "count_aborted", "count_aborted_test", "count_event", "count_spawn", "crumbs", "cut_text", "elapsed", "end_build", "excerpt_rows", "failure_detail", "failure_of", "failure_rows", "failure_summary", "fit", "fit_logs", "fold_build", "has_capital", "help_rows", "highlightable", "hit_count", "hit_percent", "invocation_lines", "keys_line", "keys_row", "link", "link_at", "link_marks", "link_span_at", "link_spans", "links_row", "listed_failures", "local_test_logs", "log_view", "mark_cells", "metrics_lines", "new_build", "new_counts", "new_search", "note_blocked", "note_event", "note_log_file", "note_phase", "note_progress", "note_spawn_time", "on_key", "open_in_editor", "open_link", "open_peek", "opens", "output_of", "own_execution_log", "panes_shown", "paste_text", "phase_status", "picked_build", "progress_counts", "quoted_rows", "refusal", "render", "repaired", "replay_lines", "report_lines", "results_capacity", "running_actions", "say_note", "scrollbar", "scrolled_rows", "severity", "shares", "short_count", "shown_by", "shown_lines", "shown_tips", "slowest_rows", "slowest_title", "status_row", "step_match", "summary_counts", "summary_state", "target_rows", "test_group", "test_progress", "tests_cached_text", "tests_text", "text_width", "tips_count", "tips_lines", "tips_role", "wrap_line")
+load("@aspect//feature/dashboard.axl", "ANSI", "CONTROLS", "KEYS", "action_bar", "action_counts", "action_parts", "action_results", "action_row", "action_rows", "action_seconds", "action_split", "actions_text", "add_lines", "aged_time", "analysing", "attempt_state", "bazel_line", "bep_progress", "blocked_targets", "blocked_text", "bounded_log", "build_progress", "build_row", "built", "cache_hits", "cache_kinds", "classify", "console_height", "console_lines", "copy_text", "count_aborted", "count_aborted_test", "count_event", "count_spawn", "crumbs", "cut_text", "elapsed", "end_build", "excerpt_rows", "failure_detail", "failure_of", "failure_rows", "failure_summary", "fit", "fit_logs", "fold_build", "has_capital", "help_rows", "highlightable", "hit_count", "hit_percent", "invocation_lines", "keys_line", "keys_row", "link", "link_at", "link_marks", "link_span_at", "link_spans", "links_row", "listed_failures", "local_test_logs", "log_view", "mark_cells", "metrics_lines", "new_build", "new_counts", "new_search", "note_blocked", "note_event", "note_log_file", "note_phase", "note_progress", "note_spawn_time", "on_key", "open_in_editor", "open_link", "open_peek", "opens", "output_of", "own_execution_log", "panes_shown", "paste_text", "phase_status", "picked_build", "progress_counts", "quoted_rows", "refresh_test_view", "refusal", "render", "repaired", "replay_lines", "report_lines", "results_capacity", "running_actions", "say_note", "scrollbar", "scrolled_rows", "severity", "shares", "short_count", "shown_by", "shown_lines", "shown_tips", "slowest_rows", "slowest_title", "status_row", "step_match", "summary_counts", "summary_state", "target_rows", "test_group", "test_progress", "tests_cached_text", "tests_text", "text_width", "tips_count", "tips_lines", "tips_role", "wrap_line")
 load("@std//theme.axl", "theme")
 load("../private/lib/results_pages.axl", "ASPECT_PAGE", "BES_PAGE", "bes_results_url", "results_page", "results_pages")
 
@@ -1299,10 +1299,12 @@ def _impl(ctx: TaskContext) -> int:
     note_event(noted, "test_result", struct(label = "//t:t", run = 1, shard = 1, attempt = 2, configuration = cfg), struct(status = "passed"), False)
     noted["view"] = log_view(noted, noted["fails"][0])
     note_event(noted, "test_summary", struct(label = "//t:t", configuration = cfg), struct(), True)
+    refresh_test_view(noted, struct(kind = "test_summary", id = struct(label = "//t:t", configuration = cfg), payload = struct(), payload_kind = "aborted"))
     _eq("an aborted summary counts nothing", noted["test_counts"], {})
     noted["scroll"] = 5
     noted["search"]["back"] = 0
     note_event(noted, "test_summary", struct(label = "//t:t", configuration = cfg), struct(run_count = 1, shard_count = 1), False)
+    refresh_test_view(noted, struct(kind = "test_summary", id = struct(label = "//t:t", configuration = cfg), payload = struct(run_count = 1, shard_count = 1)))
     _eq("a real one shows the open log anew", noted["view"]["lines"], ["attempt one"])
     _eq("from its end, no current match", (noted["scroll"], noted["search"]["back"]), (0, -1))
     note_event(noted, "test_result", struct(label = "//t:t", run = 3, shard = 2, attempt = 1, configuration = cfg), struct(status = "passed"), False)
@@ -1318,6 +1320,7 @@ def _impl(ctx: TaskContext) -> int:
     other = log_view(noted, act)
     noted["view"] = other
     note_event(noted, "test_summary", struct(label = "//t:t", configuration = cfg), struct(run_count = 1, shard_count = 1), False)
+    refresh_test_view(noted, struct(kind = "test_summary", id = struct(label = "//t:t", configuration = cfg), payload = struct(run_count = 1, shard_count = 1)))
     _eq("another failure's open view is left alone", noted["view"] == other, True)
     fails_before = len(noted["fails"])
     note_event(noted, "test_result", struct(label = "//t:t", run = 1, shard = 1, attempt = 9, configuration = cfg), struct(), True)
@@ -2862,6 +2865,7 @@ def _impl(ctx: TaskContext) -> int:
     peeked = _screen(ctx, ["x"])
     peeked["view"] = {"title": "a.py:1", "lines": ["x"], "cut": False, "record": None, "peek": True}
     note_event(peeked, "test_summary", struct(label = "//t:a", configuration = None), struct(run_count = 1, shard_count = 0), False)
+    refresh_test_view(peeked, struct(kind = "test_summary", id = struct(label = "//t:a", configuration = None), payload = struct(run_count = 1, shard_count = 0)))
     status = _screen(ctx, ["x"], inv = {"workspace_status": struct(item = [struct(key = "STABLE_API_TOKEN", value = "tok-123")])})
     _eq("a status value under a secret's name", "tok-123" in "\n".join([_visible(l) for l in invocation_lines(status)]), False)
     _eq("a minified line is left plain", highlightable(["x" * 5000]), False)

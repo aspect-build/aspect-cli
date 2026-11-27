@@ -1022,6 +1022,19 @@ def log_view(state: dict, record: dict) -> dict:
         lines.append("(Bazel reported no log for it)")
     return {"title": record["label"] + " · " + failure_detail(state, record), "lines": lines, "cut": cut, "record": record}
 
+def refresh_test_view(state: dict, event):
+    """A test's summary arriving (not Aborted, as `collect_event` reads it)
+    shows the test's open log anew, now findable, from its end."""
+    if event.kind != "test_summary" or (_get(event, "payload_kind") or type(_get(event, "payload"))) == "aborted":
+        return
+    event_id = _get(event, "id")
+    key = (repaired(str(_get(event_id, "label", "") or "")), str(_get(_get(event_id, "configuration", None), "id", "") or ""))
+    view = state["view"]
+    if view != None and view.get("record") != None and view["record"]["kind"] == "test" and (view["record"]["label"], view["record"]["config"]) == key:
+        state["view"] = log_view(state, view["record"])
+        state["scroll"] = 0
+        state["search"]["back"] = -1
+
 def failure_detail(state: dict, record: dict, flaky_note: bool = True) -> str:
     """What tells a failure apart from others of its label: an action's
     mnemonic; a test attempt's number, after its shard and run when the
@@ -1161,8 +1174,7 @@ def note_event(state: dict, kind: str, event_id, payload, aborted: bool):
     run and shard counts, each run and shard's last attempt, and the most
     runs and shards it has been seen to have, `spread`). A summary
     the build announced but did not get to (`aborted`, an interrupt) has no
-    counts. A test's summary arriving shows its open log anew, now
-    findable, from its end. An Aborted event of a root cause is a target's
+    counts. An Aborted event of a root cause is a target's
     failure record (`kind` `target`), once per label, its `description`
     Bazel's (decoded, `repaired`): one that failed analysis (a
     `configured_label`, or a target's own with a description) or loading
@@ -1206,11 +1218,6 @@ def note_event(state: dict, kind: str, event_id, payload, aborted: bool):
     elif kind == "test_summary":
         key = (repaired(str(_get(event_id, "label", "") or "")), str(_get(_get(event_id, "configuration", None), "id", "") or ""))
         state["test_counts"][key] = (_get(payload, "run_count", 0) or 0, _get(payload, "shard_count", 0) or 0)
-        view = state["view"]
-        if view != None and view.get("record") != None and view["record"]["kind"] == "test" and (view["record"]["label"], view["record"]["config"]) == key:
-            state["view"] = log_view(state, view["record"])
-            state["scroll"] = 0
-            state["search"]["back"] = -1
     elif kind == "test_result":
         key = (
             repaired(str(_get(event_id, "label", "") or "")),
@@ -7552,6 +7559,7 @@ def _dashboard_impl(ctx: FeatureContext):
         elif kind == "options_parsed":
             state["bes_base"] = bes_results_url(event) or state["bes_base"]
         collect_event(state, event)
+        refresh_test_view(state, event)
 
     def _update(task_ctx, update):
         if update.data:
