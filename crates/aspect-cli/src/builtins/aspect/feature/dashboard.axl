@@ -6024,9 +6024,10 @@ def _failed_action(header: str) -> str:
 
 def error_parts(header: str):
     """`(location, exit, reason)` of a Bazel `ERROR:` line: its
-    `path:line:col`, `exit N` for a failed command's `(Exit N)` or the
-    signal's word for one a signal ended (`(Killed)` gives `killed`,
-    `(Segmentation fault)` `segmentation fault`), and what else it says
+    `path:line:col`, `exit N` for a failed command's `(Exit N)` or, for
+    one a signal ended, Bazel's name of it in lower case (`(Killed)`
+    gives `killed`, `(Trace/breakpoint trap)` `trace/breakpoint trap`,
+    `(Signal 24)` `signal 24`), and what else it says
     failed (`missing input file '//a:b'`), each "" for none."""
     text = header[len("ERROR: "):] if header.startswith("ERROR: ") else header
     location = ""
@@ -6039,7 +6040,7 @@ def error_parts(header: str):
     said, failed, why = text.partition(" failed: ")
     if why.startswith("(Exit "):
         exit = "exit " + why[len("(Exit "):].partition(")")[0]
-    elif why.startswith("(") and why.partition(")")[0][1:].replace(" ", "").isalpha():
+    elif why.startswith("(") and why[1:2].isupper() and "(" not in why.partition(")")[0][1:]:
         exit = why.partition(")")[0][1:].lower()
     reason = ""
     if failed:

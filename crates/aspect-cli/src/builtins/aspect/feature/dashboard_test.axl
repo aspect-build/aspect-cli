@@ -2427,7 +2427,7 @@ def _impl(ctx: TaskContext) -> int:
     killed = [{"header": "ERROR: f/BUILD.bazel:3:8: Executing genrule //f:killed failed: (Killed)", "body": ["about to die"], "log": None, "label": None, "target": "//f:killed"}]
     got, _ = _entries([_act("//f:killed", "Genrule", "bazel-out/f/killed.txt", 137)], killed, {}, {})
     _eq("killed", (got[0][0], got[0][1]), ("✗ //f:killed  Genrule · killed · f/BUILD.bazel:3:8", ["about to die"]))
-    _eq("a signal's words", [error_parts("ERROR: f/BUILD.bazel:4:8: Executing genrule //f:segv failed: (Segmentation fault)")[1], error_parts("ERROR: x/BUILD:1:1: Linking x failed: (Aborted)")[1]], ["segmentation fault", "aborted"])
+    _eq("a signal's words, as Bazel names them (ws/sig, Bazel 7.7.3 and 9.3.3)", [error_parts("ERROR: sig/BUILD.bazel:1:9: Executing genrule //sig:s failed: (%s)" % name)[1:] for name in ["Segmentation fault", "Aborted", "Trace/breakpoint trap", "User defined signal 1", "CPU time limit exceeded", "Power failure", "Bad system call", "Signal 24"]], [(n, "") for n in ["segmentation fault", "aborted", "trace/breakpoint trap", "user defined signal 1", "cpu time limit exceeded", "power failure", "bad system call", "signal 24"]])
 
     # ws4/cc4:ph (rules_cc 0.2.25, Bazel 9.3.3, parse_headers): a.cc
     # includes a.h, so a.h's error is in a.cc's log too; b.cc fails alone.
