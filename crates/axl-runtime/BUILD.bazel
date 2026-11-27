@@ -55,6 +55,7 @@ rust_library(
         "@crates//:prost",
         "@crates//:rand",
         "@crates//:regex",
+        "@crates//:regex-syntax",
         "@crates//:reqwest",
         "@crates//:rmcp",
         "@crates//:rustls",

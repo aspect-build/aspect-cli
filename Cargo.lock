@@ -398,6 +398,7 @@ dependencies = [
  "rand 0.8.5",
  "rcgen",
  "regex",
+ "regex-syntax",
  "reqwest",
  "rmcp",
  "rustls",

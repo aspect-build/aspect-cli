@@ -69,6 +69,47 @@ fn message(e: &regex::Error) -> String {
         .unwrap_or(text)
 }
 
+/// [`re_methods`]' `has_uppercase`: an uppercase literal written as itself
+/// in `pattern`'s syntax tree (regex-syntax's, which the `regex` crate
+/// compiles), else, for a pattern that does not parse, any uppercase
+/// character.
+fn has_uppercase(pattern: &str) -> bool {
+    use regex_syntax::ast::{self, Ast, ClassSet, ClassSetItem};
+    fn own(l: &ast::Literal) -> bool {
+        l.kind == ast::LiteralKind::Verbatim && l.c.is_uppercase()
+    }
+    fn item(i: &ClassSetItem) -> bool {
+        match i {
+            ClassSetItem::Literal(l) => own(l),
+            ClassSetItem::Range(r) => own(&r.start) || own(&r.end),
+            ClassSetItem::Bracketed(b) => set(&b.kind),
+            ClassSetItem::Union(u) => u.items.iter().any(item),
+            _ => false,
+        }
+    }
+    fn set(s: &ClassSet) -> bool {
+        match s {
+            ClassSet::Item(i) => item(i),
+            ClassSet::BinaryOp(op) => set(&op.lhs) || set(&op.rhs),
+        }
+    }
+    fn tree(a: &Ast) -> bool {
+        match a {
+            Ast::Literal(l) => own(l),
+            Ast::ClassBracketed(c) => set(&c.kind),
+            Ast::Repetition(r) => tree(&r.ast),
+            Ast::Group(g) => tree(&g.ast),
+            Ast::Alternation(alt) => alt.asts.iter().any(tree),
+            Ast::Concat(c) => c.asts.iter().any(tree),
+            _ => false,
+        }
+    }
+    match ast::parse::Parser::new().parse(pattern) {
+        Ok(parsed) => tree(&parsed),
+        Err(_) => pattern.chars().any(char::is_uppercase),
+    }
+}
+
 #[starlark_module]
 fn re_methods(registry: &mut MethodsBuilder) {
     /// Compile `pattern` (Rust `regex` syntax). Case-insensitive unless
@@ -88,6 +129,20 @@ fn re_methods(registry: &mut MethodsBuilder) {
             case_sensitive,
             whole_word,
         })
+    }
+
+    /// Whether `pattern` has an uppercase letter of its own, as ripgrep's
+    /// smart case reads one: a literal character written as itself, in a
+    /// class or out (`Fail`, `[A-Z]`), not one an escape spells (`\x4A`,
+    /// `\u{00C9}`), nor a letter naming an escape (`\W`, `\pL`,
+    /// `\p{Lu}`), a flag (`(?U)`) or a group (`(?P<Name>…)`). A search
+    /// that matches case only then. A pattern that does not parse, one
+    /// still being typed, has one when any of its characters is uppercase.
+    fn has_uppercase<'v>(
+        #[allow(unused)] this: values::Value<'v>,
+        #[starlark(require = pos)] pattern: &str,
+    ) -> anyhow::Result<bool> {
+        Ok(has_uppercase(pattern))
     }
 
     /// What is wrong with `pattern` under the same options as `compile`,
@@ -231,6 +286,73 @@ mod tests {
     fn validity_depends_on_the_options() {
         assert!(compile_regex("(?x)a # c", true, false).is_ok());
         assert!(compile_regex("(?x)a # c", true, true).is_err());
+    }
+
+    /// Smart case: an uppercase letter of the pattern's own, not one an
+    /// escape, a flag or a group's name holds.
+    #[test]
+    fn an_uppercase_letter_of_its_own() {
+        for (pattern, want) in [
+            ("fail", false),
+            ("Fail", true),
+            (r"a\Wb", false),
+            (r"\pL", false),
+            (r"\p{Lu}x", false),
+            ("(?P<Name>a)", false),
+            ("(?<N>a)", false),
+            (r"\w C", true),
+            ("é", false),
+            ("É", true),
+            (r"\x4A", false),
+            (r"\x{1F}", false),
+            (r"\u{00C9}x", false),
+            (r"\U0001F600", false),
+            ("(?U)a", false),
+            ("(?iR:a)", false),
+            (r"\x4AB", true),
+            ("(?i)A", true),
+            (r"\(?User", true),
+            ("[A-Z]", true),
+            ("[a-z&&[^Q]]", true),
+            ("(?x)a # Comment", false),
+            ("Fai(", true),
+            ("fai(", false),
+        ] {
+            assert_eq!(has_uppercase(pattern), want, "{pattern:?}");
+        }
+    }
+
+    /// `search`, `filter` and `highlight` through `ctx.std.re`, with the
+    /// options as `compile` takes them.
+    #[test]
+    fn search_filter_and_highlight() {
+        let script = r#"
+def _impl(ctx):
+    re = ctx.std.re
+    p = re.compile("err(or)?")
+    if not p.search("an error here") or p.search("ERROR"):
+        fail("search: case-sensitive by default")
+    if not re.compile("err", case_sensitive = False).search("ERROR"):
+        fail("search: case-insensitive")
+    if re.compile("fail", whole_word = True).search("failed"):
+        fail("search: a whole word")
+    lines = ["ok", "error: a", "err b", "ok err"]
+    if p.filter(lines) != ["error: a", "err b", "ok err"]:
+        fail("filter: %r" % p.filter(lines))
+    if p.filter([]) != []:
+        fail("filter: none")
+    if p.highlight("an error, an err", "[", "]") != "an [error], an [err]":
+        fail("highlight: %r" % p.highlight("an error, an err", "[", "]"))
+    if re.compile("x*").highlight("axb", "<", ">") != "a<x>b":
+        fail("highlight: an empty match is left")
+    if not re.has_uppercase("Fail") or re.has_uppercase(r"\W"):
+        fail("has_uppercase")
+    return 0
+
+Test = task(implementation = _impl)
+"#;
+        let exit = crate::test::eval(script).run_task(0).expect("run_task");
+        assert_eq!(exit, Some(0));
     }
 
     #[test]
