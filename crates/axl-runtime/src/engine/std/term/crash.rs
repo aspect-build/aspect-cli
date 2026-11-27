@@ -1,12 +1,13 @@
 use std::os::fd::RawFd;
 use std::sync::Once;
 use std::sync::atomic::Ordering;
+use std::time::Instant;
 
 use nix::sys::termios::Termios;
 
 use super::capture::Order;
 use super::replies::wheel_restore;
-use super::{HELD, LEAVE, release};
+use super::{HELD, LEAVE, lock_until, release};
 
 /// What a crash handler needs to give the terminal back, without allocating
 /// or locking: set while a screen is held. One for the process, its three
@@ -120,13 +121,14 @@ pub(super) fn install_panic_hook() {
         std::panic::set_hook(Box::new(move |info| {
             // Only where a panic ends the process: an unwinding one may not
             // (a task's thread, a tokio task), and the build goes on. The
-            // panicking thread may hold the lock, so it is not waited on.
+            // panicking thread may hold the lock, so it is tried once, not
+            // waited on.
             if cfg!(panic = "abort") {
-                match HELD.try_lock() {
-                    Ok(mut held) => {
+                match lock_until(&HELD, Instant::now()) {
+                    Some(mut held) => {
                         let _ = release(held.take(), true, None, &mut Order::none());
                     }
-                    Err(_) => restore_terminal_after_crash(),
+                    None => restore_terminal_after_crash(),
                 }
             }
             previous(info);

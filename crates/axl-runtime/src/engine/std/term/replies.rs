@@ -2,11 +2,11 @@ use std::fs::File;
 use std::io::{Read, Write};
 use std::os::fd::AsRawFd;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use nix::sys::termios;
 
-use super::fd::{select_one, tty_readable};
+use super::fd::tty_readable;
 use super::keys::{Keys, find};
 
 /// How long the screen waits for the terminal to say its background.
@@ -56,23 +56,12 @@ pub(super) fn query_background(tty: &mut File, wait: Duration) -> (Option<bool>,
     {
         return (None, vec![]);
     }
-    let deadline = std::time::Instant::now() + wait;
     let mut got = vec![];
-    let mut buf = [0u8; 256];
     ANSWER_DUE.store(true, Ordering::SeqCst);
-    loop {
-        if da1_reply(&got).is_some() {
-            ANSWER_DUE.store(false, Ordering::SeqCst);
-            break;
-        }
-        let left = deadline.saturating_duration_since(std::time::Instant::now());
-        if left.is_zero() || select_one(tty.as_raw_fd(), left, false) != Some(true) {
-            break;
-        }
-        match std::io::Read::read(tty, &mut buf) {
-            Ok(0) | Err(_) => break,
-            Ok(n) => got.extend_from_slice(&buf[..n]),
-        }
+    if read_until(tty, &mut got, Instant::now() + wait, |got| {
+        da1_reply(got).is_some()
+    }) {
+        ANSWER_DUE.store(false, Ordering::SeqCst);
     }
     let mut rest = got.clone();
     let dark = osc11_reply(&got).and_then(|(range, dark)| {
@@ -97,23 +86,14 @@ pub(super) static ANSWER_DUE: AtomicBool = AtomicBool::new(false);
 /// child never gets them as typed input; then drop what else is unread,
 /// keys typed for the screen.
 pub(super) fn drop_answers_due(tty: &mut File) {
-    let deadline = std::time::Instant::now() + BACKGROUND_WAIT;
     let mut got = vec![];
-    let mut buf = [0u8; 256];
     let due = |got: &[u8]| {
         (ANSWER_DUE.load(Ordering::SeqCst) && da1_reply(got).is_none())
             || (WHEEL.load(Ordering::SeqCst) == WHEEL_ASKED && find(got, DECRQM_END).is_none())
     };
-    while due(&got) {
-        let left = deadline.saturating_duration_since(std::time::Instant::now());
-        if left.is_zero() || select_one(tty.as_raw_fd(), left, false) != Some(true) {
-            break;
-        }
-        match std::io::Read::read(tty, &mut buf) {
-            Ok(0) | Err(_) => break,
-            Ok(n) => got.extend_from_slice(&buf[..n]),
-        }
-    }
+    read_until(tty, &mut got, Instant::now() + BACKGROUND_WAIT, |got| {
+        !due(got)
+    });
     if da1_reply(&got).is_some() {
         ANSWER_DUE.store(false, Ordering::SeqCst);
     }
@@ -188,27 +168,46 @@ pub(super) fn wheel_restore() -> &'static [u8] {
 pub(super) fn alternate_scroll(tty: &mut File, keys: &mut Keys) -> Option<bool> {
     tty.write_all(WHEEL_QUERY).ok()?;
     tty.flush().ok()?;
-    let deadline = std::time::Instant::now() + WHEEL_QUERY_WAIT;
     let from = keys.pending.len();
+    // Some(the state) once an answer has come, None until then.
+    let answer = |pending: &[u8]| {
+        let at = find(pending, WHEEL_REPLY)?;
+        let rest = &pending[at + WHEEL_REPLY.len()..];
+        let end = find(rest, DECRQM_END)?;
+        Some(match &rest[..end] {
+            b"1" | b"3" => Some(true),
+            b"2" | b"4" => Some(false),
+            _ => None,
+        })
+    };
+    let deadline = Instant::now() + WHEEL_QUERY_WAIT;
+    read_until(tty, &mut keys.pending, deadline, |pending| {
+        answer(&pending[from..]).is_some()
+    });
+    answer(&keys.pending[from..]).flatten()
+}
+
+/// Read what the terminal sends into `got` until `done(got)` holds, or
+/// `deadline` passes, or a read ends (the terminal closed, an error): for
+/// the answers to the screen's queries. Whether `done` held.
+fn read_until(
+    tty: &mut File,
+    got: &mut Vec<u8>,
+    deadline: Instant,
+    done: impl Fn(&[u8]) -> bool,
+) -> bool {
+    let mut buf = [0u8; 256];
     loop {
-        if let Some(at) = find(&keys.pending[from..], WHEEL_REPLY) {
-            let rest = &keys.pending[from + at + WHEEL_REPLY.len()..];
-            if let Some(end) = find(rest, DECRQM_END) {
-                return match &rest[..end] {
-                    b"1" | b"3" => Some(true),
-                    b"2" | b"4" => Some(false),
-                    _ => None,
-                };
-            }
+        if done(got) {
+            return true;
         }
-        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        let left = deadline.saturating_duration_since(Instant::now());
         if left.is_zero() || !tty_readable(tty.as_raw_fd(), left) {
-            return None;
+            return false;
         }
-        let mut buf = [0u8; 256];
         match tty.read(&mut buf) {
-            Ok(n) if n > 0 => keys.pending.extend_from_slice(&buf[..n]),
-            _ => return None,
+            Ok(0) | Err(_) => return false,
+            Ok(n) => got.extend_from_slice(&buf[..n]),
         }
     }
 }
@@ -311,6 +310,32 @@ mod tests {
             "ended by the DA1 answer"
         );
         drop(answer.join());
+    }
+
+    /// The alternate scroll query's answer, after a key typed meanwhile: the
+    /// state it says, all of what came kept for the keys. With no answer,
+    /// unknown once the wait is out.
+    #[test]
+    fn the_alternate_scroll_is_read_from_its_answer() {
+        let pty = private_pty();
+        let mut master = File::from(pty.master);
+        let mut tty = File::from(pty.slave);
+        let mut raw = termios::tcgetattr(&tty).unwrap();
+        termios::cfmakeraw(&mut raw);
+        termios::tcsetattr(&tty, SetArg::TCSANOW, &raw).unwrap();
+        let answer = std::thread::spawn(move || {
+            let mut asked = [0u8; 64];
+            let _ = std::io::Read::read(&mut master, &mut asked);
+            master.write_all(b"q\x1b[?1007;2$y").unwrap();
+            master
+        });
+        let mut keys = Keys::default();
+        assert_eq!(alternate_scroll(&mut tty, &mut keys), Some(false));
+        assert_eq!(keys.pending, b"q\x1b[?1007;2$y");
+        let _master = answer.join().unwrap();
+        let mut keys = Keys::default();
+        assert_eq!(alternate_scroll(&mut tty, &mut keys), None, "no answer");
+        assert!(keys.pending.is_empty());
     }
 
     /// The alternate scroll answer, come late among the keys, is taken for

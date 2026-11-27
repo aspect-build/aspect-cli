@@ -38,8 +38,8 @@ use std::fs::File;
 use std::io::Write;
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, Once};
-use std::time::Duration;
+use std::sync::{Arc, Mutex, MutexGuard, Once, TryLockError};
+use std::time::{Duration, Instant};
 
 use allocative::Allocative;
 use bazel::console::feed::{Drained, Feed, Source};
@@ -53,8 +53,8 @@ use starlark::values::none::{NoneOr, NoneType};
 use starlark::values::{self, NoSerialize, ProvidesStaticType, ValueLike, starlark_value};
 
 use capture::{
-    LOCK_RETRY, MAX_CAPTURED_BYTES, OUTPUT_ORDER, Order, Redirect, SINK, SWITCH_WAIT,
-    give_back_descriptors, lock_until, mark_captured, same_file, set_sink,
+    MAX_CAPTURED_BYTES, Order, Redirect, SINK, SWITCH_WAIT, give_back_descriptors, mark_captured,
+    same_file, set_sink,
 };
 use crash::{CRASH, install_panic_hook, remember_for_crash};
 use dump::{
@@ -76,6 +76,24 @@ pub(crate) use fd::pipe_readable;
 
 /// The screen held now, if any.
 static HELD: Mutex<Option<Held>> = Mutex::new(None);
+
+/// How long a wait for a lock held elsewhere sleeps between tries.
+const LOCK_RETRY: Duration = Duration::from_millis(10);
+
+/// `m` locked (a poisoned lock's guard too), tried until `deadline`; None
+/// when another still holds it then. A deadline already past tries once.
+fn lock_until<T>(m: &Mutex<T>, deadline: Instant) -> Option<MutexGuard<'_, T>> {
+    loop {
+        match m.try_lock() {
+            Ok(g) => return Some(g),
+            Err(TryLockError::Poisoned(p)) => return Some(p.into_inner()),
+            Err(TryLockError::WouldBlock) if Instant::now() < deadline => {
+                std::thread::sleep(LOCK_RETRY);
+            }
+            Err(TryLockError::WouldBlock) => return None,
+        }
+    }
+}
 
 /// The generation the next `take()` gets.
 static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
@@ -274,33 +292,18 @@ const LOCK_WAIT: Duration = Duration::from_millis(500);
 /// nothing for `STALL_LIMIT`. A frame still holding the lock after that (stuck
 /// in a write) gets the crash path's restore instead, with nothing replayed.
 pub fn release_all() -> bool {
-    let deadline = std::time::Instant::now() + LOCK_WAIT;
+    let deadline = Instant::now() + LOCK_WAIT;
     // No forwarder writes into the replay (see [`OUTPUT_ORDER`]), unless one
     // holds a lock past the deadline.
-    let mut order = Order {
-        _out: lock_until(&OUTPUT_ORDER[0], deadline),
-        err: lock_until(&OUTPUT_ORDER[1], deadline),
+    let mut order = Order::lock_until(deadline);
+    let Some(mut held) = lock_until(&HELD, deadline) else {
+        restore_terminal_after_crash();
+        return true;
     };
-    loop {
-        match HELD.try_lock() {
-            // The replay runs with the lock let go.
-            Ok(mut held) => {
-                let mine = held.take();
-                drop(held);
-                return release_dumping(mine, &mut order);
-            }
-            Err(std::sync::TryLockError::Poisoned(p)) => {
-                return release_dumping(p.into_inner().take(), &mut order);
-            }
-            Err(std::sync::TryLockError::WouldBlock) if std::time::Instant::now() < deadline => {
-                std::thread::sleep(LOCK_RETRY);
-            }
-            Err(std::sync::TryLockError::WouldBlock) => {
-                restore_terminal_after_crash();
-                return true;
-            }
-        }
-    }
+    // The replay runs with the lock let go.
+    let mine = held.take();
+    drop(held);
+    release_dumping(mine, &mut order)
 }
 
 /// Give a held screen back for a while, for something that needs
@@ -319,11 +322,7 @@ pub(crate) fn suspend() -> bool {
     {
         // Bounded, as a release's: one replaying to a stalled stdout holds
         // these, and Ctrl+Z must not wait it out.
-        let deadline = std::time::Instant::now() + LOCK_WAIT;
-        let _order = Order {
-            _out: lock_until(&OUTPUT_ORDER[0], deadline),
-            err: lock_until(&OUTPUT_ORDER[1], deadline),
-        };
+        let _order = Order::lock_until(Instant::now() + LOCK_WAIT);
         let mut held = HELD.lock().unwrap();
         let Some(h) = held.as_mut() else {
             return false;

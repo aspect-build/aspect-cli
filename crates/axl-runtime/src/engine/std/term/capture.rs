@@ -4,12 +4,12 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bazel::console::feed::{Feed, Source};
 
-use super::HELD;
 use super::fd::{STALL_LIMIT, dup, dup2, pipe_readable, write_patiently, write_when_writable};
+use super::{HELD, lock_until};
 
 /// Captured output kept for the replay; past it the oldest bytes go.
 pub(super) const MAX_CAPTURED_BYTES: usize = 8 << 20;
@@ -213,9 +213,6 @@ const CAPTURE_POLL: Duration = Duration::from_millis(20);
 /// again.
 const READ_RETRY: Duration = Duration::from_millis(10);
 
-/// How long a wait for a lock held elsewhere sleeps between tries.
-pub(super) const LOCK_RETRY: Duration = Duration::from_millis(10);
-
 /// How long moving fds 1 and 2 in or out of a capture waits for a writer to
 /// finish its unit: one writing does in far less, and one stalled on a
 /// destination nobody reads is not waited on.
@@ -289,7 +286,7 @@ pub(super) static OUTPUT_ORDER: [Mutex<()>; 2] = [Mutex::new(()), Mutex::new(())
 
 /// [`OUTPUT_ORDER`] as a release holds it, a lock it gave up on `None`.
 pub(super) struct Order {
-    pub(super) _out: Option<std::sync::MutexGuard<'static, ()>>,
+    _out: Option<std::sync::MutexGuard<'static, ()>>,
     pub(super) err: Option<std::sync::MutexGuard<'static, ()>>,
 }
 
@@ -303,28 +300,19 @@ impl Order {
         }
     }
 
+    /// Both, stdout's first, each given up when still held at `deadline`.
+    pub(super) fn lock_until(deadline: Instant) -> Order {
+        Order {
+            _out: lock_until(&OUTPUT_ORDER[0], deadline),
+            err: lock_until(&OUTPUT_ORDER[1], deadline),
+        }
+    }
+
     /// Neither: for a release nothing else can be writing beside.
     pub(super) fn none() -> Order {
         Order {
             _out: None,
             err: None,
-        }
-    }
-}
-
-/// `m` locked, or None when it is still held at `deadline`.
-pub(super) fn lock_until(
-    m: &'static Mutex<()>,
-    deadline: std::time::Instant,
-) -> Option<std::sync::MutexGuard<'static, ()>> {
-    loop {
-        match m.try_lock() {
-            Ok(g) => return Some(g),
-            Err(std::sync::TryLockError::Poisoned(p)) => return Some(p.into_inner()),
-            Err(std::sync::TryLockError::WouldBlock) if std::time::Instant::now() < deadline => {
-                std::thread::sleep(LOCK_RETRY);
-            }
-            Err(std::sync::TryLockError::WouldBlock) => return None,
         }
     }
 }

@@ -133,7 +133,7 @@ pub(super) fn writable(fd: RawFd, timeout: Duration) -> bool {
 /// Whether `fd` is ready for reading (or, with `write`, writing) within
 /// `timeout`; None for a descriptor past `FD_SETSIZE`. `select`, not `poll`:
 /// macOS's `poll` does not support terminal devices.
-pub(super) fn select_one(fd: RawFd, timeout: Duration, write: bool) -> Option<bool> {
+fn select_one(fd: RawFd, timeout: Duration, write: bool) -> Option<bool> {
     // SAFETY: an fd_set on the stack, zeroed by FD_ZERO, holding one open
     // descriptor below FD_SETSIZE (checked).
     unsafe {
