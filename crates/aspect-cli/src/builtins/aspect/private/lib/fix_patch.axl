@@ -44,6 +44,11 @@ _File = record(
     section = Section,
 )
 
+def _q(path: str) -> str:
+    """`path` quoted for a message and escaped (`ascii_escaped`), so space
+    at either end of it shows."""
+    return "'%s'" % ascii_escaped(path)
+
 def _days_from_civil(year: int, month: int, day: int) -> int:
     """Days from 1970-01-01 to a date of the proleptic Gregorian calendar."""
     year -= 1 if month <= 2 else 0
@@ -78,8 +83,9 @@ def _header_name(raw: str) -> tuple:
     """`(path, why)` for the text after a `--- ` or `+++ `: the path with
     its first component dropped, as `patch -p1` would open it (None for
     `/dev/null` or an epoch timestamp), and why it can't be known, or None.
-    The name ends at a tab, else runs to the end of the line, spaces and
-    all, as rules_lint's `--label` headers write it. A git-quoted name is
+    The name ends at a tab, else runs to the end of the line less trailing
+    spaces, as rules_lint's `--label` headers write it, spaces inside and
+    all. A git-quoted name is
     refused, as this doesn't unquote one, and so is one that isn't UTF-8:
     it reads here with its bytes replaced, a name the copy-back can't
     open."""
@@ -88,8 +94,10 @@ def _header_name(raw: str) -> tuple:
         return None, "a header with no name"
     if rest.startswith("\""):
         return None, "a quoted (git) name, which this doesn't unquote"
-    name, _, stamp = rest.partition("\t")
-    if stamp and _is_epoch(stamp):
+    name, tab, stamp = rest.partition("\t")
+    if not tab:
+        name = name.rstrip(" ")
+    elif _is_epoch(stamp):
         return None, None
     if "\ufffd" in name:
         return None, "a name that isn't UTF-8, which the copy-back can't name"
@@ -201,7 +209,7 @@ def _resolved(fs, path: str) -> tuple:
                 done = []
             continue
         if todo and not meta.is_dir:
-            return None, "goes through `%s`, which isn't a directory" % ascii_escaped(part)
+            return None, "goes through %s, which isn't a directory" % _q(part)
         done.append(part)
     return None, "can't be followed"
 
@@ -231,7 +239,7 @@ def _copy_collision(fs, work: str, keys: dict) -> str | None:
         at = _identity(fs, resolved) if resolved != None else (work, path)
         other = seen.get(at)
         if other != None and keys[other] != key:
-            return "%s and %s are one file where the patch is applied" % (ascii_escaped(other), ascii_escaped(path))
+            return "%s and %s are one file where the patch is applied" % (_q(other), _q(path))
         seen[at] = path
     return None
 
@@ -256,7 +264,7 @@ def _refusal(fs, cwd: str, paths: list, removed: list) -> tuple:
     real = {}
     for path in paths:
         parts = path.split("/")
-        shown = ascii_escaped(path)
+        shown = _q(path)
         if "" in parts or "." in parts:
             return "%s has a `.` or empty component" % shown, {}, {}
         resolved, why = _resolved(fs, cwd + "/" + path)
@@ -266,7 +274,7 @@ def _refusal(fs, cwd: str, paths: list, removed: list) -> tuple:
             return "%s leads out of the workspace" % shown, {}, {}
         key = _identity(fs, resolved)
         if key in seen:
-            return "%s and %s are one file" % (ascii_escaped(seen[key]), shown), {}, {}
+            return "%s and %s are one file" % (_q(seen[key]), shown), {}, {}
         seen[key] = path
         real[path] = "/" + "/".join(resolved)
         meta, _ = _look(fs, real[path])
@@ -420,7 +428,7 @@ def apply_fix_patch(
             info(ctx.std, text)
 
     def refuse(why: str) -> None:
-        tell("WARNING", "%s was not applied: %s" % (ascii_escaped(patch), why))
+        tell("WARNING", "%s was not applied: %s" % (_q(patch), why))
         return None
 
     if not _is_file(fs, patch):
@@ -442,15 +450,15 @@ def apply_fix_patch(
         return refuse(why)
     if not files:
         if text.strip():
-            tell("INFO", "%s holds no unified diff of a file: nothing in it was applied" % ascii_escaped(patch))
+            tell("INFO", "%s holds no unified diff of a file: nothing in it was applied" % _q(patch))
         return None
     paths = _files_of(files)
     outside = [p for p in paths if not _inside(p)]
     if outside:
-        return refuse("it names %s, outside the workspace" % ", ".join([ascii_escaped(p) for p in outside]))
+        return refuse("it names %s, outside the workspace" % ", ".join([_q(p) for p in outside]))
     twice = _named_twice(files)
     if twice != None:
-        return refuse("%s is named in more than one header" % ascii_escaped(twice))
+        return refuse("%s is named in more than one header" % _q(twice))
 
     # patch writes `x.rej` and `x.orig` (or `x.~N~`) beside `x` in the
     # copies: one the patch names too would be overwritten by them.
@@ -459,7 +467,7 @@ def apply_fix_patch(
             tail = other.removeprefix(path)
             numbered = tail.startswith(".~") and tail.endswith("~") and tail[2:-1].isdigit()
             if other != path and other.startswith(path) and (tail in (".rej", ".orig") or numbered):
-                return refuse("it names %s and %s, which patch writes its own output to" % (ascii_escaped(path), ascii_escaped(other)))
+                return refuse("it names %s and %s, which patch writes its own output to" % (_q(path), _q(other)))
 
     # Everything from here touches the filesystem: one I/O failure the steps
     # below don't handle themselves (a name too long for it, say) refuses
@@ -488,7 +496,7 @@ def apply_fix_patch(
                 err, _ = catch(_copy_in, fs, cwd + "/" + path, work + "/" + path, types = [std.io.Error])
                 had[path] = True
             if err != None:
-                return refuse("%s can't be read: %s" % (ascii_escaped(path), err.message))
+                return refuse("%s can't be read: %s" % (_q(path), err.message))
         collision = _copy_collision(fs, work, keys)
         if collision:
             return refuse(collision)
@@ -501,7 +509,7 @@ def apply_fix_patch(
             target = f.old if f.old in had else f.new if f.new in had else f.new if _creates(f) else None
             if target == None:
                 if f.new != None:
-                    tell("INFO", "%s changes %s, which isn't there: its hunks for it were not applied" % (ascii_escaped(patch), ascii_escaped(f.old)))
+                    tell("INFO", "%s changes %s, which isn't there: its hunks for it were not applied" % (_q(patch), _q(f.old)))
                 continue
             section = "%s/%d.diff" % (scratch, n)
             _write_section(fs, section, raw, starts, f.section)
@@ -530,11 +538,11 @@ def apply_fix_patch(
         for path in paths:
             meta, err = _look(fs, work + "/" + path)
             if err != None:
-                return refuse("%s can't be looked at after patch ran: %s" % (ascii_escaped(path), err))
+                return refuse("%s can't be looked at after patch ran: %s" % (_q(path), err))
             if meta != None and not meta.is_file:
-                return refuse("%s isn't a regular file after patch ran" % ascii_escaped(path))
+                return refuse("%s isn't a regular file after patch ran" % _q(path))
             if meta == None and path in had and path not in removed:
-                return refuse("%s is gone after patch ran" % ascii_escaped(path))
+                return refuse("%s is gone after patch ran" % _q(path))
         rejects = []
         for f, target, section, ignored in runs:
             patched = work + "/" + target
@@ -549,13 +557,13 @@ def apply_fix_patch(
             if f.new == None and target in had and (not _is_file(fs, patched) or fs.metadata(patched).size == 0):
                 err, _ = catch(fs.remove_file, mine, types = [std.io.Error])
                 if err != None:
-                    tell("WARNING", "%s: %s was not removed: %s" % (ascii_escaped(patch), ascii_escaped(target), err.message))
+                    tell("WARNING", "%s: %s was not removed: %s" % (_q(patch), _q(target), err.message))
                 continue
             if not _is_file(fs, patched) or (target in had and _same_bytes(fs, patched, mine)):
                 continue
             err, _ = catch(_replace, fs, patched, mine, types = [std.io.Error])
             if err != None:
-                tell("WARNING", "%s: %s was not written: %s" % (ascii_escaped(patch), ascii_escaped(target), err.message))
+                tell("WARNING", "%s: %s was not written: %s" % (_q(patch), _q(target), err.message))
         if rejects:
             kept = fs.mkdtemp()
             for rej in rejects:
@@ -563,7 +571,7 @@ def apply_fix_patch(
                 if parent:
                     fs.create_dir_all(kept + "/" + parent)
                 fs.copy(work + "/" + rej, kept + "/" + rej)
-            tell("INFO", "%s did not apply in full; its rejected hunks are in %s" % (ascii_escaped(patch), ascii_escaped(kept)))
+            tell("INFO", "%s did not apply in full; its rejected hunks are in %s" % (_q(patch), _q(kept)))
             return kept
         return None
 

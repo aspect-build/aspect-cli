@@ -140,7 +140,7 @@ printf -- '--- a/../escape.txt\\n+++ b/../escape.txt\\n@@ -0,0 +1 @@\\n+out\\n' 
     said = []
     _eq("a fix to a missing file", apply_fix_patch(ctx, root + "/missing.patch", cwd = tree, say = _noted(said)), None)
     _eq("is not made", fs.exists(tree + "/src/missing.txt"), False)
-    _eq("and is named", [l.rpartition(" changes ")[2] for l in said], ["src/missing.txt, which isn't there: its hunks for it were not applied"])
+    _eq("and is named", [l.rpartition(" changes ")[2] for l in said], ["'src/missing.txt', which isn't there: its hunks for it were not applied"])
 
     _eq("a patch whose headers name two files", apply_fix_patch(ctx, root + "/rename.patch", cwd = tree), None)
     _eq("patches the side that is there", fs.read_to_string(tree + "/src/d2.txt"), "changed\n")
@@ -224,6 +224,16 @@ printf 'caf\\352\\n' > tree/src/l1.txt
     fs.write(root + "/label.patch", "--- a/src/my file.txt\n+++ b/src/my file.txt\n@@ -1 +1 @@\n-a\n+b\n")
     _eq("a `--label` name with spaces", apply_fix_patch(ctx, root + "/label.patch", cwd = tree), None)
     _eq("applies", fs.read_to_string(tree + "/src/my file.txt"), "b\n")
+
+    # With no tab, spaces at the end of a name are padding, not the name.
+    fs.write(tree + "/src/pad.txt", "a\n")
+    fs.write(root + "/padded.patch", "--- a/src/pad.txt  \n+++ b/src/pad.txt  \n@@ -1 +1 @@\n-a\n+b\n--- /dev/null\n+++ b/src/padded.txt \n@@ -0,0 +1 @@\n+p\n")
+    _eq("padded names", apply_fix_patch(ctx, root + "/padded.patch", cwd = tree), None)
+    _eq("apply to the names unpadded", (fs.read_to_string(tree + "/src/pad.txt"), fs.read_to_string(tree + "/src/padded.txt"), fs.exists(tree + "/src/padded.txt ")), ("b\n", "p\n", False))
+    said = []
+    fs.write(root + "/padded-missing.patch", "--- a/src/gone \n+++ b/src/gone \n@@ -1 +1 @@\n-a\n+b\n")
+    apply_fix_patch(ctx, root + "/padded-missing.patch", cwd = tree, say = _noted(said))
+    _eq("a name in a message is quoted", [l.rpartition(" changes ")[2].partition(",")[0] for l in said], ["'src/gone'"])
 
     # An I/O failure nothing below handles (a path longer than any host
     # takes) refuses the patch, and the run goes on.
@@ -463,7 +473,7 @@ printf 'a\\n' > 'src/my file'
     labelled = lambda label, text: said.append((label, text.partition(" was not applied: ")[2]))
     fs.write(refuse + "/p.patch", make("src/\x1b[31m\u00e9\\x") + make("src/\x1b[31m\u00e9\\x"))
     _eq("an escaped path's refusal", apply_fix_patch(ctx, refuse + "/p.patch", cwd = refuse, say = labelled), None)
-    _eq("its warning", said, [("WARNING", "src/\\u001b[31m\\u00e9\\\\x is named in more than one header")])
+    _eq("its warning", said, [("WARNING", "'src/\\u001b[31m\\u00e9\\\\x' is named in more than one header")])
     fs.write(refuse + "/p.patch", "diff --git a/src/f b/src/g\nrename from src/f \x1b]0;title\x07 x\nrename to src/g\n")
     said.clear()
     apply_fix_patch(ctx, refuse + "/p.patch", cwd = refuse, say = labelled)
@@ -503,14 +513,14 @@ def _test_folded_copies(ctx: TaskContext, root: str):
     said = []
     fs.write(root + "/fold.patch", "--- a/src/one.txt\n+++ b/src/one.txt\n@@ -1 +1 @@\n-1\n+one\n--- a/src/two.txt\n+++ b/src/two.txt\n@@ -1 +1 @@\n-2\n+two\n")
     _eq("two files one copy", apply_fix_patch(ctx, root + "/fold.patch", cwd = tree, mkdtemp = folding, say = _noted(said)), None)
-    _eq("refused once copied", said, ["src/one.txt and src/two.txt are one file where the patch is applied"])
+    _eq("refused once copied", said, ["'src/one.txt' and 'src/two.txt' are one file where the patch is applied"])
     _eq("both as they were", (fs.read_to_string(tree + "/src/one.txt"), fs.read_to_string(tree + "/src/two.txt")), ("1\n", "2\n"))
 
     said.clear()
     shim = _stand_in(fs, root, "folding-patch", "printf 'made\\n' > src/n1.txt\n[ -e src/n2.txt ] || ln src/n1.txt src/n2.txt\nexit 0\n")
     fs.write(root + "/fold-new.patch", "--- /dev/null\n+++ b/src/n1.txt\n@@ -0,0 +1 @@\n+made\n--- /dev/null\n+++ b/src/n2.txt\n@@ -0,0 +1 @@\n+made\n")
     _eq("two new names patch makes one", apply_fix_patch(ctx, root + "/fold-new.patch", cwd = tree, program = shim, say = _noted(said)), None)
-    _eq("refused once patched", said, ["src/n1.txt and src/n2.txt are one file where the patch is applied"])
+    _eq("refused once patched", said, ["'src/n1.txt' and 'src/n2.txt' are one file where the patch is applied"])
     _eq("neither made", _names(fs, tree + "/src"), ["one.txt", "two.txt"])
 
 def _test_write_back(ctx: TaskContext, root: str):
@@ -551,13 +561,13 @@ printf 'l\\n' > back/src/target.txt && ln -s target.txt back/src/lnk.txt
         fs.write(root + "/secret.patch", fix("src/secret.txt", "s", "S"))
         fs.write(root + "/after.patch", fix("src/ok.txt", "a", "A"))
         _eq("an unreadable file", apply_fix_patch(ctx, root + "/secret.patch", cwd = tree, say = _noted(said)), None)
-        _eq("refuses its patch, its reason the system's", [l.startswith("src/secret.txt can't be read: ") and "Error(" not in l for l in said], [True])
+        _eq("refuses its patch, its reason the system's", [l.startswith("'src/secret.txt' can't be read: ") and "Error(" not in l for l in said], [True])
         _eq("and the run goes on", (apply_fix_patch(ctx, root + "/after.patch", cwd = tree), fs.read_to_string(tree + "/src/ok.txt")), (None, "A\n"))
     if unwritable != None:
         said.clear()
         fs.write(root + "/ro.patch", "--- /dev/null\n+++ b/src/ro/new.txt\n@@ -0,0 +1 @@\n+n\n" + fix("src/ok.txt", "A", "B"))
         _eq("a file in a directory it can't write", apply_fix_patch(ctx, root + "/ro.patch", cwd = tree, say = lambda label, text: said.append((label, text.partition(": ")[2]))), None)
-        _eq("is named", [(label, text.startswith("src/ro/new.txt was not written: ") and "Error(" not in text) for label, text in said], [("WARNING", True)])
+        _eq("is named", [(label, text.startswith("'src/ro/new.txt' was not written: ") and "Error(" not in text) for label, text in said], [("WARNING", True)])
         _eq("the rest is written", (fs.exists(tree + "/src/ro/new.txt"), fs.read_to_string(tree + "/src/ok.txt")), (False, "B\n"))
     fs.set_permissions(tree + "/src/ro", 0o755)
 
@@ -577,7 +587,7 @@ printf 'l\\n' > back/src/target.txt && ln -s target.txt back/src/lnk.txt
         said.clear()
         fs.write(root + "/locked.patch", fix("src/locked.txt", "u", "U"))
         _eq("a locked file", apply_fix_patch(ctx, root + "/locked.patch", cwd = tree, mkdtemp = kept_copies, say = lambda label, text: said.append((label, text.partition(": ")[2].partition(": ")[0]))), None)
-        _eq("is named", said, [("WARNING", "src/locked.txt was not written")])
+        _eq("is named", said, [("WARNING", "'src/locked.txt' was not written")])
         _eq("and left as it was", fs.read_to_string(tree + "/src/locked.txt"), "u\n")
         err, _ = catch(fs.remove_file, copies[0] + "/src/locked.txt", types = [std.io.Error])
         _eq("its copy carries no flag", err, None)
