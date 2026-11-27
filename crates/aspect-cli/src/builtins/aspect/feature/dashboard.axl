@@ -3608,7 +3608,7 @@ def action_results(split: dict, room: int, rows = 3, short = False, stack = Fals
     """The Actions rows, `room` cells wide past their `Actions` lead, at
     most `rows`: `█ ran`, then `cache hits N:` and the hits after it
     (`action_parts`), failed, blocked, internal, other, then what runs and
-    is pending (`─ 2 running · 4 pending`, one unit), what follows the
+    is pending (`─ 2 running · 4 pending`, on one row where they fit), what follows the
     hits a row after them. Where the hits do not fit beside ran they get
     a row of their own, after ran and failed, as they do where `stack`
     (a screen under 70 columns), and wrap after their label where they
@@ -3625,7 +3625,7 @@ def action_results(split: dict, room: int, rows = 3, short = False, stack = Fals
     failed = [("one", [p]) for p in others if p[2] == "failed"]
     tail = [("one", [p]) for p in others if p[2] not in ("ran", "failed", "running", "pending")]
     undone = [p for p in others if p[2] in ("running", "pending") and p[1]]
-    rest = tail + ([("one", undone)] if undone else [])
+    rest = tail + ([("one", undone)] if undone and text_width(" · ".join([_part_text(p, 2)[0] for p in undone])) <= room else [("one", [p]) for p in undone])
 
     def text(unit, level):
         # `(plain, drawn)` of a unit: its parts joined, the hits after

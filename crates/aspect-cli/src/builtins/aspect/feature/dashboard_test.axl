@@ -1471,7 +1471,7 @@ def _impl(ctx: TaskContext) -> int:
     many["counts"]["log_kinds"] = {"ran": 1394, "disk": 58, "remote": 0, "mixed": 0}
     shown = _visible(render(many, 140, 30))
     _eq("counts with thousands separators", ["12,345 configured" in shown, "12,000 built" in shown], [True, True])
-    _eq("whole counts, what runs and is pending too", ["█ 1,394 ran" in shown, "cache hits 58: ▓ 58 disk" in shown, "2,378 other" in shown and "─ 16 running · 4,717 pending" in shown], [True, True, True])
+    _eq("whole counts, what runs and is pending too", ["█ 1,394 ran" in shown, "cache hits 58: ▓ 58 disk" in shown, "2,378 other" in shown and "─ 16 running" in shown and "4,717 pending" in shown], [True, True, True])
     many["counts"].update(test_runs = 15, test_cached = 9, tests_cached = 9, tests_passed = 9, tests_failed = 6)
     _eq("the Tests row's cached count", "Tests    9 passed (9 cached), 6 failed" in _visible(render(many, 140, 30)), True)
     _eq("no part there is none of", ("Tests    9 passed (9 cached)  " in _visible(render(dict(many, counts = dict(many["counts"], tests_failed = 0)), 140, 30)), "0 failed" in _visible(render(dict(many, counts = dict(many["counts"], tests_failed = 0)), 140, 30)).split("Tests")[1].split("\n")[0]), (True, False))
