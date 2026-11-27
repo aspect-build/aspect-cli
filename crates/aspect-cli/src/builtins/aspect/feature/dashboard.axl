@@ -188,6 +188,7 @@ load("@aspect//traits.axl", "Phases")
 load("@std//time.axl", "monotonic")
 load("../private/lib/agent.axl", "under_agent")
 load("../private/lib/aspect_flags.axl", "publish_all_actions_unless_sent_out")
+load("../private/lib/bazel_results.axl", "bb_clientd_root")
 load("../private/lib/failure_records.axl", "failure_records")
 load("../private/lib/failures.axl", "failures")
 load("../private/lib/results_pages.axl", "bes_results_url", "results_pages")
@@ -205,7 +206,6 @@ build_outcome = failure_records.build_outcome
 build_succeeded = failure_records.build_succeeded
 collect_event = failure_records.collect_event
 count_spawn = failure_records.count_spawn
-new_counts = failure_records.new_counts
 note_log_file = failure_records.note_log_file
 _failure_counts = failures.failure_counts
 action_split = dashboard_actions.action_split
@@ -240,27 +240,21 @@ def attempt_state(now_ms: int) -> dict:
     """What a Bazel attempt starts with: its own counts, console, failures
     and actions, nothing open, timed from `now_ms`."""
     return dict(
+        failure_records.new_state(),
         fresh = False,
         phase = "Starting Bazel…",
-        fails = [],
-        outputs = [],
         selected = 0,
         picked = 0,
         cache = None,
         unseen = 0,
         focus = "console",
         view = None,
-        last_attempts = {},
-        spread = {},
-        test_counts = {},
-        counts = new_counts(),
         log = [],
         log_size = 0,
         views = [],
         parked = {},
         seeded = 0,
         seed_trimmed = 0,
-        inv = {},
         tab_scroll = 0,
         hover = None,
         select = None,
@@ -287,9 +281,7 @@ def attempt_state(now_ms: int) -> dict:
         bazel_uuid = "",
         exec_log_read = False,
         done_total = None,
-        bep_done_total = None,
         settled = 0,
-        excerpts = {},
     )
 
 def _clear_build(state: dict):
@@ -379,14 +371,43 @@ def refusal(std):
         return "dashboard off: the terminal is %dx%d, under %dx%d; Bazel's console is shown instead" % (size[0], size[1], _MIN_COLS, _MIN_ROWS)
     return ""
 
-def summary_state(read, env = None, ansi = None) -> dict:
-    """A fresh state for `failure_summary` to read, collected by the build
-    event hooks the screen uses (`count_event`, `note_event`,
-    `note_blocked`) without a screen: the plain console's. `read` reads a
-    file's tail (`std.fs.try_read_tail`), `env` is `std.env`, for finding
-    a test's log, and `ansi` the compiled `ANSI` pattern, to read a kept
-    log's text as an error quotes it."""
-    state = dict(attempt_state(0), read = read, env = env, ansi = ansi, build = None, exec_root = "", output_dirs = {}, search = new_search(), list = "failures", ended = False, cancelling = False, log_path = "", task = "", root_causes = {}, blocked_cache = None, building = True)
+def new_state(**fields) -> dict:
+    """A Dashboard's whole state before its task starts: a first attempt's
+    (`attempt_state`), nothing taken or read yet, with `fields` set over
+    it (the task's arguments and runtime, or a test's)."""
+    state = attempt_state(0)
+    state.update(
+        screen = None,
+        task = "",
+        start_ms = 0,
+        now_ms = 0,
+        frames = 0,
+        progress = [],
+        filter = "all",
+        search = new_search(),
+        re = None,
+        controls = None,
+        list = "failures",
+        help = False,
+        zoom = False,
+        mouse = False,
+        line_links = {},
+        frame = [],
+        pane = (-1, -1),
+        excerpt = None,
+        cols = 80,
+        osc = "",
+        note = "",
+        clock = None,
+        process = None,
+        countdown_ms = None,
+        all_actions = True,
+        ended = False,
+        pages = [],
+        bes_base = "",
+        update = {},
+    )
+    state.update(fields)
     return state
 
 def _dashboard_impl(ctx: FeatureContext):
@@ -396,67 +417,12 @@ def _dashboard_impl(ctx: FeatureContext):
             ctx.std.io.stderr.write(why + "\n")
         return
 
-    state = {
-        "screen": None,
-        "task": "",
-        "phase": "Starting Bazel…",
-        "start_ms": 0,
-        "now_ms": 0,
-        "frames": 0,
-        "progress": [],
-        "log": [],
-        "scroll": 0,
-        "filter": "all",
-        "search": new_search(),
-        "re": None,
-        "read": None,
-        "ansi": None,
-        "controls": None,
-        "env": None,
-        "fails": [],
-        "outputs": [],
-        "list": "failures",
-        "selected": 0,
-        "picked": 0,
-        "focus": "console",
-        "view": None,
-        "help": False,
-        "zoom": False,
-        "mouse": ctx.args.mouse,
-        "line_links": {},
-        "select": None,
-        "frame": [],
-        "pane": (-1, -1),
-        "excerpt": ctx.std.excerpt,
-        "cols": 80,
-        "osc": "",
-        "note": "",
-        "clock": lambda: int(monotonic() * 1000),
-        "process": None,
-        "unseen": 0,
-        "cache": None,
-        "countdown_ms": None,
-        "exec_root": "",
-        "output_dirs": {},
-        "test_counts": {},
-        "last_attempts": {},
-        "spread": {},
-        "cancelling": False,
-        "all_actions": ctx.args.actions == "all",
-        "ended": False,
-        "counts": new_counts(),
-        "fresh": False,
-        "log_path": "",
-        "pages": [],
-        "bes_base": "",
-        "bazel_uuid": "",
-        "update": {},
-    }
-
-    # The first attempt's fields, as a retry's start them.
-    for key, value in attempt_state(0).items():
-        if key not in state:
-            state[key] = value
+    state = new_state(
+        mouse = ctx.args.mouse,
+        excerpt = ctx.std.excerpt,
+        clock = lambda: int(monotonic() * 1000),
+        all_actions = ctx.args.actions == "all",
+    )
 
     def _add_lines(lines, links = None, colours = None, cli = False):
         add_lines(state, lines, links, colours, cli)
@@ -500,6 +466,7 @@ def _dashboard_impl(ctx: FeatureContext):
         state["ansi"] = task_ctx.std.re.compile(ANSI)
         state["controls"] = task_ctx.std.re.compile(CONTROLS)
         state["env"] = task_ctx.std.env
+        state["bb_root"] = bb_clientd_root(task_ctx.std.env)
         state["process"] = task_ctx.std.process
         state["io"] = task_ctx.std.io
         state["fs"] = task_ctx.std.fs

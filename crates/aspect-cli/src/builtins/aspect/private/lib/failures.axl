@@ -607,6 +607,8 @@ def failure_summary(state: dict, task_id: str, tty: bool, log_path: str = "", li
     return [linked(l) for l in out] if linked else out
 
 failures = namespace(
+    collect_event = failure_records.collect_event,
+    new_state = failure_records.new_state,
     entry_text = entry_text,
     excerpt_rows = excerpt_rows,
     expand_tabs = _expand_tabs,

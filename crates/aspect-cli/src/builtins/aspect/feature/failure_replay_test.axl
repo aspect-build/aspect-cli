@@ -19,7 +19,7 @@ goldens; review the diff.
 
 load("@aspect//feature/dashboard/actions.axl", "dashboard_actions")
 load("@aspect//feature/dashboard/render.axl", "dashboard_render")
-load("@aspect//feature/dashboard.axl", "summary_state")
+load("@aspect//feature/dashboard.axl", "new_state")
 load("../private/lib/failure_records.axl", "failure_records")
 load("../private/lib/failures.axl", "failures")
 load("../private/lib/term_text.axl", "term_text")
@@ -116,7 +116,7 @@ def _replay(ctx: TaskContext, case: str, prefix: str) -> str:
         return fs.try_read_tail(resolve(path), n)
 
     ansi = ctx.std.re.compile(ANSI)
-    state = summary_state(read, ctx.std.env, ansi)
+    state = new_state(read = read, ansi = ansi, building = True)
     bep = folder + "/" + prefix + ".bep.json"
     if fs.exists(bep):
         for line in fs.read_to_string(bep).split("\n"):

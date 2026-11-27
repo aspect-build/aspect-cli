@@ -224,18 +224,14 @@ task starts.
 
 load("@aspect//bazel/console.axl", "PROFILES", "RECAP_MAX", "STAGE_NAMES", "console_tip_rules", "default_stages", "emit_tips", "tip_stages")
 load("@aspect//bazel.axl", "BazelTrait")
-load("@aspect//feature/dashboard.axl", "summary_state")
 load("@aspect//tips.axl", "TipsTrait")
 load("../private/lib/agent.axl", "under_agent")
+load("../private/lib/bazel_results.axl", "bb_clientd_root")
 load("../private/lib/environment.axl", "warn")
-load("../private/lib/failure_records.axl", "failure_records")
 load("../private/lib/failures.axl", "failures")
 load("../private/lib/task_template_args.axl", "TASK_PRESET_PRECEDENCE", "task_template_args")
 load("../private/lib/term_text.axl", "term_text")
 
-ANSI = term_text.ANSI
-collect_event = failure_records.collect_event
-failure_summary = failures.failure_summary
 
 def _console_impl(ctx: FeatureContext):
     profile = ctx.args.profile
@@ -289,17 +285,15 @@ def _console_impl(ctx: FeatureContext):
     # once with what Bazel said of it, the counts, Bazel's raw log and where
     # the rest is. Not under the Dashboard (`output_display` `none`), which
     # shows failures in its own tab and puts the summary in the scrollback.
-    summary = [summary_state(None)]
+    summary = [None]
+
+    def _fresh(task_ctx):
+        return failures.new_state(task_ctx.std.fs.try_read_tail, bb_clientd_root(task_ctx.std.env), task_ctx.std.re.compile(term_text.ANSI))
 
     def _collect(task_ctx, event):
-        kind = event.kind
-        if kind == "build_started":
-            summary[0] = summary_state(task_ctx.std.fs.try_read_tail, task_ctx.std.env, task_ctx.std.re.compile(ANSI))
-        state = summary[0]
-        if state["read"] == None:
-            state["read"] = task_ctx.std.fs.try_read_tail
-            state["env"] = task_ctx.std.env
-        collect_event(state, event)
+        if event.kind == "build_started" or summary[0] == None:
+            summary[0] = _fresh(task_ctx)
+        failures.collect_event(summary[0], event)
 
     # The summary lists as many failures as the recap would repeat errors.
     summary_max = ctx.args.recap_max if type(ctx.args.recap_max) == "int" and ctx.args.recap_max > 0 else RECAP_MAX
@@ -307,17 +301,15 @@ def _console_impl(ctx: FeatureContext):
     def _summarize(task_ctx, build):
         if trait.output_display == "none":
             return
-        state = summary[0]
+        state = summary[0] or _fresh(task_ctx)
         state["build"] = build
         state["bazel_errors"] = build.output_bazel_errors()
         state["cancelling"] = task_ctx.cancellation.root.cancelled
-        if state["read"] == None:
-            state.update(read = task_ctx.std.fs.try_read_tail, env = task_ctx.std.env, ansi = task_ctx.std.re.compile(ANSI))
         err = task_ctx.std.io.stderr
         size = task_ctx.std.term.size() if err.is_tty else None
-        for line in failure_summary(state, task_ctx.task.id, err.is_tty, build.output_log or "", task_ctx.std.io.linked, task_ctx.std.excerpt, size[0] if size else 100, build.exit_code, max_entries = summary_max):
+        for line in failures.failure_summary(state, task_ctx.task.id, err.is_tty, build.output_log or "", task_ctx.std.io.linked, task_ctx.std.excerpt, size[0] if size else 100, build.exit_code, max_entries = summary_max):
             err.write(line + "\n")
-        summary[0] = summary_state(task_ctx.std.fs.try_read_tail, task_ctx.std.env, task_ctx.std.re.compile(ANSI))
+        summary[0] = None
 
     trait.build_event.append(_collect)
 

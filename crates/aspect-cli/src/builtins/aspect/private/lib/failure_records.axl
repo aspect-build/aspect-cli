@@ -2,7 +2,7 @@
 counts, every failed action, test and target with its logs, and the root
 causes that block other targets."""
 
-load("./bazel_results.axl", "file_uri_to_path")
+load("./bazel_results.axl", "uri_to_path_under_root")
 load("./term_text.axl", "term_text")
 
 _counts = term_text.counts
@@ -173,18 +173,17 @@ def local_test_logs(state: dict, record: dict) -> list:
     return [path + ("/test_attempts/attempt_%d.log" % attempt if attempt < last else "/test.log")]
 
 def log_paths(state: dict, record: dict, uri) -> list:
-    """Where a log named by `uri` may be on disk, likeliest first; a
-    `file://` one's path alone before the screen has `std.env`, decoded
-    (`percent_decoded`, then `repaired` too)."""
+    """Where a log named by `uri` may be on disk, likeliest first: a
+    `file://` one's path, decoded (`percent_decoded`, then `repaired`
+    too); a remote cache's (`bytestream://`) a test's own in the output
+    tree, then under the runner's bb_clientd mount (`state["bb_root"]`)
+    where there is one."""
     if type(uri) != "string" or not uri:
         return []
     paths = []
     if uri.startswith("bytestream://") and record["kind"] == "test":
         paths.extend(local_test_logs(state, record))
-    if state.get("env") != None:
-        paths.append(file_uri_to_path(state["env"], uri))
-    elif uri.startswith("file://"):
-        paths.append(uri[len("file://"):])
+    paths.append(uri_to_path_under_root(uri, state.get("bb_root")))
 
     # A `file://` path is percent-encoded, a non-ASCII name's UTF-8 in it
     # spelled as Latin-1 (`Ñ%C2%82` for `т`), and the file on disk is named
@@ -476,6 +475,39 @@ def bazel_line(line: str) -> str:
 def _get(obj, name: str, default = None):
     """`obj.name`, or `default` when `obj` is None or has no such field."""
     return getattr(obj, name, default) if obj != None else default
+
+def new_state(read = None, bb_root = None, ansi = None) -> dict:
+    """A fresh state for the build event hooks to collect into
+    (`collect_event`) and the failure summary to read. `read` reads a file's
+    tail (`std.fs.try_read_tail`), `bb_root` is the runner's bb_clientd mount
+    (`bb_clientd_root`), for finding a remote cache's log, and `ansi` the
+    compiled `ANSI` pattern, to read a kept log's text as an error quotes
+    it."""
+    return dict(
+        read = read,
+        bb_root = bb_root,
+        ansi = ansi,
+        build = None,
+        bazel_errors = None,
+        fails = [],
+        outputs = [],
+        counts = new_counts(),
+        inv = {},
+        last_attempts = {},
+        spread = {},
+        test_counts = {},
+        exec_root = "",
+        output_dirs = {},
+        root_causes = {},
+        blocked_cache = None,
+        entries_cache = None,
+        own_cache = None,
+        ties_cache = None,
+        bep_done_total = None,
+        excerpts = {},
+        cancelling = False,
+        log_path = "",
+    )
 
 def new_counts() -> dict:
     """The tallies `count_event` keeps for one Bazel attempt."""
@@ -910,6 +942,7 @@ failure_records = namespace(
     log_paths = log_paths,
     MAX_LOG_BYTES = _MAX_LOG_BYTES,
     new_counts = new_counts,
+    new_state = new_state,
     note_blocked = note_blocked,
     note_event = note_event,
     note_log_file = note_log_file,

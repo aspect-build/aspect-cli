@@ -14,7 +14,7 @@ load("@aspect//feature/dashboard/log.axl", "dashboard_log")
 load("@aspect//feature/dashboard/pointer.axl", "dashboard_pointer")
 load("@aspect//feature/dashboard/render.axl", "dashboard_render")
 load("@aspect//feature/dashboard/view.axl", "dashboard_view")
-load("@aspect//feature/dashboard.axl", "attempt_state", "end_build", "fold_build", "new_build", "refusal", "summary_state")
+load("@aspect//feature/dashboard.axl", "end_build", "fold_build", "new_build", "new_state", "refusal")
 load("@std//theme.axl", "theme")
 load("../private/lib/failure_records.axl", "failure_records")
 load("../private/lib/failures.axl", "failures")
@@ -142,6 +142,9 @@ ANSI_HEADING = theme.sgr("heading", stream = True)
 # The roles a running action's time and the header's time are drawn in.
 ANSI_ROLES = {role: theme.sgr(role) for role in ("muted", "warning", "error", "strong", "heading", "status_bar")}
 
+# An environment with nothing set, for the states the tests build.
+_NO_ENV = struct(var = lambda name: None)
+
 def _visible(row):
     """`row` without its escape sequences (`ESC [ … letter`)."""
     out = []
@@ -208,7 +211,7 @@ def _held_line_reads(ctx):
     for held in ("held open", "held after a long line", "held on stderr"):
         blocks.append({"kind": "from", "text": "\r\x1b[1A\x1b[K\x1b[32mINFO: \x1b[0mFrom Doing more work:\n", "body_len": 9, "last_line": "open out\n"})
         blocks.append({"kind": "tail", "text": "\r\x1b[1A\x1b[K\x1b[31m\x1b[1mERROR: \x1b[0m%s\n" % held})
-    state = summary_state(read, ctx.std.env, ctx.std.re.compile(ANSI))
+    state = new_state(read = read, ansi = ctx.std.re.compile(ANSI), building = True)
     state.update(outputs = outputs, building = False, ended = True, bazel_errors = {"blocks": blocks, "not_kept": 0, "stdout": True})
     tab = dict(state, log_path = "", bazel_exit = 0, focus = "console", selected = 0, expand_failures = True, excerpts = {}, ties_cache = None, entries_cache = None)
     ansi = ctx.std.re.compile(ANSI)
@@ -222,49 +225,9 @@ def _held_line_reads(ctx):
         _eq("held: %s read from its end, at most once a line, as far as that line is long" % path, (len(opened) <= 33, [n for n in opened if n > 256]), (True, []))
 
 def _screen(ctx, log, **kw):
-    """A dashboard's whole state, as the feature keeps it, over `log`."""
-    state = {
-        "task": "build",
-        "phase": "",
-        "start_ms": 0,
-        "now_ms": 0,
-        "frames": 0,
-        "progress": [],
-        "log": log,
-        "scroll": 0,
-        "filter": "all",
-        "search": new_search(),
-        "fails": [],
-        "outputs": [],
-        "list": "failures",
-        "selected": 0,
-        "picked": 0,
-        "focus": "console",
-        "view": None,
-        "help": False,
-        "zoom": False,
-        "mouse": False,
-        "unseen": 0,
-        "cache": None,
-        "countdown_ms": None,
-        "re": ctx.std.re,
-        "cancelling": False,
-        "ended": False,
-        "counts": new_counts(),
-        "building": True,
-        "pages": [],
-        "test_counts": {},
-        "spread": {},
-        "logged_index": None,
-    }
-
-    # What the feature's own state starts each attempt with, so a field
-    # the tests do not set is still there, as in a real run.
-    for key, value in attempt_state(0).items():
-        if key not in state:
-            state[key] = value
-    state.update(kw)
-    return state
+    """A dashboard's whole state, as the feature keeps it (`new_state`), over
+    `log`, a build running, read by no machine's environment."""
+    return new_state(**dict(dict(task = "build", phase = "", log = log, re = ctx.std.re, env = _NO_ENV, building = True, logged_index = None), **kw))
 
 def _fake_process(have, ran, exit = 0):
     """A `ctx.std.process` with only `have` on PATH, recording each command
@@ -1404,12 +1367,12 @@ def _impl(ctx: TaskContext) -> int:
     _eq("runs alone", failure_detail({"test_counts": {}, "spread": {("//t:t", "c1"): (2, 1)}}, dict(flaky, shard = 1, run = 2)), "run 2 · attempt 1")
     _eq("an action, its mnemonic", failure_detail(shard_state, act), "Genrule")
     _eq("before the summary, no guess", (local_test_logs(fs, flaky), local_test_logs(fs, dict(flaky, shard = 1))), ([], []))
-    early = log_view(dict(fs, read = lambda p, c: None, ansi = ctx.std.re.compile(ANSI), controls = ctx.std.re.compile(CONTROLS), env = ctx.std.env), flaky)
+    early = log_view(dict(fs, read = lambda p, c: None, ansi = ctx.std.re.compile(ANSI), controls = ctx.std.re.compile(CONTROLS), env = _NO_ENV), flaky)
     _eq("and the view says when it will be", early["lines"], ["(test.log is found once the test has finished: a remote cache names it)"])
 
     # The bookkeeping: an aborted summary has no counts; a real one shows an
     # open log anew.
-    noted = dict(fs, read = lambda p, c: ("attempt one\n", 0) if p.endswith("test_attempts/attempt_1.log") else None, ansi = ctx.std.re.compile(ANSI), controls = ctx.std.re.compile(CONTROLS), env = ctx.std.env, fails = [], outputs = [], view = None, search = new_search(), scroll = 0)
+    noted = dict(fs, read = lambda p, c: ("attempt one\n", 0) if p.endswith("test_attempts/attempt_1.log") else None, ansi = ctx.std.re.compile(ANSI), controls = ctx.std.re.compile(CONTROLS), env = _NO_ENV, fails = [], outputs = [], view = None, search = new_search(), scroll = 0)
     noted["test_counts"] = {}
     noted["last_attempts"] = {}
     noted["spread"] = {}
@@ -1455,7 +1418,7 @@ def _impl(ctx: TaskContext) -> int:
         "/tmp/err": ("ERROR: broken\n", 2048),
         "/tmp/out": ("some out\n", 0),
     }
-    view_state = dict(fs, read = lambda path, cap: files.get(path), ansi = ctx.std.re.compile(ANSI), controls = ctx.std.re.compile(CONTROLS), env = ctx.std.env)
+    view_state = dict(fs, read = lambda path, cap: files.get(path), ansi = ctx.std.re.compile(ANSI), controls = ctx.std.re.compile(CONTROLS), env = _NO_ENV)
     view_state["test_counts"] = {("//t:t", "c1"): (1, 1)}
     one_shard = dict(flaky, shard = 1)
     _eq(
@@ -1473,7 +1436,7 @@ def _impl(ctx: TaskContext) -> int:
     _eq("inline bytes over the cap: the end and the byte before", (str(big[0]), big[1]), ("ond\nthird\n", True))
     _eq("under it, whole", str(bounded_log(bytes("ok\n"), cap = 9)[0]), "ok\n")
     inline_rec = {"kind": "action", "label": "//i:i", "detail": "Genrule", "files": [("stderr", big)]}
-    v_inline = log_view(dict(fs, read = lambda p, c: None, ansi = ctx.std.re.compile(ANSI), controls = ctx.std.re.compile(CONTROLS), env = ctx.std.env), inline_rec)
+    v_inline = log_view(dict(fs, read = lambda p, c: None, ansi = ctx.std.re.compile(ANSI), controls = ctx.std.re.compile(CONTROLS), env = _NO_ENV), inline_rec)
     _eq("an inline log in the view", (v_inline["lines"], v_inline["cut"]), (["third"], True))
     _eq("an action's mnemonic defaults", failure_of("action_completed", struct(label = "//a:a"), struct(success = False))["detail"], "Action")
     v = log_view(view_state, act)
@@ -1890,7 +1853,7 @@ def _impl(ctx: TaskContext) -> int:
     _eq("an action that wrote output", (wrote["label"], wrote["detail"], wrote["files"]), ("//w:w", "Javac", [("stderr", "file:///tmp/err")]))
     _eq("one that wrote nothing", output_of("action_completed", struct(label = "//w:q"), struct(success = True)), None)
     _eq("a failed one is a failure", output_of("action_completed", struct(label = "//w:f"), struct(success = False, stderr = struct(file = "file:///tmp/err"))), None)
-    listed = dict(view_state, **_screen(ctx, ["console"], fails = [act]))
+    listed = _screen(ctx, ["console"], **dict(view_state, fails = [act]))
     listed["read"] = view_state["read"]
     note_event(listed, "action_completed", struct(label = "//w:w"), struct(success = True, type = "Javac", stderr = struct(file = "file:///tmp/err")), False)
     note_event(listed, "action_completed", struct(label = "//w:v"), struct(success = True, type = "Genrule", stdout = struct(file = "file:///tmp/out")), False)
@@ -2460,7 +2423,7 @@ def _impl(ctx: TaskContext) -> int:
     bare = _screen(ctx, [], zoom = True, mouse = True)
     add_lines(bare, ["INFO: From b:"])
     _click(bare, "INFO: From b:")
-    _eq("nothing to expand", (bare.get("note"), bare.get("fold_open")), (None, {}))
+    _eq("nothing to expand", (bare["note"], bare["fold_open"]), ("", {}))
     add_lines(bare, ["b1", "b2"])
     _eq("its lines come folded", "  … +2 lines (click or Ctrl+O shows them)" in shown_lines(bare), True)
 
@@ -2788,7 +2751,7 @@ def _impl(ctx: TaskContext) -> int:
     # failure of its own, once, its log Bazel's error; the build shows it
     # failed. An Aborted payload's type can't be made here: `aborted` says
     # what a real one's type would.
-    mix = _screen(ctx, ["x"], fs = ctx.std.fs, syntax = None, page_h = 10, env = ctx.std.env, read = lambda p, c: None, ansi = ctx.std.re.compile(ANSI), controls = ctx.std.re.compile(CONTROLS), test_counts = {}, spread = {}, last_attempts = {})
+    mix = _screen(ctx, ["x"], fs = ctx.std.fs, syntax = None, page_h = 10, env = _NO_ENV, read = lambda p, c: None, ansi = ctx.std.re.compile(ANSI), controls = ctx.std.re.compile(CONTROLS), test_counts = {}, spread = {}, last_attempts = {})
     root = "//examples/r31_nonexistent:x"
     error = "no such package 'examples/r31_nonexistent': BUILD file not found in any of the following directories."
     for config in ("ddf13d99", "6eed62c4"):
@@ -2811,7 +2774,7 @@ def _impl(ctx: TaskContext) -> int:
     # A target asked for that fails analysis is its own root cause, Bazel 9
     # posting an Aborted configured_label for it before its Aborted
     # target_configured: one failure, not two.
-    solo = _screen(ctx, ["x"], fs = ctx.std.fs, syntax = None, page_h = 10, env = ctx.std.env, read = lambda p, c: None, ansi = ctx.std.re.compile(ANSI), controls = ctx.std.re.compile(CONTROLS), test_counts = {}, spread = {}, last_attempts = {})
+    solo = _screen(ctx, ["x"], fs = ctx.std.fs, syntax = None, page_h = 10, env = _NO_ENV, read = lambda p, c: None, ansi = ctx.std.re.compile(ANSI), controls = ctx.std.re.compile(CONTROLS), test_counts = {}, spread = {}, last_attempts = {})
     own = "//p:req_broken"
     rid = struct(label = own, configuration = struct(id = "6e1e0d0f"))
     aborted = struct(reason = "ANALYSIS_FAILURE", description = "in broken rule " + own)
@@ -3003,7 +2966,7 @@ def _impl(ctx: TaskContext) -> int:
     def _attempt(label, attempt):
         return failure_of("test_result", struct(label = label, run = 1, shard = 1, attempt = attempt, configuration = struct(id = "c")), struct(status = "failed", test_action_output = [struct(name = "test.log", file = "x")]))
 
-    tri = _screen(ctx, ["ERROR: x"], fails = [_attempt("//t:a", 1), _attempt("//t:a", 2), _attempt("//t:b", 1)], fs = ctx.std.fs, syntax = None, page_h = 10, env = ctx.std.env, read = lambda p, c: None, ansi = ctx.std.re.compile(ANSI), controls = ctx.std.re.compile(CONTROLS), test_counts = {}, spread = {}, last_attempts = {("//t:a", "c", 1, 1): 2, ("//t:b", "c", 1, 1): 1})
+    tri = _screen(ctx, ["ERROR: x"], fails = [_attempt("//t:a", 1), _attempt("//t:a", 2), _attempt("//t:b", 1)], fs = ctx.std.fs, syntax = None, page_h = 10, env = _NO_ENV, read = lambda p, c: None, ansi = ctx.std.re.compile(ANSI), controls = ctx.std.re.compile(CONTROLS), test_counts = {}, spread = {}, last_attempts = {("//t:a", "c", 1, 1): 2, ("//t:b", "c", 1, 1): 1})
     on_key(tri, "]", 10)
     _eq("] opens the log in Failures, its attempt named", (tri["tab"], crumbs(tri)), ("failures", ["//t:a ▹ attempt 1/2"]))
     on_key(tri, "}", 10)
@@ -3057,7 +3020,7 @@ def _impl(ctx: TaskContext) -> int:
     def _run(n):
         return failure_of("test_result", struct(label = "//t:r", run = n, shard = 1, attempt = 1, configuration = struct(id = "c")), struct(status = "failed", test_action_output = [struct(name = "test.log", file = "x")]))
 
-    runs = _screen(ctx, ["x"], fails = [_run(1), _run(2), _run(3)], fs = ctx.std.fs, syntax = None, page_h = 10, env = ctx.std.env, read = lambda p, c: None, ansi = ctx.std.re.compile(ANSI), controls = ctx.std.re.compile(CONTROLS), test_counts = {("//t:r", "c"): (3, 1)}, spread = {}, last_attempts = {})
+    runs = _screen(ctx, ["x"], fails = [_run(1), _run(2), _run(3)], fs = ctx.std.fs, syntax = None, page_h = 10, env = _NO_ENV, read = lambda p, c: None, ansi = ctx.std.re.compile(ANSI), controls = ctx.std.re.compile(CONTROLS), test_counts = {("//t:r", "c"): (3, 1)}, spread = {}, last_attempts = {})
     seen = []
     for _ in range(4):
         on_key(runs, "}", 10)
@@ -3067,7 +3030,7 @@ def _impl(ctx: TaskContext) -> int:
     # ] [ with the pick on a target without a log (past the logged
     # records) open that row; } { the last logged one stands in. } with the open log's target
     # no longer listed (a newer build's failures): the chosen one's.
-    unlogged = _screen(ctx, ["x"], fails = [_attempt("//t:a", 1)], fs = ctx.std.fs, syntax = None, page_h = 10, env = ctx.std.env, read = lambda p, c: None, ansi = ctx.std.re.compile(ANSI), controls = ctx.std.re.compile(CONTROLS), test_counts = {}, spread = {}, last_attempts = {})
+    unlogged = _screen(ctx, ["x"], fails = [_attempt("//t:a", 1)], fs = ctx.std.fs, syntax = None, page_h = 10, env = _NO_ENV, read = lambda p, c: None, ansi = ctx.std.re.compile(ANSI), controls = ctx.std.re.compile(CONTROLS), test_counts = {}, spread = {}, last_attempts = {})
     count_aborted(unlogged["counts"], "//b:b", "analysis_failure")
     for key in ["]", "[", "}", "{"]:
         unlogged["view"] = None
@@ -3080,7 +3043,7 @@ def _impl(ctx: TaskContext) -> int:
     # } { step from the record shown, not the one chosen; one shown from a
     # list it is no longer in opens its target's first record here, unstepped.
     a1, a2, a3, c1, z1 = _attempt("//t:a", 1), _attempt("//t:a", 2), _attempt("//t:a", 3), _attempt("//t:c", 1), _attempt("//t:z", 1)
-    steps = _screen(ctx, ["x"], fails = [a1, a2, a3, c1], fs = ctx.std.fs, syntax = None, page_h = 10, env = ctx.std.env, read = lambda p, c: None, ansi = ctx.std.re.compile(ANSI), controls = ctx.std.re.compile(CONTROLS), test_counts = {}, spread = {}, last_attempts = {})
+    steps = _screen(ctx, ["x"], fails = [a1, a2, a3, c1], fs = ctx.std.fs, syntax = None, page_h = 10, env = _NO_ENV, read = lambda p, c: None, ansi = ctx.std.re.compile(ANSI), controls = ctx.std.re.compile(CONTROLS), test_counts = {}, spread = {}, last_attempts = {})
 
     def _open_one():
         return steps["view"]["record"] if steps["view"] != None else None
