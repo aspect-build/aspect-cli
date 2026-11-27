@@ -233,6 +233,8 @@ load("../private/lib/task_template_args.axl", "TASK_PRESET_PRECEDENCE", "task_te
 load("../private/lib/term_text.axl", "term_text")
 
 def _console_impl(ctx: FeatureContext):
+    if ctx.args.recap_max < 1:
+        ctx.std.process.exit(1, "--console:recap-max=%d: the most failures the summary lists must be 1 or more" % ctx.args.recap_max)
     profile = ctx.args.profile
     if profile == "auto":
         profile = "agent" if under_agent(ctx.std) else "human"
@@ -295,7 +297,7 @@ def _console_impl(ctx: FeatureContext):
         failures.collect_event(summary[0], event)
 
     # The summary lists as many failures as the recap would repeat errors.
-    summary_max = ctx.args.recap_max if type(ctx.args.recap_max) == "int" and ctx.args.recap_max > 0 else RECAP_MAX
+    summary_max = ctx.args.recap_max
 
     def _summarize(task_ctx, build):
         if trait.output_display == "none":
@@ -416,7 +418,7 @@ Console = feature(
         ),
         "recap_max": args.int(
             default = RECAP_MAX,
-            description = "How many failures the end-of-build summary lists, and of Bazel's other errors; the rest are counted (`aspect history show` has all).",
+            description = "How many failures the end-of-build summary lists, and of Bazel's other errors, 1 or more; the rest are counted (`aspect history show` has all).",
         ),
         "collapse": args.string_list(
             description = "A regex; Bazel messages whose first line it matches collapse into the first of them, whatever their severity. Never matches action or test output, nor the `INFO: From …` header above it. Repeat for several.",

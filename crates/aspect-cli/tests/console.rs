@@ -349,6 +349,22 @@ fn every_preset_keeps_task_output_events_and_exit_codes() {
 }
 
 #[test]
+fn a_recap_max_under_one_is_refused() {
+    for value in ["0", "-3"] {
+        let flag = format!("--console:recap-max={value}");
+        let output = run("", &["check", &flag], false);
+        let err = stderr(&output);
+        assert_eq!(output.status.code(), Some(1), "{value}: {err}");
+        assert!(
+            err.contains(&format!(
+                "{flag}: the most failures the summary lists must be 1 or more"
+            )),
+            "{value}: {err}"
+        );
+    }
+}
+
+#[test]
 fn compact_prints_the_verdict_alone() {
     let output = run(
         "",
