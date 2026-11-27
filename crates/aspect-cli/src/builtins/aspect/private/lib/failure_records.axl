@@ -137,7 +137,16 @@ def spawn_exit_code(payload) -> int:
     category = bes_get(bes_get(payload, "failure_detail", None), "category", None)
     return bes_get(category, "spawn_exit_code", 0) or 0
 
-def counted_internal(payload):
+# An action the events say failed, as `count_event` tallies it: its primary
+# output, whether Bazel counts it among `runner_count`'s internal actions
+# (`counted_internal`, None where it said nothing), and its mnemonic.
+_ActionFailure = record(
+    output = field(str),
+    counted_internal = field(bool | None),
+    mnemonic = field(str),
+)
+
+def counted_internal(payload) -> bool | None:
     """Whether Bazel counts a failed action among `runner_count`'s internal
     ones: every failure but one whose outputs were not created or which
     failed finalizing (`failure_detail`'s `ACTION_OUTPUTS_NOT_CREATED`,
@@ -638,8 +647,8 @@ def count_event(counts: dict, kind: str, event_id, payload, aborted: bool | None
     """Tally one build event into `counts`. `build_started` says whether the
     command tests (`testing`: `test` or `coverage`), which gates counting a
     test target that failed to build. Each action the events say failed,
-    a test's own (`TestRunner`) too, is in `action_failures`, `(primary
-    output, counted_internal, mnemonic)`, once per event, whatever the
+    a test's own (`TestRunner`) too, is in `action_failures`, an
+    `ActionFailure`, once per event, whatever the
     Failures list makes of it. A target that failed to build arrives
     as `target_completed` without `success`; one that never got that far
     (failed in loading or analysis, skipped, interrupted) as an Aborted
@@ -662,7 +671,11 @@ def count_event(counts: dict, kind: str, event_id, payload, aborted: bool | None
             counts["actions_internal"] = counts.get("actions_internal", 0) + 1
         return
     if kind == "action_completed" and not aborted:
-        counts["action_failures"].append((str(bes_get(event_id, "primary_output", "") or ""), counted_internal(payload), str(bes_get(payload, "type", "") or "")))
+        counts["action_failures"].append(_ActionFailure(
+            output = str(bes_get(event_id, "primary_output", "") or ""),
+            counted_internal = counted_internal(payload),
+            mnemonic = str(bes_get(payload, "type", "") or ""),
+        ))
         return
     if kind == "build_started":
         # Only a test or coverage run tests what it builds.
@@ -857,6 +870,7 @@ def _action_logs(state: dict, rec: dict) -> list:
     return _log_paths(state, rec) if state.get("read") != None else []
 
 failure_records = namespace(
+    ActionFailure = _ActionFailure,
     config_id = _config_id,
     label_of = _label_of,
     test_shape = test_shape,

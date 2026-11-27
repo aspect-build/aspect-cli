@@ -41,6 +41,7 @@ short_count = term_text.short_count
 status_row = dashboard_actions.testonly_status_row
 target_rows = dashboard_actions.target_rows
 text_width = term_text.text_width
+_ActionFailure = failure_records.ActionFailure
 _visible = dashboard_testing.visible
 _eq = dashboard_testing.eq
 _screen = dashboard_testing.screen
@@ -177,7 +178,7 @@ def _failed_records(n):
 
 def _failed_counts(counts: dict, n: int) -> dict:
     """`counts` with `n` failed genrules' events tallied (`action_failures`)."""
-    return dict(counts, action_failures = [("bazel-out/f%d" % i, True, "Genrule") for i in range(n)])
+    return dict(counts, action_failures = [_ActionFailure(output = "bazel-out/f%d" % i, counted_internal = True, mnemonic = "Genrule") for i in range(n)])
 
 # The code a decoded failure's category had, where a fixture names only it.
 _CODES = {"spawn": "NON_ZERO_EXIT", "execution": "ACTION_OUTPUTS_NOT_CREATED"}
@@ -272,7 +273,7 @@ def _actions_tests(ctx):
     for shard in (1, 2, 3):
         count_spawn(warm["counts"], struct(cache_hit = True, runner = "disk cache hit", outputs = [struct(type = "bazel-out/k8/testlogs/t/pshard/shard_%d_of_3/test.xml" % shard)]))
         runner_id = struct(label = "//t:pshard", primary_output = "bazel-out/k8/testlogs/t/pshard/shard_%d_of_3/test.log" % shard, configuration = None)
-        runner_payload = struct(success = False, type = "TestRunner", stderr = None, stdout = None, failure_detail = struct(message = "Sharding requested", test_action = struct(code = "LOCAL_TEST_PREREQ_UNMET")))
+        runner_payload = struct(success = False, type = "TestRunner", stderr = None, stdout = None, failure_detail = struct(message = "Sharding requested"))
         count_event(warm["counts"], "action_completed", runner_id, runner_payload)
     _eq("a warm rerun: the cleaned keys are the hits, the parts Bazel's count", _split_of(action_split(warm)), dict(done = 13, total = 13, ran = 5, local = 4, internal = 1, failed = 3))
     _eq("its cache hits: the local action cache's", [_visible(r) for r in action_results(action_split(warm), 200)], ["ran 8: █ 5 ok · ╳ 3 failed", "▒ 4 local action cache hits · ░ 1 internal"])
@@ -426,7 +427,7 @@ def _actions_tests(ctx):
     ahead = action_split(dict(late_log, progress = ["[8 / 14] 3 actions running"]))
     _eq("events ahead of the count take from ran", [ahead[k] for k in ("ran", "disk", "internal", "local", "done")], [1, 6, 1, 0, 8])
 
-    failing = dict(half, fails = list(half["fails"]), counts = dict(half["counts"], action_failures = half["counts"]["action_failures"] + [("bazel-out/bad", True, "Genrule")]))
+    failing = dict(half, fails = list(half["fails"]), counts = dict(half["counts"], action_failures = half["counts"]["action_failures"] + [_ActionFailure(output = "bazel-out/bad", counted_internal = True, mnemonic = "Genrule")]))
     failing["fails"].append({"kind": "action", "label": "//dc:bad", "detail": "Genrule", "files": [], "output": "", "success": False})
     _eq("once one failed, the gap is still the local action cache's, estimated", [action_split(failing)[k] for k in ("local", "other", "failed")], [9, 0, 1])
     _eq("none running: no `0 running`", "0 running" in _visible(" ".join(action_results(dict(told, running_now = 0), 90))), False)
@@ -469,7 +470,7 @@ def _actions_tests(ctx):
     count_spawn(noshard["counts"], struct(cache_hit = False, runner = "darwin-sandbox", outputs = [struct(type = 8)]))
     for shard in (1, 2):
         runner_id = struct(label = "//tx:tnoshard", primary_output = shards % shard + "test.log", configuration = None)
-        runner_payload = struct(success = False, type = "TestRunner", stderr = None, stdout = None, failure_detail = struct(message = "Testing //tx:tnoshard (shard %d of 2) failed: Sharding requested" % shard, test_action = struct(code = "LOCAL_TEST_PREREQ_UNMET")))
+        runner_payload = struct(success = False, type = "TestRunner", stderr = None, stdout = None, failure_detail = struct(message = "Testing //tx:tnoshard (shard %d of 2) failed: Sharding requested" % shard))
         count_event(noshard["counts"], "action_completed", runner_id, runner_payload)
         note_event(noshard, "action_completed", runner_id, runner_payload, False)
     _eq("a test Bazel failed itself: ╳, out of ran and internal, the parts Bazel's count", _split_of(action_split(noshard)), dict(done = 8, total = 8, internal = 6, failed = 2))

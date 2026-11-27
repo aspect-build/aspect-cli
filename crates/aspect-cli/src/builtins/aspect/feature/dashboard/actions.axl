@@ -595,7 +595,7 @@ def action_split(state: dict) -> dict:
             from_internal = max(0, min(in_total, internal - c.get("actions_internal", 0)))
         else:
             in_total = failed
-            from_internal = min(internal, len([f for f in failures if f[1] != False]))
+            from_internal = min(internal, len([f for f in failures if f.counted_internal != False]))
         internal -= from_internal
         left = in_total - from_internal
         other = 0
@@ -653,8 +653,8 @@ def _logged_kinds(counts: dict, failures: list) -> dict:
     kinds = dict(counts.get("log_kinds") or {})
     actions = counts.get("log_actions") or {}
     seen = {}
-    for output, _, mnemonic in failures:
-        key = output.rpartition("/")[0] + "/test.xml" if mnemonic == "TestRunner" and output.endswith("/test.log") else output
+    for f in failures:
+        key = f.output.rpartition("/")[0] + "/test.xml" if f.mnemonic == "TestRunner" and f.output.endswith("/test.log") else f.output
         kind = actions.get(key)
         if kind and key not in seen:
             seen[key] = True
