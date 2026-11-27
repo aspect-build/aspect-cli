@@ -528,57 +528,35 @@ def test_progress(state: dict):
     return (running, max(0, total - finished - running))
 
 def action_split(state: dict) -> dict:
-    """A build's actions by what became of each, for the bar, the Actions
-    rows and Metrics, in one unit, Bazel's actions: `done` of `total`
-    (Bazel's `[n / m]`, `more` while it analyses), and of them `ran`,
-    `local` (Bazel's action cache in the output base said the outputs were
-    still valid), `memory` (up to date in Bazel's memory: its graph's
-    cleaned action keys), `disk` and `remote` (a cache served every spawn
-    of the action), `internal` (no spawn: symlinks, manifests, file
-    writes), `failed` (every action the event stream says failed, a
-    test's own too: `action_failures`), `not_run` (what Bazel counted done without running
-    it or checking its action cache: an identical action of another target
-    made its outputs, or an input failed), `unreported` (done, its kind
-    not reported: no event or execution log says it) and, at the end,
-    `other` (what of `actions_executed` neither the execution log nor
-    `runner_count` gives a kind, rare); `disk_on` and `remote_on` say
-    which caches the build was given (`cache_kinds`).
+    """A build's actions in one unit, Bazel's actions, for the bar, the
+    Actions rows and Metrics: `done` of `total` (Bazel's own `[n / m]`,
+    `more` while it analyses) and how each done one went: `ran`, `failed`
+    (every action the events say failed, a test's own too:
+    `action_failures`), `local` (Bazel's action cache said its outputs were
+    still valid), `disk` and `remote` (a cache served every spawn of it),
+    `internal` (no spawn), `other` (what of Bazel's counts fits no kind,
+    rare), `not_run` (`NOT_RUN_WORD`: counted done without being run or
+    checked against a cache, `_NOT_RUN_KINDS`) and `unreported` (done, its
+    kind not said yet); `disk_on` and `remote_on` say which caches the
+    build was given.
 
-    Once the build has ended with its `BuildMetrics` (`final`), the done
-    count is Bazel's own last `[n / m]` (`build_progress`); `local` is
-    `action_cache_statistics.hits` (else an `action cache hit` runner),
-    `memory` `build_graph_metrics`' cleaned `ACTION_EXECUTION` keys,
-    `internal` `runner_count`'s internal ones (actions, where its other
-    runners count spawns), and the rest of `actions_executed` had spawns:
-    by action from the execution log the Dashboard read (`log_kinds`: a
-    cache hit only where every spawn was, else ran, the failed actions'
-    spawns left out, `_logged_kinds`), else by `runner_count`'s spawns, as
-    many as spawned at most. A failed action is inside `actions_executed`
-    where it executed: with every action's events, those not among the successful ones, in
-    `internal` (Bazel posts a failed action's result with no runner) as far
-    as the successful spawnless ones leave it, under a runner the rest;
-    without them, by what failed it (`counted_internal`). Each is taken out
-    of where it was counted; a failed action outside `actions_executed`
-    (an input it could not discover) from nothing. What the done count has
-    past the parts is `not_run` (without build graph metrics, as from
-    Bazel 7, the actions up to date in memory too); parts past it are a
-    counting error, shown as counted, never cut to fit. A failed build's total is at least what it created, and
-    its bar never full of what did not fail (`action_bar`).
-
-    While it runs with every action published (`--dashboard:actions=all`,
-    the default), the live split is the events' and the execution log's
-    (`_published_split`), `local` the done count's gap, `estimated`; with
-    only the execution log, `ran`, `disk` and `remote` are its actions and
-    what else is done `unreported`, which only `BuildMetrics` tells apart.
-    With no execution log to read (`own_execution_log`), only the done
-    count is `known`. `counted` once there is a done count."""
+    Once the build has ended with its `BuildMetrics` (`final`), the split
+    is exact: the executed actions by the execution log's actions where it
+    was read (`log_kinds`), else by `runner_count`, each failed one taken
+    out of where Bazel counted it, and `not_run` the rest of the done
+    count; parts past it are a counting error, shown as counted, never cut
+    to fit. While it runs, the split is the events' and the execution
+    log's (`_published_split`, `estimated`), or with only the log its kinds
+    and the rest `unreported`; with no log to read (`own_execution_log`)
+    only the done count is `known`. `counted` once there is a done
+    count."""
     done, total, more = build_progress(state)
     c = state.get("counts") or {}
     inv = state.get("inv") or {}
     summary = bes_get(inv.get("build_metrics"), "action_summary")
     executed = bes_get(summary, "actions_executed")
     caches = cache_kinds(inv)
-    split = dict(done = max(0, done), total = max(0, total, done), more = more, counted = done >= 0, known = False, final = False, estimated = False, ran = 0, local = 0, memory = 0, disk = 0, remote = 0, internal = 0, other = 0, failed = 0, not_run = 0, unreported = 0, failed_build = False, running = bool(state.get("building")), running_now = running_count(state), disk_on = caches[0], remote_on = caches[1])
+    split = dict(done = max(0, done), total = max(0, total, done), more = more, counted = done >= 0, known = False, final = False, estimated = False, ran = 0, local = 0, disk = 0, remote = 0, internal = 0, other = 0, failed = 0, not_run = 0, unreported = 0, failed_build = False, running = bool(state.get("building")), running_now = running_count(state), disk_on = caches[0], remote_on = caches[1])
     kinds = c.get("log_kinds") or {}
     logged = state.get("exec_log_read") and not own_execution_log(inv) and (kinds.get("ran", 0) + kinds.get("disk", 0) + kinds.get("remote", 0)) > 0
     if not state.get("building") and type(executed) == "int":
@@ -611,14 +589,7 @@ def action_split(state: dict) -> dict:
             ran = min(ran, spawned - disk - remote)
         stats = bes_get(summary, "action_cache_statistics")
         local = (bes_get(stats, "hits", 0) or 0) if stats != None else hit_runner
-        graph = bes_get(inv.get("build_metrics"), "build_graph_metrics")
-        memory = _graph_count(graph, "cleaned_values") or 0
 
-        # Failed actions inside `actions_executed`: those of every action's
-        # events not among the successful ones, in `internal` (no runner)
-        # as far as the successful spawnless ones leave it, under a runner
-        # the rest; without every event, each by what failed it
-        # (`counted_internal`). Any other failed action is outside it.
         if c.get("actions_seen") and state.get("all_actions", True):
             in_total = max(0, min(failed, executed - c.get("actions_seen", 0)))
             from_internal = max(0, min(in_total, internal - c.get("actions_internal", 0)))
@@ -641,14 +612,10 @@ def action_split(state: dict) -> dict:
                 else:
                     remote -= took
             other = max(0, spawned - from_internal - (in_total - from_internal - left) - ran - disk - remote)
-        whole = ran + local + memory + disk + remote + internal + failed + other
+        whole = ran + local + disk + remote + internal + failed + other
         succeeded = build_succeeded(inv)
-
-        # The done count is Bazel's own last `[n / m]`; what it has past the
-        # parts is `not_run`. Parts past it are a counting error, shown as
-        # they are.
         not_run = max(0, done - whole)
-        split.update(counted = True, known = True, final = True, ran = ran, local = local, memory = memory, disk = disk, remote = remote, internal = internal, failed = failed, not_run = not_run, other = other, more = False, failed_build = not succeeded)
+        split.update(counted = True, known = True, final = True, ran = ran, local = local, disk = disk, remote = remote, internal = internal, failed = failed, not_run = not_run, other = other, more = False, failed_build = not succeeded)
         split["done"] = done if done >= 0 else whole
         created = bes_get(summary, "actions_created", 0) or 0
         if succeeded:
@@ -694,18 +661,6 @@ def _logged_kinds(counts: dict, failures: list) -> dict:
             seen[key] = True
             kinds[kind] -= 1
     return kinds
-
-def _graph_count(graph, field: str):
-    """`BuildGraphMetrics`' `field` (`built_values`, `cleaned_values`) count
-    of `ACTION_EXECUTION` keys, None where Bazel gave none of that field."""
-    stats = bes_get(graph, field, None)
-    if stats == None or graph == None:
-        return None
-    n = 0
-    for stat in stats or []:
-        if str(bes_get(stat, "skyfunction_name", "") or "") == "ACTION_EXECUTION":
-            n += bes_get(stat, "count", 0) or 0
-    return n
 
 def _published_split(state: dict, split: dict, done: int) -> dict:
     """`action_split` while a build runs with every action it executes
@@ -758,10 +713,9 @@ def _events_seen(state: dict) -> int:
     return c.get("actions_seen", 0) + len(c.get("action_failures") or [])
 
 def hit_count(split: dict) -> int:
-    """The actions whose results were reused: the local action cache's,
-    those up to date in Bazel's memory, the disk cache's and the remote
-    one's."""
-    return split["local"] + split.get("memory", 0) + split["disk"] + split["remote"]
+    """The actions whose results were reused: the local action cache's, the
+    disk cache's and the remote one's."""
+    return split["local"] + split["disk"] + split["remote"]
 
 def hit_percent(split: dict):
     """`hit_count` of the done count, the actions the label counts, a
@@ -794,13 +748,14 @@ def actions_text(split: dict) -> list:
     share = " (%d%%)" % pct if pct != None else ""
     return ["%s · %s cache hits%s" % (actions, hits, share), "%s · %s hits%s" % (n, hits, share), actions, n]
 
-# The words of the actions up to date in Bazel's memory (its graph's
-# cleaned values), a cache hit, and of those Bazel counted done without
-# running them or checking its action cache (an identical action of another
-# target made their outputs, or an input failed), each here alone.
-MEMORY_WORD = "in memory"
-
+# The word of the actions Bazel counted done without running them or
+# checking a cache (`action_split`'s `not_run`), here alone, and what those
+# can be, read in Bazel's source (`ExecutionProgressReceiver` counts done
+# every action key its graph evaluates, one whose inputs are unchanged too,
+# which no metric counts).
 NOT_RUN_WORD = "skipped"
+
+_NOT_RUN_KINDS = "already up to date in Bazel's memory (a warm server found nothing they depend on changed), made by an identical action of another target, or an input failed; on Bazel 7 and 8 also internal actions, which their runner counts leave out where spawns outnumber actions"
 
 # Each kind of action the bar and the Actions rows tell apart: its key in
 # `action_split`, its glyph (each its own shape, apart without colour), its
@@ -808,7 +763,6 @@ NOT_RUN_WORD = "skipped"
 _ACTION_KINDS = [
     ("ran", "█", "accent", "ok"),
     ("failed", "╳", "error", "failed"),
-    ("memory", "▒", "muted", MEMORY_WORD),
     ("local", "▒", "muted", "local action cache"),
     ("disk", "▓", "success", "disk"),
     ("remote", "▓", "success", "remote"),
@@ -828,7 +782,7 @@ def _part(key: str, n: int, how = "", glyph = None) -> tuple:
 # The bar's segments, in order: glyph, role, and the keys in
 # `action_split` they sum; `unreported` the done count no event or log says
 # the kind of yet.
-_SEGMENTS = [(_KIND[keys[0]][0], _KIND[keys[0]][1], keys) for keys in (["ran"], ["disk", "remote"], ["local", "memory"], ["other"], ["internal"], ["failed"], ["not_run"])] + [("┈", "border", ["unreported"])]
+_SEGMENTS = [(_KIND[keys[0]][0], _KIND[keys[0]][1], keys) for keys in (["ran"], ["disk", "remote"], ["local"], ["other"], ["internal"], ["failed"], ["not_run"])] + [("┈", "border", ["unreported"])]
 
 # A done count nothing tells apart: no execution log to read.
 _DONE = ("━", "")
@@ -940,10 +894,8 @@ def action_parts(split: dict) -> list:
     parts = [_part("ran", split["ran"])]
     if split["failed"]:
         parts.append(_part("failed", split["failed"]))
-    if split.get("memory"):
-        parts.append(_part("memory", split["memory"]))
     if final or split["local"]:
-        parts.append(_part("local", split["local"], "estimate" if split.get("estimated") else "", "" if split.get("memory") else None))
+        parts.append(_part("local", split["local"], "estimate" if split.get("estimated") else ""))
     glyph = None
     for key, on in (("disk", split["disk_on"]), ("remote", split["remote_on"])):
         if split[key] or (final and on):
@@ -959,10 +911,10 @@ def action_parts(split: dict) -> list:
 # and the cache hits.
 _RAN = ["ok", "failed"]
 
-_HITS = [MEMORY_WORD, "local action cache", "disk", "remote"]
+_HITS = ["local action cache", "disk", "remote"]
 
 # A group's one part, its header dropped, says the group's meaning.
-_ALONE = {"ok": "ran", "local action cache": "local action cache hits", MEMORY_WORD: "cache hits " + MEMORY_WORD, "disk": "disk cache hits", "remote": "remote cache hits"}
+_ALONE = {"ok": "ran", "local action cache": "local action cache hits", "disk": "disk cache hits", "remote": "remote cache hits"}
 
 def _part_text(part: tuple, level: int) -> tuple:
     """`(plain, drawn)` of one part at `level` (0 whole, 1 `local`, 2
@@ -974,8 +926,6 @@ def _part_text(part: tuple, level: int) -> tuple:
         words = "local"
     elif level >= 1 and words == "cache hits":
         words = "hits"
-    elif level >= 2 and words == _ALONE[MEMORY_WORD]:
-        words = ("hits " if level < 3 else "") + MEMORY_WORD
     elif level >= 1 and words.endswith(" cache hits") and words != "cache hits":
         # A group's one part, its meaning in fewer words where they're
         # short, and at last its cache's alone.
@@ -987,7 +937,7 @@ def _part_text(part: tuple, level: int) -> tuple:
     return (plain, ((_c(role) + glyph + _RESET) if role and glyph else glyph) + plain[len(glyph):])
 
 # The Actions rows' parts in their order, by their words.
-_PART_ORDER = ["done", "ok", "failed", MEMORY_WORD, "local action cache", "disk", "remote", NOT_RUN_WORD, "internal", "other", "unreported", "running", "pending"]
+_PART_ORDER = ["done", "ok", "failed", "local action cache", "disk", "remote", NOT_RUN_WORD, "internal", "other", "unreported", "running", "pending"]
 
 # The live parts that keep their place at 0 once shown: glyph and role.
 _HELD = {"unreported": ("?", ""), "running": ("─", "border"), "pending": ("", ""), "internal": _KIND["internal"][:2]}
@@ -1334,7 +1284,7 @@ def action_lines(state: dict) -> list:
         "ok": [(name, spawns(n)) for name, n in _by_count({k: n for k, n in runners.items() if not _cache_runner(k)})],
         "disk": [(name, spawns(n)) for name, n in _by_count({k: n for k, n in runners.items() if k == "disk cache hit"})],
         "remote": [(name, spawns(n)) for name, n in _by_count({k: n for k, n in runners.items() if _cache_runner(k) and k != "disk cache hit"})],
-        "local": [("", "Bazel's local action cache, or what it knew in memory, said the outputs on disk were still valid" + ("; estimated while it runs" if split.get("estimated") else ""))],
+        "local": [("", "Bazel's local action cache said the outputs on disk were still valid" + ("; estimated while it runs" if split.get("estimated") else ""))],
         "internal": [(name, _thousands(n)) for name, n in _by_count(kinds)],
         "other": [("", "what Bazel's counts leave out of every kind")],
     }
@@ -1384,7 +1334,7 @@ def action_lines(state: dict) -> list:
     return out
 
 dashboard_actions = namespace(
-    MEMORY_WORD = MEMORY_WORD,
+    NOT_RUN_KINDS = _NOT_RUN_KINDS,
     NOT_RUN_WORD = NOT_RUN_WORD,
     action_bar = action_bar,
     action_counts = action_counts,

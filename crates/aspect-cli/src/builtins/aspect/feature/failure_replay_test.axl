@@ -122,7 +122,7 @@ def _replay(ctx: TaskContext, case: str, prefix: str) -> str:
     split = action_split(dict(state, building = False))
     if split["final"]:
         parts = 0
-        for key in ("ran", "local", "memory", "disk", "remote", "internal", "failed", "other", "not_run", "unreported"):
+        for key in ("ran", "local", "disk", "remote", "internal", "failed", "other", "not_run", "unreported"):
             parts += split[key]
         if parts != split["done"]:
             fail("%s/%s: the actions' parts add up to %d of %d" % (case, prefix, parts, split["done"]))

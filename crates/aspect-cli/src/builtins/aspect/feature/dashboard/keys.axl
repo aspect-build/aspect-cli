@@ -11,7 +11,7 @@ load("../../private/lib/term_text.axl", "term_text")
 fit = term_text.fit
 text_width = term_text.text_width
 _tab_extras = failures.tab_extras
-MEMORY_WORD = dashboard_actions.MEMORY_WORD
+NOT_RUN_KINDS = dashboard_actions.NOT_RUN_KINDS
 NOT_RUN_WORD = dashboard_actions.NOT_RUN_WORD
 built = dashboard_actions.built
 _clock = dashboard_log.clock
@@ -598,16 +598,16 @@ _ACTIONS_KEY = [
     "  ran: ok + failed: actions executed this build",
     "█ ok: executed this build and succeeded, locally, sandboxed, in a worker or remotely",
     "╳ failed: executed this build and failed (test failures are under Tests)",
-    "  cache hits: %s + local + disk + remote: actions whose results were reused" % MEMORY_WORD,
-    "▒ %s / local: outputs already known valid on this machine: Bazel's in-memory build graph (warm server) or its action cache. Live, local is estimated (~)" % MEMORY_WORD,
+    "  cache hits: local + disk + remote: actions whose results were reused",
+    "▒ local: outputs Bazel's action cache on this machine said were still valid. Live, local is estimated (~)",
     "▓ disk / remote: outputs from the --disk_cache directory, or from the remote cache (including a remote executor's cached result)",
-    "○ %s: Bazel counted these done without running them or checking its action cache: an identical action of another target already made the same output (shared), or an input failed" % NOT_RUN_WORD,
+    "○ %s: Bazel counted these done without running them or checking a cache: %s" % (NOT_RUN_WORD, NOT_RUN_KINDS),
     "░ internal: Bazel bookkeeping with no command (runfiles trees, file writes, workspace status)",
     "▌ other: what Bazel's own counts leave out of every kind, at the end (no execution log to tell them apart); rare",
     "? unreported: Bazel counted these done but hasn't said how; live they settle into a kind, and without every action's events (a remote cache, a --bes_backend, --dashboard:actions=failed) some stay (┈ on the bar)",
     "─ not done: running or pending",
     "actions: what Bazel checked this build. Targets whose inputs didn't change are skipped before this count, so it isn't the whole graph",
-    "%: cache hits ÷ actions; targets Bazel skipped without checking aren't counted, so a warm and a fresh server aren't comparable",
+    "%: cache hits ÷ actions; skipped ones are no hits, so a warm and a fresh server aren't comparable",
     "The groups and parts don't overlap: they add up to the total actions.",
 ]
 
