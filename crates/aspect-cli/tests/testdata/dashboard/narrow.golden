@@ -1,9 +1,9 @@
  ⠋ aspect build · 12s
 ┌─ Running (2) ────┐┌─ Results ────────┐
 │ Compilin…a.cc 3s ││ Targets ✗0 ✓0/0  │
-│ Linking …:bin 1s ││ Actions ─ 2 run… │
-│                  ││                  │
-│                  ││                  │
+│ Linking …:bin 1s ││ Actions          │
+│                  ││  ─ 2 running     │
+│                  ││  4 pending       │
 └──────────────────┘└──────────────────┘
 ┌─ Console ──────────────── following ─┐
 │ le                                   │

@@ -719,6 +719,12 @@ def _actions_tests(ctx):
         }[cols]
         _eq("Results' Actions rows at %d columns" % cols, rows[at:at + len(want)], want)
         _eq("its label at %d columns" % cols, drawn[1].rstrip(" \r").endswith("8,483 · 2,834 hits (33%)" if cols == 60 else "8,483 actions · 2,834 cache hits (33%)"), True)
+    for cols in range(40, 61, 2):
+        drawn = _visible(render(greg_screen, cols, 36)).split("\n")
+        right = [r.split("││ ")[1].rstrip(" │\r") if "││ " in r else "" for r in drawn]
+        at = [i for i, r in enumerate(right) if r.startswith("Actions")][0]
+        block = [r for r in right[at:at + 6] if r.startswith(" ") or r.startswith("Actions")]
+        _eq("no action part cut at %d columns" % cols, [r for r in block if "…" in r], [])
     wide_meld = dict(meld, building = True, progress = [both[0], "[3,830 / 8,563] 16 actions, 15 running"])
     _eq("the bar's label at 140 columns", _visible(render(wide_meld, 140, 30)).split("\n")[1].rstrip(" \r").endswith(" 3,830 of 8,563+ actions"), True)
     _eq("and at 40", _visible(render(wide_meld, 40, 30)).split("\n")[1].rstrip(" \r").endswith(" 3,830/8,563+"), True)
