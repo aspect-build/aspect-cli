@@ -25,9 +25,12 @@ host = socket.gethostname(); user = getpass.getuser()
 def scrub(s):
     for a, b in subs:
         if a: s = s.replace(a, b)
-    # The host as a whole word only: a short name like `build` is in `build_event` too.
-    if host:
-        s = re.sub(r"(?<![\w.-])" + re.escape(host.split(".")[0]) + r"(?![\w-])", "${HOST}", s)
+    # The host inside a path alone (a cache or log folder named for it):
+    # never as a word of free text, where a short name like `build` is in
+    # `build_event` too. The fields that carry it are scrubbed by name.
+    short = host.split(".")[0] if host else ""
+    if short:
+        s = re.sub(r"/[^\s'\"]+", lambda m: m.group(0).replace(short, "${HOST}"), s)
     s = re.sub(r"/var/folders/[^/]+/[^/]+/", "${DARWIN_USER_DIR}/", s)
     for k in ("USER", "LOGNAME"):
         s = s.replace(k + "=" + user, k + "=${USER}")

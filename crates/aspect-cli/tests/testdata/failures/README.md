@@ -41,7 +41,7 @@ folder with `src/` (Bazel files suffixed `.in`), `cmd` and `variants`; record it
   <ver>.bep.json            --build_event_json_file output (cmd includes --build_event_publish_all_actions)
   <ver>.console             Bazel's stderr, written to a pty, --color=yes --curses=yes
   <ver>.stdout              Bazel's stdout, a file of its own, only when non-empty: Bazel relays an
-                            action's stdout here, so it is not in the console (as in CI, where the
+                            action's stdout here, so it is not in the console (as wherever the
                             CLI's stdout is not its stderr)
   <ver>.exit                Bazel's exit code ("timeout" if the 90s console_only cap hit)
   <ver>.files/<path>        copies of the action stderr/stdout and test.log/test.xml files the BEP names
@@ -58,7 +58,9 @@ The recorder drops the BEP events the summary never reads, which were most of th
 
 The recorder puts `--nosystem_rc` before `cmd`, with the startup options a `cmd` starts with
 (`oom`'s `--host_jvm_args`), and adds these after it: `--disk_cache=`, `--lockfile_mode=off`,
-the colour flags and `--build_event_json_file`. Bazel runs under
+the colour flags, `--build_event_json_file` and an `--action_env` of its own, so each
+recording runs its actions again rather than taking them from Bazel's action cache (a
+successful action's `INFO: From` output is in every variant). Bazel runs under
 `env -i` with an empty HOME, so no user rc file or environment variable reaches the recording.
 Each case is preceded by an unrecorded `--nobuild` run of the same command so module
 resolution and repository fetches do not show in whichever case happens to run first; the
