@@ -1508,6 +1508,13 @@ def _impl(ctx: TaskContext) -> int:
     _eq("a skipped one is not finished", tests_cached_text({"tests_cached": 3, "tests_passed": 3, "tests_skipped": 9}), " (3 cached)")
     _eq("a target with a shard run is not cached", (sharded["tests_cached"], tests_cached_text(sharded)), (1, " (1 cached)"))
 
+    # A test a filter took out (`--test_tag_filters=-slow`) is configured
+    # but never run: pending is of the tests Bazel's status line says it
+    # runs (`1 / 2 tests`), not of those configured.
+    tagged = _screen(ctx, ["x"], progress = ["[20 / 24] 1 / 2 tests; 1 action running", "    Testing //t:ok0; 0s darwin-sandbox"])
+    tagged["counts"].update(testing = True, tests_passed = 1, test_targets = {"//t:ok0": True, "//t:ok1": True, "//t:slow": True})
+    _eq("a filtered test is never pending", test_progress(tagged), (1, 0))
+
     # Tests running and pending while a `test` build runs: targets in
     # Bazel's running list (a shard, a run, an attempt alike, each target
     # once), the rest of those configured pending once analysed, the parts

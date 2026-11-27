@@ -3206,14 +3206,27 @@ def tests_cached_text(counts: dict) -> str:
     cached = min(counts.get("tests_cached", 0), finished)
     return _counts(" (%d cached)", cached) if cached else ""
 
+def _tests_said(row: str):
+    """The tests Bazel's status line says it runs (`[10 / 52] 3 / 9 tests;
+    …` gives 9), else None."""
+    at = row.find(" tests")
+    if at < 0 or "[" not in row[:at]:
+        return None
+    words = row[:at].split(" ")
+    if len(words) < 3 or words[-2] != "/":
+        return None
+    total = words[-1].replace(",", "")
+    return int(total) if total.isdigit() else None
+
 def test_progress(state: dict):
     """`(running, pending)` test targets while a `test` build runs, None
     otherwise: running, the targets with a test action in Bazel's running
     list (`Testing //t:a (shard 2 of 3)`, a run or an attempt alike, each
     target once, not one with its result in: Bazel's list can lag it by a
     frame), at most the `--ui_actions_shown` Bazel lists (8 by default;
-    the rest count as pending; `[Sched]` ones wait); pending, the test targets
-    configured less those with a result (passed, failed, flaky, skipped,
+    the rest count as pending; `[Sched]` ones wait); pending, the tests
+    Bazel's status line says it runs (`3 / 9 tests`), else the test
+    targets configured, less those with a result (passed, failed, flaky, skipped,
     or failed to build) and those running, None while Bazel analyses and
     the test count is not known yet."""
     c = state.get("counts") or {}
@@ -3229,6 +3242,15 @@ def test_progress(state: dict):
                 labels[label] = True
     running = len(labels)
     known = len(c.get("test_targets") or {})
+
+    # Bazel's own count of the tests it runs (`3 / 9 tests`) leaves out
+    # those a filter took out (`--test_tag_filters`), which are configured
+    # all the same.
+    progress = state.get("progress") or []
+    at = status_row(progress)
+    said = _tests_said(progress[at]) if at >= 0 else None
+    if said != None:
+        known = said
     if build_progress(state)[2] or not known:
         return (running, None) if running else None
     finished = c.get("tests_passed", 0) + c.get("tests_failed", 0) + c.get("tests_flaky", 0) + c.get("tests_skipped", 0)
