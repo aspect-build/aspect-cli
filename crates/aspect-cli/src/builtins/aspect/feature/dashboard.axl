@@ -6542,9 +6542,9 @@ def console_ties(state: dict) -> dict:
       created` line for its primary output, quoted, and its location;
     - every action of a target: the location every line naming `target
       <label>)` gives, when they all give one;
-    - an analysis or loading root: the one line whose text after its
-      location (or a pattern's after `Skipping '<pattern>': `) is its
-      description's first line;
+    - an analysis or loading root: the one line with a location whose
+      text after it is its description's first line (every line saying
+      just that, a pattern's after `Skipping '<pattern>': ` too, claimed);
     - a target named by its own error (`<label>: …`, an attribute error):
       those lines, quoted, and their location when they all give one;
     - a target that failed with no action of its own: the one line ending
@@ -6671,7 +6671,7 @@ def console_ties(state: dict) -> dict:
             found = by["said"].get(first, []) + [k for k in by["plain"].get(first, []) + by["plain"].get("Skipping '%s': %s" % (label, first), []) if headers[k]["said"] != first]
             for k in found:
                 claimed[k] = True
-            k = tie(found)
+            k = tie([k for k in found if headers[k]["location"]])
             if k != None:
                 out["location"] = headers[k]["location"]
         own = by["prefix"].get(label, [])

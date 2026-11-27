@@ -7,7 +7,7 @@ exit 1
   │ Recommendation: modify the visibility declaration if you think the dependency is legitimate.
   │   For more info see https://bazel.build/concepts/visibility
 
-✗ //nosuchpkg:x  analysis
+✗ //nosuchpkg:x  analysis · vis/BUILD.bazel:3:8
   │ no such package 'nosuchpkg': BUILD file not found in any of the following directories. Add a
   │   BUILD file to a directory to mark it as a package.
   │  - nosuchpkg
@@ -23,7 +23,7 @@ All of it: aspect history show t-replay
   │ target '//priv:priv' is not visible from
   │ target '//vis:vis'
   │ Recommendation: modify the visibility declaration if you think the dependency is legitimate. For more info see http…
-✗ //nosuchpkg:x  analysis
+✗ //nosuchpkg:x  analysis · vis/BUILD.bazel:3:8
   │ no such package 'nosuchpkg': BUILD file not found in any of the following directories. Add a BUILD file to a direct…
   │  - nosuchpkg
 ✗ //vis:mt  vis/BUILD.bazel:2:8
