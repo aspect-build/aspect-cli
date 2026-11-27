@@ -738,7 +738,7 @@ def add_lines(state: dict, lines: list, links = None, colours = None, cli = Fals
         state["line_links"] = {line: spans for line, spans in state["line_links"].items() if line in kept}
 
 # How long the keys row says what a toggle did.
-_SAID_MS = 2000
+_NOTE_MS = 2000
 
 def say_note(state: dict, text: str, ms = None):
     """Have the keys row say `text` (`""` for nothing), until the next key,
@@ -819,7 +819,7 @@ dashboard_log = namespace(
     refold = refold,
     replay_lines = replay_lines,
     report_lines = report_lines,
-    SAID_MS = _SAID_MS,
+    NOTE_MS = _NOTE_MS,
     say_note = say_note,
     search_bar = _search_bar,
     search_key = _search_key,

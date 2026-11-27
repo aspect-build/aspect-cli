@@ -475,7 +475,7 @@ def tests_cached_text(counts: dict) -> str:
     cached = min(counts.get("tests_cached", 0), finished)
     return _counts(" (%d cached)", cached) if cached else ""
 
-def _tests_said(row: str):
+def _status_test_total(row: str):
     """The tests Bazel's status line says it runs (`[10 / 52] 3 / 9 tests;
     …` gives 9), else None."""
     at = row.find(" tests")
@@ -519,11 +519,11 @@ def test_progress(state: dict):
     # finds test targets, so never less than what is finished or running.
     progress = state.get("progress") or []
     at = status_row(progress)
-    said = _tests_said(progress[at]) if at >= 0 else None
-    if build_progress(state)[2] or said == None:
+    stated = _status_test_total(progress[at]) if at >= 0 else None
+    if build_progress(state)[2] or stated == None:
         return (running, None) if running else None
     finished = c.get("tests_passed", 0) + c.get("tests_failed", 0) + c.get("tests_flaky", 0) + c.get("tests_skipped", 0)
-    total = max(said, finished + running)
+    total = max(stated, finished + running)
     return (running, max(0, total - finished - running))
 
 def action_split(state: dict) -> dict:
@@ -796,8 +796,8 @@ def actions_text(split: dict) -> list:
         return [actions, n]
     hits = _thousands(hit_count(split))
     pct = hit_percent(split)
-    said = " (%d%%)" % pct if pct != None else ""
-    return ["%s · %s cache hits%s" % (actions, hits, said), "%s · %s hits%s" % (n, hits, said), actions, n]
+    share = " (%d%%)" % pct if pct != None else ""
+    return ["%s · %s cache hits%s" % (actions, hits, share), "%s · %s hits%s" % (n, hits, share), actions, n]
 
 # The bar's segments, in order: glyph (each its own shape, apart without
 # colour), role, and the keys in `action_split` they sum. `rest` is the

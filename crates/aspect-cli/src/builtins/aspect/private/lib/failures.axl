@@ -484,12 +484,12 @@ def _last_words(state: dict) -> list:
     else, a crashed server's `FATAL: …` and `Server terminated abruptly`
     lines, else its last lines but progress, at most `_EXCERPT_LINES`."""
     tail = [l for l in _plain_text(state, _tail_text(state, state.get("log_path", "")) or "").split("\n") if l.strip()]
-    said = [l[len("ERROR: "):] for l in tail if l.startswith("ERROR: ")]
-    if not said:
-        said = [l for l in tail if l.startswith(("FATAL: ", "Server terminated abruptly"))]
-    if not said:
-        said = [l for l in tail if not l.startswith(("[", "INFO: ", "WARNING: ", "Loading", "Analyzing", "Computing", "Starting local Bazel server", "Extracting Bazel installation", "  "))]
-    return said[-_EXCERPT_LINES:]
+    words = [l[len("ERROR: "):] for l in tail if l.startswith("ERROR: ")]
+    if not words:
+        words = [l for l in tail if l.startswith(("FATAL: ", "Server terminated abruptly"))]
+    if not words:
+        words = [l for l in tail if not l.startswith(("[", "INFO: ", "WARNING: ", "Loading", "Analyzing", "Computing", "Starting local Bazel server", "Extracting Bazel installation", "  "))]
+    return words[-_EXCERPT_LINES:]
 
 def failure_summary(state: dict, task_id: str, tty: bool, log_path: str = "", linked = None, excerpt = None, width = 100, bazel_exit = None, max_entries = None) -> list:
     """The end of a build's console, the same with the Dashboard or
@@ -555,9 +555,9 @@ def failure_summary(state: dict, task_id: str, tty: bool, log_path: str = "", li
         for i, e in enumerate(listed):
             if i:
                 out.append("")
-            said = ([e["kind"]] if e["kind"] else []) + e["details"]
-            name = e["label"] or ("error" if not said else "")
-            out.append(red + cross + reset + " " + bold + name + reset + (("  " if name else "") + muted + " · ".join(said) + reset if said else ""))
+            details = ([e["kind"]] if e["kind"] else []) + e["details"]
+            name = e["label"] or ("error" if not details else "")
+            out.append(red + cross + reset + " " + bold + name + reset + (("  " if name else "") + muted + " · ".join(details) + reset if details else ""))
             if i < _EXCERPTED:
                 for line in e["rows"]:
                     if line == _GAP_ROW:

@@ -26,7 +26,7 @@ _BAZEL_ERROR = "\x1b[31m\x1b[1mERROR: "
 
 def _bazel_headers(state: dict, text: str) -> list:
     """Bazel's `ERROR:` lines in `text`, the console's kept blocks in
-    order (`console_ties`), each `{start, end, plain, location, said}`: where
+    order (`console_ties`), each `{start, end, plain, location, message, coloured}`: where
     the line starts and ends, its text without escapes and before the last
     CR (a redraw), its location (`pkg/BUILD.bazel:3:8`, `pkg/BUILD.bazel`,
     made relative to the workspace) and what it says after that. Where
@@ -52,11 +52,11 @@ def _bazel_headers(state: dict, text: str) -> list:
         head, sep, rest = plain.partition(": ")
         pieces = head.split(":")
         location = ""
-        said = plain
+        message = plain
         if sep and " " not in head and ((len(pieces) >= 2 and pieces[1].isdigit()) or head.endswith(("/BUILD", "/BUILD.bazel"))):
             location = head[len(workspace) + 1:] if workspace and head.startswith(workspace + "/") else head
-            said = rest
-        found.append({"start": start, "end": end, "plain": plain, "location": location, "said": said, "coloured": _BAZEL_ERROR in line})
+            message = rest
+        found.append({"start": start, "end": end, "plain": plain, "location": location, "message": message, "coloured": _BAZEL_ERROR in line})
     if [h for h in found if h["coloured"]]:
         found = [h for h in found if h["coloured"]]
     return found
@@ -194,9 +194,9 @@ def _absorb_tails(state: dict, text: str, blocks: list, froms: list, spans: list
     for i, header, body_len, last in froms:
         if i + 1 >= len(blocks) or blocks[i + 1][2] not in (("tail", "error") if plain else ("tail",)):
             continue
-        said = (ansi.replace(header, "") if ansi != None else header).rpartition("\r")[2].rstrip("\n")
+        shown = (ansi.replace(header, "") if ansi != None else header).rpartition("\r")[2].rstrip("\n")
         named = []
-        for word in said.split(" ")[1:]:
+        for word in shown.split(" ")[1:]:
             for label in (word, word[:-1] if word.endswith(":") else None):
                 if label and label in by_label:
                     named += [k for k in by_label[label] if k not in named]
@@ -360,28 +360,28 @@ def console_ties(state: dict) -> dict:
     claimed = {}
 
     # The lines by what each says, so every tie is a lookup.
-    by = {"status": {}, "target": {}, "said": {}, "plain": {}, "reason": {}, "failed": {}, "referrer": {}, "prefix": {}, "declared": {}}
+    by = {"status": {}, "target": {}, "message": {}, "plain": {}, "reason": {}, "failed": {}, "referrer": {}, "prefix": {}, "declared": {}}
     for k, h in enumerate(headers):
-        said = h["said"]
-        what, failed, reason = said.partition(" failed: ")
+        message = h["message"]
+        what, failed, reason = message.partition(" failed: ")
         if failed:
             by["reason"].setdefault(reason, []).append(k)
             by["failed"].setdefault(_failed_label(what), []).append(k)
             if reason.startswith("("):
                 by["status"].setdefault(reason.partition("): ")[2], []).append(k)
         for marker in (" rule target ", "(from target "):
-            at = said.find(marker)
+            at = message.find(marker)
             if at >= 0:
-                named = said[at + len(marker):].partition(")")[0]
+                named = message[at + len(marker):].partition(")")[0]
                 by["target"].setdefault(named, []).append(k)
                 break
-        by["said"].setdefault(said, []).append(k)
+        by["message"].setdefault(message, []).append(k)
         by["plain"].setdefault(h["plain"], []).append(k)
-        if said.endswith("'") and " and referenced by '" in said:
-            by["referrer"].setdefault(said.rpartition(" and referenced by '")[2][:-1], []).append(k)
-        by["prefix"].setdefault(said.partition(": ")[0], []).append(k)
-        if said.startswith("declared output '") and "' was not created by genrule" in said:
-            by["declared"].setdefault(said[len("declared output '"):].partition("' was not created by genrule")[0], []).append(k)
+        if message.endswith("'") and " and referenced by '" in message:
+            by["referrer"].setdefault(message.rpartition(" and referenced by '")[2][:-1], []).append(k)
+        by["prefix"].setdefault(message.partition(": ")[0], []).append(k)
+        if message.startswith("declared output '") and "' was not created by genrule" in message:
+            by["declared"].setdefault(message[len("declared output '"):].partition("' was not created by genrule")[0], []).append(k)
 
     def tie(found):
         return found[0] if len(found) == 1 else None
@@ -413,13 +413,13 @@ def console_ties(state: dict) -> dict:
                 claimed[k] = True
                 spans.append((headers[k]["end"], end))
                 out["location"] = headers[k]["location"]
-                out["status"] = headers[k]["said"].partition(" failed: (")[2].partition("): ")[0]
+                out["status"] = headers[k]["message"].partition(" failed: (")[2].partition("): ")[0]
         if not out["status"] and pieces and [p for p in pieces if p[1] != ""]:
             found = []
             for k in by["target"].get(label, []):
                 h = headers[k]
                 end = _relayed(text, h["end"] + 1, "", pieces, tails)
-                if ("failed: (Exit %d)" % rec.get("exit_code", 0)) in h["said"] and end >= 0:
+                if ("failed: (Exit %d)" % rec.get("exit_code", 0)) in h["message"] and end >= 0:
                     found.append((k, end))
             got = tie(found)
             if got != None:
@@ -433,11 +433,11 @@ def console_ties(state: dict) -> dict:
         # it; Bazel's line says it as meant.
         made = repaired(rec.get("output", "")).partition("/bin/")[2]
         if made:
-            k = tie(by["said"].get("output '%s' was not created" % made, []) + by["declared"].get(made, []))
+            k = tie(by["message"].get("output '%s' was not created" % made, []) + by["declared"].get(made, []))
             if k != None:
                 claimed[k] = True
                 out["location"] = out["location"] or headers[k]["location"]
-                out["lines"].append(headers[k]["said"])
+                out["lines"].append(headers[k]["message"])
 
         # Every action of a target where its own lines name it alike.
         named = by["target"].get(label, [])
@@ -458,7 +458,7 @@ def console_ties(state: dict) -> dict:
         out = {"location": "", "lines": []}
         first = rec.get("description", "").partition("\n")[0]
         if first and rec["detail"] != "target":
-            found = by["said"].get(first, []) + [k for k in by["plain"].get(first, []) + by["plain"].get("Skipping '%s': %s" % (label, first), []) if headers[k]["said"] != first]
+            found = by["message"].get(first, []) + [k for k in by["plain"].get(first, []) + by["plain"].get("Skipping '%s': %s" % (label, first), []) if headers[k]["message"] != first]
             for k in found:
                 claimed[k] = True
             k = tie([k for k in found if headers[k]["location"]])
@@ -467,11 +467,11 @@ def console_ties(state: dict) -> dict:
         own = by["prefix"].get(label, [])
         for k in own:
             claimed[k] = True
-            if headers[k]["said"] not in out["lines"]:
-                out["lines"].append(headers[k]["said"])
+            if headers[k]["message"] not in out["lines"]:
+                out["lines"].append(headers[k]["message"])
         out["location"] = out["location"] or common(own)
         if rec["detail"] == "target" and first:
-            k = tie([k for k in by["failed"].get(label, []) if headers[k]["said"].endswith(" failed: " + first)])
+            k = tie([k for k in by["failed"].get(label, []) if headers[k]["message"].endswith(" failed: " + first)])
             if k == None:
                 k = tie(by["reason"].get(first, []))
             if k != None:
@@ -486,9 +486,9 @@ def console_ties(state: dict) -> dict:
             k = tie(found)
             if k != None and not out["location"] and not first and not own:
                 out["location"] = headers[k]["location"]
-                out["lines"].append(headers[k]["said"].rpartition(" and referenced by '")[0])
+                out["lines"].append(headers[k]["message"].rpartition(" and referenced by '")[0])
         for line in out["lines"]:
-            for k in by["said"].get(line, []):
+            for k in by["message"].get(line, []):
                 claimed[k] = True
         result["targets"][label] = out
 
@@ -500,17 +500,17 @@ def console_ties(state: dict) -> dict:
         if rec["kind"] != "target":
             continue
         pkg = rec["label"].partition("//")[2].partition(":")[0]
-        said = quoted.setdefault(pkg, {})
+        lines = quoted.setdefault(pkg, {})
         for line in (result["targets"].get(rec["label"]) or {}).get("lines", []):
-            said[line] = True
+            lines[line] = True
         first = rec.get("description", "").partition("\n")[0]
         if first:
-            said[first] = True
+            lines[first] = True
         if not rec.get("description") and causes.get(rec["label"]) == [rec["label"]]:
-            said[""] = True
+            lines[""] = True
     for k, h in enumerate(headers):
-        if h["said"].startswith("package contains errors: "):
-            pkg, _, rest = h["said"][len("package contains errors: "):].partition(": ")
+        if h["message"].startswith("package contains errors: "):
+            pkg, _, rest = h["message"][len("package contains errors: "):].partition(": ")
             if rest in quoted.get(pkg, {}):
                 claimed[k] = True
 
@@ -521,7 +521,7 @@ def console_ties(state: dict) -> dict:
         for k in by["failed"].get(label, []):
             claimed[k] = True
         for k, h in enumerate(headers):
-            if h["said"].startswith("Analysis of target '%s' " % label) and h["said"].endswith(" failed"):
+            if h["message"].startswith("Analysis of target '%s' " % label) and h["message"].endswith(" failed"):
                 claimed[k] = True
     result["others"] = _other_errors(state, text, headers, claimed, spans)
     state["ties_cache"] = (key, result)
@@ -556,9 +556,9 @@ def _other_errors(state: dict, text: str, headers: list, claimed: dict, spans: l
             at = end + 1
         if workspace:
             lines = [l.replace(workspace + "/", "") for l in lines]
-        said = "\n".join(lines)
-        if said not in seen:
-            seen[said] = True
+        joined = "\n".join(lines)
+        if joined not in seen:
+            seen[joined] = True
             out.append({"lines": lines})
     return out
 
