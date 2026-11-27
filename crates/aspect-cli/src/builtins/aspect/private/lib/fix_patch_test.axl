@@ -1,15 +1,16 @@
 """Unit tests for lib/fix_patch.axl: what an auto-fix patch may change in
 the workspace, and that each patch it refuses leaves every file as it was.
 
-The installed `patch` runs where the case needs it; a stand-in script plays
-BSD's or GNU's part where the two differ, and a stand-in copies' directory
-plays a disk that takes two names as one, so every case runs on every host.
+The installed `patch` runs where the case needs it. A stand-in script
+records what patch is asked to do, plays BSD's or GNU's part where the two
+differ, or checks the environment it runs in; a stand-in copies' directory
+plays a disk that takes two names as one. Every case runs on every host.
 
 Run with:
   aspect dev test-fix-patch
 """
 
-load("./fix_patch.axl", "apply_fix_patch", "testonly_ignored_rejects", "testonly_scan")
+load("./fix_patch.axl", "apply_fix_patch", "testonly_ignored", "testonly_scan")
 
 def _eq(label, got, want):
     if got != want:
@@ -27,44 +28,56 @@ def _stand_in(fs, dir, name, script):
     """An executable `sh` script at `dir/name`, to run in place of `patch`."""
     path = dir + "/" + name
     fs.write(path, "#!/bin/sh\n" + script)
-    fs.set_permissions(path, 493)
+    fs.set_permissions(path, 0o755)
     return path
 
+def _noted(said):
+    """A `say` that keeps each line's reason (what follows `was not
+    applied: `, else the line) in `said`."""
+    return lambda label, text: said.append(text.partition(" was not applied: ")[2] or text)
+
+def _restore(env, values):
+    """Set each variable in `values` back: to its value, or unset for None."""
+    for name, value in values.items():
+        if value == None:
+            env.remove_var(name)
+        else:
+            env.set_var(name, value)
+
+def _sides(text):
+    files, why = testonly_scan(text)
+    return [(f.old, f.new) for f in files], why
+
 def _test_scan():
-    _eq(
-        "both sides named, /dev/null not",
-        testonly_scan("--- a/x.txt\n+++ /dev/null\n@@ -1 +0,0 @@\n-x\n--- /dev/null\n+++ b/y.txt\n@@ -0,0 +1 @@\n+y\n"),
-        ([("x.txt", None), (None, "y.txt")], None),
-    )
-    _eq(
-        "a removed `-- x` line is no header",
-        testonly_scan("--- a/x.txt\n+++ b/x.txt\n@@ -1,2 +1,2 @@\n--- not/a.txt\n+++ not/b.txt\n z\n"),
-        ([("x.txt", "x.txt")], None),
-    )
-    _eq("a hunk range that isn't numbers", testonly_scan("--- a/x\n+++ b/x\n@@ -1,y +1 @@\n")[1], "a hunk's line range isn't numbers")
-    _eq("a name that isn't UTF-8", testonly_scan("--- a/caf\ufffd\n+++ b/caf\ufffd\n@@ -1 +1 @@\n-a\n+b\n")[1], "a name that isn't UTF-8, which the copy-back can't name")
+    _eq("both sides named, /dev/null not", _sides("--- a/x.txt\n+++ /dev/null\n@@ -1 +0,0 @@\n-x\n--- /dev/null\n+++ b/y.txt\n@@ -0,0 +1 @@\n+y\n"), ([("x.txt", None), (None, "y.txt")], None))
+    _eq("a removed `-- x` line is no header", _sides("--- a/x.txt\n+++ b/x.txt\n@@ -1,2 +1,2 @@\n--- not/a.txt\n+++ not/b.txt\n z\n"), ([("x.txt", "x.txt")], None))
+    _eq("a hunk range that isn't numbers", _sides("--- a/x\n+++ b/x\n@@ -1,y +1 @@\n")[1], "a hunk's line range isn't numbers")
+    _eq("a name that isn't UTF-8", _sides("--- a/caf\ufffd\n+++ b/caf\ufffd\n@@ -1 +1 @@\n-a\n+b\n")[1], "a name that isn't UTF-8, which the copy-back can't name")
+    _eq("a header with no name", _sides("--- a/x\n+++ \t\n@@ -1 +1 @@\n-a\n+b\n")[1], "a header with no name")
 
-def _test_ignored_rejects():
-    # Apple's BSD patch 2.0-12u11, `--forward --batch`, LC_ALL=C.
-    bsd = """patching file 'src/a.txt'
-Ignoring previously applied (or reversed) patch.
-1 out of 1 hunks ignored--saving rejects to 'src/a.txt.rej'
-No file to patch.  Skipping...
-1 out of 1 hunks ignored--saving rejects to 'src/gone.txt.rej'
-patching file 'src/b.txt'
-1 out of 1 hunks failed--saving rejects to 'src/b.txt.rej'
-"""
-    _eq("BSD: only the hunks applied already", testonly_ignored_rejects(bsd), ["src/a.txt.rej"])
+    # The header shapes BSD patch takes a file name from that a narrower
+    # reading missed: a name after a tab is read, the rest refused.
+    _eq("a name after a leading tab", _sides("--- /dev/null\n+++ \tb/../../x\n@@ -0,0 +1 @@\n+x\n"), ([(None, "../../x")], None))
+    _eq("a context diff", _sides("*** /dev/null\n--- b/x\n***************\n*** 0 ****\n--- 1 ----\n+ x\n")[1], "a context diff's `***` header, which patch could take a file name from")
+    _eq("a line between the header lines", _sides("--- /dev/null\nnote\n+++ b/x\n@@ -0,0 +1 @@\n+x\n")[1], "a lone `---` line, which patch could take a file name from")
+    _eq("the header lines swapped", _sides("+++ b/x\n--- /dev/null\n@@ -0,0 +1 @@\n+x\n")[1], "a lone `+++` line, which patch could take a file name from")
+    _eq("an `Index:` line", _sides("Index: x\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n")[1], "an `Index:` line, which patch could take a file name from")
+    _eq("a hunk with no header", _sides("--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\nnote\n@@ -3 +3 @@\n-c\n+d\n")[1], "a hunk with no header of its own")
 
-    # GNU patch's own strings (src/patch.c, src/util.c), its default quoting.
-    gnu = """patching file src/a.txt
-Reversed (or previously applied) patch detected!  Skipping patch.
-1 out of 1 hunk ignored -- saving rejects to file src/a.txt.rej
-patching file src/b.txt
-Hunk #1 FAILED at 1.
-1 out of 1 hunk FAILED -- saving rejects to file src/b.txt.rej
-"""
-    _eq("GNU: only the hunks applied already", testonly_ignored_rejects(gnu), ["src/a.txt.rej"])
+    # GNU diff -N marks a side that doesn't exist with the epoch, in any
+    # time zone; any other time is a file.
+    for stamp in ("1970-01-01 00:00:00.000000000 +0000", "1969-12-31 19:00:00.000000000 -0500", "1970-01-01 01:00:00 +0100"):
+        _eq("the epoch, %s" % stamp, _sides("--- a/x\t2026-01-01 00:00:00.000000000 +0000\n+++ b/x\t%s\n@@ -1 +0,0 @@\n-a\n" % stamp), ([("x", None)], None))
+    for stamp in ("1970-01-01 00:00:01.000000000 +0000", "1970-01-01 00:00:00.000000001 +0000", "1970-01-01 00:00:00 UTC"):
+        _eq("not the epoch, %s" % stamp, _sides("--- a/x\n+++ b/x\t%s\n@@ -1 +0,0 @@\n-a\n" % stamp), ([("x", "x")], None))
+
+def _test_ignored():
+    # Apple's BSD patch 2.0-12u11 and GNU patch (its strings in src/patch.c
+    # and src/util.c), `--forward --batch`, LC_ALL=C, one file's section.
+    _eq("BSD: ignored", testonly_ignored("patching file 'src/a.txt'\nIgnoring previously applied (or reversed) patch.\n1 out of 1 hunks ignored--saving rejects to 'src/a.txt.rej'\n"), True)
+    _eq("BSD: failed", testonly_ignored("patching file 'src/b.txt'\n1 out of 1 hunks failed--saving rejects to 'src/b.txt.rej'\n"), False)
+    _eq("GNU: ignored", testonly_ignored("patching file src/a.txt\nReversed (or previously applied) patch detected!  Skipping patch.\n1 out of 1 hunk ignored -- saving rejects to file src/a.txt.rej\n"), True)
+    _eq("GNU: failed", testonly_ignored("patching file src/b.txt\nHunk #1 FAILED at 1.\n1 out of 1 hunk FAILED -- saving rejects to file src/b.txt.rej\n"), False)
 
 def _test_apply(ctx: TaskContext, root: str):
     fs = ctx.std.fs
@@ -115,10 +128,10 @@ printf -- '--- a/../escape.txt\\n+++ b/../escape.txt\\n@@ -0,0 +1 @@\\n+out\\n' 
     _eq("the same patch again in a run is skipped", apply_fix_patch(ctx, root + "/made.patch", cwd = tree, seen = seen), None)
     _eq("so the file keeps its edit", fs.read_to_string(tree + "/src/new/made.txt"), "edited\n")
 
-    kept = apply_fix_patch(ctx, root + "/missing.patch", cwd = tree)
-    _eq("a fix to a missing file is not made", fs.exists(tree + "/src/missing.txt"), False)
-    if kept != None:
-        fs.remove_dir_all(kept)
+    said = []
+    _eq("a fix to a missing file", apply_fix_patch(ctx, root + "/missing.patch", cwd = tree, say = _noted(said)), None)
+    _eq("is not made", fs.exists(tree + "/src/missing.txt"), False)
+    _eq("and is named", [l.rpartition(" changes ")[2] for l in said], ["src/missing.txt, which isn't there: its hunks for it were not applied"])
 
     _eq("a patch whose headers name two files", apply_fix_patch(ctx, root + "/rename.patch", cwd = tree), None)
     _eq("patches the side that is there", fs.read_to_string(tree + "/src/d2.txt"), "changed\n")
@@ -137,15 +150,17 @@ printf -- '--- a/../escape.txt\\n+++ b/../escape.txt\\n@@ -0,0 +1 @@\\n+out\\n' 
     _eq("a relative patch path", apply_fix_patch(ctx, "bazel-out/bin/fix.patch", cwd = tree), None)
     _eq("is applied", fs.read_to_string(tree + "/src/rel.txt"), "new\n")
     _eq("a patch that isn't there", apply_fix_patch(ctx, "bazel-out/bin/none.patch", cwd = tree), None)
+    fs.write(tree + "/bazel-out/bin/empty.patch", "")
+    _eq("an empty patch does nothing", apply_fix_patch(ctx, "bazel-out/bin/empty.patch", cwd = tree), None)
 
     # A patch making a file that is there already: other bytes keep its
-    # hunk as a reject (BSD patch calls it applied already), the same ones
-    # are applied indeed.
+    # hunk as a reject, the same ones are applied indeed.
     fs.write(tree + "/src/m.txt", "mine\n")
     fs.write(root + "/create.patch", "--- /dev/null\n+++ b/src/m.txt\n@@ -0,0 +1 @@\n+made\n")
     kept = apply_fix_patch(ctx, root + "/create.patch", cwd = tree)
     _eq("a made file there with other bytes stays", fs.read_to_string(tree + "/src/m.txt"), "mine\n")
     _eq("and its hunk is a reject", kept != None and _names(fs, kept + "/src"), ["m.txt.rej"])
+    _eq("the reject is its section", fs.read_to_string(kept + "/src/m.txt.rej"), "--- /dev/null\n+++ b/src/m.txt\n@@ -0,0 +1 @@\n+made\n")
     fs.remove_dir_all(kept)
     fs.write(tree + "/src/m.txt", "made\n")
     _eq("the same bytes: applied already", apply_fix_patch(ctx, root + "/create.patch", cwd = tree), None)
@@ -165,56 +180,138 @@ printf 'caf\\352\\n' > tree/src/l1.txt
     # the copy-back can't name: refused.
     _sh(ctx, root, "printf -- '--- /dev/null\\n+++ b/src/caf\\351.txt\\n@@ -0,0 +1 @@\\n+made\\n' > latin1-name.patch")
     said = []
-    _eq("a name not UTF-8", apply_fix_patch(ctx, root + "/latin1-name.patch", cwd = tree, say = lambda label, text: said.append(text.partition(" was not applied: ")[2])), None)
+    _eq("a name not UTF-8", apply_fix_patch(ctx, root + "/latin1-name.patch", cwd = tree, say = _noted(said)), None)
     _eq("refused as such", said, ["a name that isn't UTF-8, which the copy-back can't name"])
 
     # A patch patch can't read in full (exit 2): nothing of it applied, the
     # file before the bad hunk neither.
     fs.write(tree + "/src/ok.txt", "a\n")
-    fs.write(root + "/malformed.patch", "--- a/src/ok.txt\n+++ b/src/ok.txt\n@@ -1 +1 @@\n-a\n+A\n--- a/src/rel.txt\n+++ b/src/rel.txt\n@@ -1,3 +1,3 @@\n-new\ngarbage\n")
-    _eq("a patch patch can't read", apply_fix_patch(ctx, root + "/malformed.patch", cwd = tree), None)
+    fs.write(root + "/malformed.patch", "--- a/src/ok.txt\n+++ b/src/ok.txt\n@@ -1 +1 @@\n-a\n+A\n--- a/src/rel.txt\n+++ b/src/rel.txt\n@@ -1,2 +1,2 @@\n-new\n+x\n-y\n+z\n")
+    shim = _stand_in(fs, root, "fail-second", "case \"$*\" in *rel.txt*) exit 2;; esac\nexec patch \"$@\"\n")
+    _eq("a section patch can't apply", apply_fix_patch(ctx, root + "/malformed.patch", cwd = tree, program = shim), None)
     _eq("applies nothing", fs.read_to_string(tree + "/src/ok.txt"), "a\n")
     fs.create_dir_all(tree + "/bazel-out/dir.patch")
     _eq("a patch path that is a directory", apply_fix_patch(ctx, "bazel-out/dir.patch", cwd = tree), None)
 
+    # GNU diff -N's deletion, its new side the epoch: removed, whichever
+    # patch runs (GNU removes the copy, BSD empties it).
+    fs.write(tree + "/src/del.txt", "bye\n")
+    fs.write(root + "/epoch.patch", "--- a/src/del.txt\t2026-01-01 00:00:00.000000000 +0000\n+++ b/src/del.txt\t1970-01-01 00:00:00.000000000 +0000\n@@ -1 +0,0 @@\n-bye\n")
+    _eq("an epoch deletion", apply_fix_patch(ctx, root + "/epoch.patch", cwd = tree), None)
+    _eq("removes the file", fs.exists(tree + "/src/del.txt"), False)
+
+def _test_one_file_per_run(ctx: TaskContext, root: str):
+    """patch is run once per file section, naming the one copy to change,
+    never taking a name from the diff."""
+    fs = ctx.std.fs
+    tree = root + "/runs"
+    fs.create_dir_all(tree + "/src")
+    fs.write(tree + "/src/a.txt", "a\n")
+    fs.write(tree + "/src/gone.txt", "bye\n")
+    log = root + "/runs.log"
+    shim = _stand_in(fs, root, "recording-patch", """n=0
+for a in "$@"; do
+  case "$a" in --*) ;; *) n=$((n + 1)); file="$a";; esac
+done
+echo "$n $file" >> '%s'
+[ "$n" -eq 1 ] || exit 3
+case "$file" in ./*..*) exit 3;; ./*) ;; *) exit 3;; esac
+exec patch "$@"
+""" % log)
+    fs.write(root + "/three.patch", "--- a/src/a.txt\n+++ b/src/a.txt\n@@ -1 +1 @@\n-a\n+A\n--- /dev/null\n+++ b/src/new.txt\n@@ -0,0 +1 @@\n+n\n--- a/src/gone.txt\n+++ /dev/null\n@@ -1 +0,0 @@\n-bye\n--- a/src/missing.txt\n+++ b/src/missing.txt\n@@ -1 +1 @@\n-x\n+y\n")
+    _eq("three sections", apply_fix_patch(ctx, root + "/three.patch", cwd = tree, program = shim, say = lambda label, text: None), None)
+    _eq("each run names one copy, none for a missing file", fs.read_to_string(log).split("\n"), ["1 ./src/a.txt", "1 ./src/new.txt", "1 ./src/gone.txt", ""])
+    _eq("all applied", (fs.read_to_string(tree + "/src/a.txt"), fs.read_to_string(tree + "/src/new.txt"), fs.exists(tree + "/src/gone.txt")), ("A\n", "n\n", False))
+
+def _test_environment(ctx: TaskContext, root: str):
+    """patch runs with no terminal, `--forward --batch`, `LC_ALL=C`, and
+    none of what changes its backups, file lookups or quoting, whatever the
+    task's own environment says."""
+    fs = ctx.std.fs
+    env = ctx.std.env
+    hostile = {
+        "VERSION_CONTROL": "numbered",
+        "PATCH_VERSION_CONTROL": "numbered",
+        "SIMPLE_BACKUP_SUFFIX": ".bak",
+        "PATCH_GET": "1",
+        "POSIXLY_CORRECT": "1",
+        "QUOTING_STYLE": "c",
+        "LANGUAGE": "de",
+        "LC_ALL": "de_DE.UTF-8",
+    }
+    before = {name: env.var(name) for name in hostile}
+    ctx.defer(_restore, env, before)
+    for name, value in hostile.items():
+        env.set_var(name, value)
+    tree = root + "/env"
+    fs.create_dir_all(tree + "/src")
+    fs.write(tree + "/src/a.txt", "a\n")
+
+    # `env`, not the shell's own variables: macOS's sh sets POSIXLY_CORRECT
+    # for itself without exporting it.
+    shim = _stand_in(fs, root, "env-patch", """for v in VERSION_CONTROL PATCH_VERSION_CONTROL SIMPLE_BACKUP_SUFFIX PATCH_GET POSIXLY_CORRECT QUOTING_STYLE LANGUAGE; do
+  if env | grep -q "^$v="; then echo "$v is set" >&2; exit 3; fi
+done
+[ "$LC_ALL" = C ] || { echo "LC_ALL is $LC_ALL" >&2; exit 3; }
+[ -d "$TMPDIR" ] || { echo "no TMPDIR" >&2; exit 3; }
+[ /dev/stdin -ef /dev/null ] || { echo "stdin isn't /dev/null" >&2; exit 3; }
+case " $* " in *" --forward "*) ;; *) echo "no --forward" >&2; exit 3;; esac
+case " $* " in *" --batch "*) ;; *) echo "no --batch" >&2; exit 3;; esac
+exec patch "$@"
+""")
+    fs.write(root + "/env.patch", "--- a/src/a.txt\n+++ b/src/a.txt\n@@ -1 +1 @@\n-a\n+A\n")
+    said = []
+    got = apply_fix_patch(ctx, root + "/env.patch", cwd = tree, program = shim, say = _noted(said))
+    _restore(env, before)
+    _eq("under a hostile environment", got, None)
+    _eq("nothing refused", said, [])
+    _eq("applied", fs.read_to_string(tree + "/src/a.txt"), "A\n")
+
 def _test_bsd_and_gnu(ctx: TaskContext, root: str):
-    """Where BSD and GNU patch differ, each played by a stand-in."""
+    """Where BSD and GNU patch differ, each played by a stand-in: GNU
+    removes a deleted file's copy, BSD empties it."""
     fs = ctx.std.fs
     tree = root + "/both"
     fs.create_dir_all(tree + "/src")
     fs.write(root + "/remove.patch", "--- a/src/gone.txt\n+++ /dev/null\n@@ -1 +0,0 @@\n-bye\n")
-    for name, script in [("GNU", "rm src/gone.txt\n"), ("BSD", ": > src/gone.txt\n")]:
+    for name, script in [("GNU", "eval \"last=\\${$#}\"\nrm \"$last\"\n"), ("BSD", "eval \"last=\\${$#}\"\n: > \"$last\"\n")]:
         fs.write(tree + "/src/gone.txt", "bye\n")
         shim = _stand_in(fs, root, "remove-" + name, script)
         _eq("%s: a removal applies" % name, apply_fix_patch(ctx, root + "/remove.patch", cwd = tree, program = shim), None)
         _eq("%s: the file is removed" % name, fs.exists(tree + "/src/gone.txt"), False)
 
-    # A fix to a file that isn't there: BSD writes its hunks out as a
-    # reject, kept with the others; GNU writes none.
-    fs.write(root + "/missing.patch", "--- a/src/missing.txt\n+++ b/src/missing.txt\n@@ -1 +1 @@\n-was\n+is\n")
-    bsd = _stand_in(fs, root, "missing-BSD", """mkdir -p src
-printf 'patched hunks\\n' > src/missing.txt.rej
-echo 'No file to patch.  Skipping...'
-echo "1 out of 1 hunks ignored--saving rejects to 'src/missing.txt.rej'"
-exit 1
-""")
-    gnu = _stand_in(fs, root, "missing-GNU", """echo 'No file to patch.  Skipping patch.'
-echo '1 out of 1 hunk ignored'
-exit 1
-""")
-    said = []
-    kept = apply_fix_patch(ctx, root + "/missing.patch", cwd = tree, program = bsd, say = lambda label, text: said.append(label))
-    _eq("BSD: a missing file's hunks are kept", kept != None and _names(fs, kept + "/src"), ["missing.txt.rej"])
-    _eq("BSD: named, then kept", said, ["INFO", "INFO"])
-    fs.remove_dir_all(kept)
-    said.clear()
-    _eq("GNU: no rejects for a missing file", apply_fix_patch(ctx, root + "/missing.patch", cwd = tree, program = gnu, say = lambda label, text: said.append(label)), None)
-    _eq("GNU: named", said, ["INFO"])
-    _eq("neither makes it", fs.exists(tree + "/src/missing.txt"), False)
+def _test_escapes(ctx: TaskContext, root: str):
+    """The header shapes that let BSD patch write outside the workspace,
+    each riding along with a fix that would apply: refused, nothing written
+    there and nothing in the tree."""
+    fs = ctx.std.fs
+    tree = root + "/escapes"
+    away = root + "/away-escapes"
+    fs.create_dir_all(tree + "/src")
+    fs.create_dir_all(away)
+    up = "../" * 40 + away.lstrip("/")
+    first = "--- a/src/ok.txt\n+++ b/src/ok.txt\n@@ -1 +1 @@\n-a\n+A\n"
+    for reason, body in [
+        ("a creation named after a tab", "--- /dev/null\n+++ \tb/%s/made.txt\n@@ -0,0 +1 @@\n+pwned\n" % up),
+        ("a context diff", "*** /dev/null\n--- b/%s/made.txt\n***************\n*** 0 ****\n--- 1 ----\n+ pwned\n" % up),
+        ("a line between the header lines", "--- /dev/null\nnote\n+++ b/%s/made.txt\n@@ -0,0 +1 @@\n+pwned\n" % up),
+        ("the header lines swapped", "+++ b/%s/made.txt\n--- /dev/null\n@@ -0,0 +1 @@\n+pwned\n" % up),
+        ("an overwrite named after a tab", "--- \ta/%s/victim.txt\n+++ \tb/%s/victim.txt\n@@ -1 +1 @@\n-orig\n+pwned\n" % (up, up)),
+        ("a removal named after a tab", "--- \ta/%s/doomed.txt\n+++ /dev/null\n@@ -1 +0,0 @@\n-doomed\n" % up),
+    ]:
+        fs.write(tree + "/src/ok.txt", "a\n")
+        fs.write(away + "/victim.txt", "orig\n")
+        fs.write(away + "/doomed.txt", "doomed\n")
+        fs.write(root + "/escape.patch", first + body)
+        _eq("refused: " + reason, apply_fix_patch(ctx, root + "/escape.patch", cwd = tree, say = lambda label, text: None), None)
+        _eq("%s: nothing outside" % reason, (_names(fs, away), fs.read_to_string(away + "/victim.txt"), fs.read_to_string(away + "/doomed.txt")), (["doomed.txt", "victim.txt"], "orig\n", "doomed\n"))
+        _eq("%s: the tree as it was" % reason, (_names(fs, tree + "/src"), fs.read_to_string(tree + "/src/ok.txt")), (["ok.txt"], "a\n"))
 
 def _test_refused(ctx: TaskContext, root: str):
-    """Each patch refused whole, before anything is copied or patched: every
-    file as it was, the first hunk's file too, and nothing made outside."""
+    """Each patch refused whole, every file as it was, the first hunk's file
+    too, and nothing made outside: before anything is copied or patched,
+    and once patched where patch leaves something the copy-back won't
+    take."""
     fs = ctx.std.fs
     refuse = root + "/refuse"
     fs.create_dir_all(refuse + "/src/d")
@@ -234,8 +331,8 @@ printf 'a\\n' > 'src/my file'
 
     # Searchable again before the tree goes, however the test ends (defers
     # run last first).
-    fs.set_permissions(refuse + "/src/locked", 0)
-    ctx.defer(fs.set_permissions, refuse + "/src/locked", 493)
+    fs.set_permissions(refuse + "/src/locked", 0o000)
+    ctx.defer(fs.set_permissions, refuse + "/src/locked", 0o755)
     nfc, nfd = "src/\u00e9.txt", "src/e\u0301.txt"
 
     # What this disk takes as one file, probed: case and Unicode
@@ -282,16 +379,16 @@ printf 'a\\n' > 'src/my file'
         _eq("%s: nothing outside" % reason, (fs.exists(root + "/outside.txt"), _names(fs, root + "/away")), (False, []))
 
     # A patch past the read cap, its first hunk one patch would apply: the
-    # rest of it lines nobody reads.
+    # rest of it a hole nobody reads.
     said = []
     fs.write(refuse + "/big.patch", first)
-    _sh(ctx, refuse, "head -c 67108864 /dev/zero | tr '\\0' '\\n' >> big.patch")
-    _eq("larger than the read cap", apply_fix_patch(ctx, refuse + "/big.patch", cwd = refuse, say = lambda label, text: said.append(text.partition(" was not applied: ")[2])), None)
+    _sh(ctx, refuse, "dd if=/dev/null of=big.patch bs=1 seek=67108865 2>/dev/null")
+    _eq("larger than the read cap", apply_fix_patch(ctx, refuse + "/big.patch", cwd = refuse, say = _noted(said)), None)
     _eq("refused as such", said, ["it is larger than 64 MiB"])
     _eq("its first hunk not applied", fs.read_to_string(refuse + "/src/ok.txt"), "a\n")
     fs.remove_file(refuse + "/big.patch")
 
-    fs.set_permissions(refuse + "/src/locked", 493)
+    fs.set_permissions(refuse + "/src/locked", 0o755)
 
     # Two new names the copies' directory folds into one, where this disk
     # does (the copies are on the same disk as this tree): refused once
@@ -311,19 +408,18 @@ printf 'a\\n' > 'src/my file'
     # A refused path's warning shows it escaped: a control character and
     # one past ASCII as codes, a backslash doubled.
     said = []
-    note = lambda label, text: said.append((label, text.partition(" was not applied: ")[2]))
+    labelled = lambda label, text: said.append((label, text.partition(" was not applied: ")[2]))
     fs.write(refuse + "/p.patch", make("src/\x1b[31m\u00e9\\x") + make("src/\x1b[31m\u00e9\\x"))
-    _eq("an escaped path's refusal", apply_fix_patch(ctx, refuse + "/p.patch", cwd = refuse, say = note), None)
+    _eq("an escaped path's refusal", apply_fix_patch(ctx, refuse + "/p.patch", cwd = refuse, say = labelled), None)
     _eq("its warning", said, [("WARNING", "src/\\u001b[31m\\u00e9\\\\x is named in more than one header")])
     fs.write(refuse + "/p.patch", "diff --git a/src/f b/src/g\nrename from src/f \x1b]0;title\x07 x\nrename to src/g\n")
     said.clear()
-    apply_fix_patch(ctx, refuse + "/p.patch", cwd = refuse, say = note)
+    apply_fix_patch(ctx, refuse + "/p.patch", cwd = refuse, say = labelled)
     _eq("a git header's warning names its keyword alone", [("\x1b" in t, "`rename from`" in t) for _, t in said], [(False, True)])
 
     # What patch leaves in the copies is checked before anything is copied
-    # back: a symlink it made (GNU patch, from git's `120000`) is refused,
-    # never followed.
-    shim = _stand_in(fs, root, "symlink-patch", "ln -s /etc/hosts src/n\nexit 0\n")
+    # back: a symlink it made is refused, never followed.
+    shim = _stand_in(fs, root, "symlink-patch", "[ -e src/n ] || ln -s /etc/hosts src/n\nexit 0\n")
     fs.write(refuse + "/p.patch", first + make("src/n"))
     _eq("a symlink patch made", apply_fix_patch(ctx, refuse + "/p.patch", cwd = refuse, program = shim), None)
     _eq("nothing copied back", (fs.read_to_string(refuse + "/src/ok.txt"), fs.try_metadata(refuse + "/src/n")), ("a\n", None))
@@ -353,16 +449,15 @@ def _test_folded_copies(ctx: TaskContext, root: str):
         return work
 
     said = []
-    note = lambda label, text: said.append(text.partition(" was not applied: ")[2])
     fs.write(root + "/fold.patch", "--- a/src/one.txt\n+++ b/src/one.txt\n@@ -1 +1 @@\n-1\n+one\n--- a/src/two.txt\n+++ b/src/two.txt\n@@ -1 +1 @@\n-2\n+two\n")
-    _eq("two files one copy", apply_fix_patch(ctx, root + "/fold.patch", cwd = tree, mkdtemp = folding, say = note), None)
+    _eq("two files one copy", apply_fix_patch(ctx, root + "/fold.patch", cwd = tree, mkdtemp = folding, say = _noted(said)), None)
     _eq("refused once copied", said, ["src/one.txt and src/two.txt are one file where the patch is applied"])
     _eq("both as they were", (fs.read_to_string(tree + "/src/one.txt"), fs.read_to_string(tree + "/src/two.txt")), ("1\n", "2\n"))
 
     said.clear()
-    shim = _stand_in(fs, root, "folding-patch", "printf 'made\\n' > src/n1.txt\nln src/n1.txt src/n2.txt\nexit 0\n")
+    shim = _stand_in(fs, root, "folding-patch", "printf 'made\\n' > src/n1.txt\n[ -e src/n2.txt ] || ln src/n1.txt src/n2.txt\nexit 0\n")
     fs.write(root + "/fold-new.patch", "--- /dev/null\n+++ b/src/n1.txt\n@@ -0,0 +1 @@\n+made\n--- /dev/null\n+++ b/src/n2.txt\n@@ -0,0 +1 @@\n+made\n")
-    _eq("two new names patch makes one", apply_fix_patch(ctx, root + "/fold-new.patch", cwd = tree, program = shim, say = note), None)
+    _eq("two new names patch makes one", apply_fix_patch(ctx, root + "/fold-new.patch", cwd = tree, program = shim, say = _noted(said)), None)
     _eq("refused once patched", said, ["src/n1.txt and src/n2.txt are one file where the patch is applied"])
     _eq("neither made", _names(fs, tree + "/src"), ["one.txt", "two.txt"])
 
@@ -371,9 +466,12 @@ def _impl(ctx: TaskContext) -> int:
     root = fs.mkdtemp()
     ctx.defer(fs.remove_dir_all, root)
     _test_scan()
-    _test_ignored_rejects()
+    _test_ignored()
     _test_apply(ctx, root)
+    _test_one_file_per_run(ctx, root)
+    _test_environment(ctx, root)
     _test_bsd_and_gnu(ctx, root)
+    _test_escapes(ctx, root)
     _test_refused(ctx, root)
     _test_folded_copies(ctx, root)
     print("fix_patch_test.axl: OK")

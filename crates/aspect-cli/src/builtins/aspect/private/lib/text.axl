@@ -269,6 +269,21 @@ def utf8_bytes_escaped(ch: str) -> str:
         raw = [0xf0 | (code >> 18), 0x80 | ((code >> 12) & 0x3f), 0x80 | ((code >> 6) & 0x3f), 0x80 | (code & 0x3f)]
     return "".join([("\\x0%x" if b < 16 else "\\x%x") % b for b in raw])
 
+def ascii_escaped(s: str) -> str:
+    """`s` with `\\` doubled and each character outside printable ASCII as
+    its `escaped_char` code, so two spellings that look alike (NFC and NFD)
+    read apart and nothing in `s` can end or rewrite the line it is on."""
+    out = []
+    for ch in s.elems():
+        code = ord(ch)
+        if ch == "\\":
+            out.append("\\\\")
+        elif code >= 0x20 and code < 0x7f:
+            out.append(ch)
+        else:
+            out.append(escaped_char(ch))
+    return "".join(out)
+
 def escaped_char(ch: str) -> str:
     """`ch` as `\\u` and four hex digits, or `\\U` and eight above U+FFFF,
     padded by hand: `%` takes no width. For display; a shell command takes
