@@ -54,8 +54,8 @@ use starlark::values::none::{NoneOr, NoneType};
 use starlark::values::{self, NoSerialize, ProvidesStaticType, ValueLike, starlark_value};
 
 use capture::{
-    MAX_CAPTURED_BYTES, Order, Redirect, SINK, SWITCH_WAIT, give_back_descriptors, mark_captured,
-    same_file, set_sink,
+    MAX_CAPTURED_BYTES, Order, ROUTER, Redirect, SWITCH_WAIT, give_back_descriptors, mark_captured,
+    same_file,
 };
 use crash::{CRASH, install_panic_hook, remember_for_crash};
 use dump::{
@@ -206,7 +206,7 @@ fn take() -> anyhow::Result<u64> {
     let forget_tty = || {
         mark_captured(None);
         crate::out::set_capture_copies(false);
-        set_sink(None);
+        ROUTER.set(None);
     };
     // No write half to the terminal and half to the capture.
     let moving = axl_types::terminal::every_turn_within(SWITCH_WAIT);
@@ -225,7 +225,7 @@ fn take() -> anyhow::Result<u64> {
     // output goes to the screen instead ([`route`]). The screen is dumped on
     // leaving, from here on.
     crate::out::set_capture_copies(true);
-    set_sink(Some((&capture, &stdout, &stderr)));
+    ROUTER.set(Some((&capture, &stdout, &stderr)));
     set_dump_mark();
     drop(moving);
 
@@ -473,7 +473,7 @@ pub(crate) fn resume() {
     if let (Ok(out), Ok(err)) = &redirected {
         // Once both are captured, as at the take: the next dump starts here.
         crate::out::set_capture_copies(true);
-        set_sink(Some((&h.capture, out, err)));
+        ROUTER.set(Some((&h.capture, out, err)));
         set_dump_mark();
     }
     drop(moving);
@@ -771,7 +771,7 @@ fn term_methods(registry: &mut MethodsBuilder) {
         // given back only with it held, so the copy lands on the side of
         // the dump that matches where the text went.
         let _turn = axl_types::terminal::turn(2);
-        if SINK.lock().unwrap_or_else(|p| p.into_inner()).is_none() {
+        if !ROUTER.is_set() {
             use std::io::Write as _;
             let _ = std::io::stderr().write_all(text.as_bytes());
             axl_types::terminal::wrote(2, text.as_bytes());

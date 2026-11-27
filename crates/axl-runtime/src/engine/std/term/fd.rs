@@ -226,20 +226,45 @@ pub(super) mod tests {
         (OwnedFd::from(read), OwnedFd::from(write))
     }
 
-    /// A pty whose descriptors are closed on exec, so a child another test
-    /// spawns meanwhile never holds the master open and hides its hangup.
-    /// `openpty` takes no flag for it: a spawn in the instant before it is
-    /// set still could.
+    /// A pty whose descriptors are closed on exec as they are opened, so a
+    /// child another test spawns meanwhile never holds the master open and
+    /// hides its hangup. Opened by hand: `openpty` sets no such flag, and a
+    /// spawn in the instant before it is set takes the master with it.
     pub(crate) fn private_pty() -> nix::pty::OpenptyResult {
-        let pty = nix::pty::openpty(None, None).unwrap();
-        for fd in [&pty.master, &pty.slave] {
-            nix::fcntl::fcntl(
-                fd,
-                nix::fcntl::FcntlArg::F_SETFD(nix::fcntl::FdFlag::FD_CLOEXEC),
-            )
-            .unwrap();
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::fs::OpenOptionsExt;
+        // std opens every file closed on exec.
+        let open = |path: &std::path::Path| {
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .custom_flags(libc::O_NOCTTY)
+                .open(path)
+                .unwrap()
+        };
+        let master = open("/dev/ptmx".as_ref());
+        let fd = master.as_raw_fd();
+        let mut name = [0 as libc::c_char; 128];
+        // SAFETY: calls on the master this test owns, the slave's name
+        // written into a buffer of the size each call takes.
+        unsafe {
+            assert_eq!(libc::grantpt(fd), 0);
+            assert_eq!(libc::unlockpt(fd), 0);
+            #[cfg(target_os = "macos")]
+            assert_eq!(
+                libc::ioctl(fd, libc::TIOCPTYGNAME as _, name.as_mut_ptr()),
+                0
+            );
+            #[cfg(not(target_os = "macos"))]
+            assert_eq!(libc::ptsname_r(fd, name.as_mut_ptr(), name.len()), 0);
         }
-        pty
+        // SAFETY: both calls end the name with a NUL inside the buffer.
+        let name = unsafe { std::ffi::CStr::from_ptr(name.as_ptr()) };
+        let slave = open(std::ffi::OsStr::from_bytes(name.to_bytes()).as_ref());
+        nix::pty::OpenptyResult {
+            master: master.into(),
+            slave: slave.into(),
+        }
     }
 
     /// A destination nobody reads stops a replay after `STALL_LIMIT`.

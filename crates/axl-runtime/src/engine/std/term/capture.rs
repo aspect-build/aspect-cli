@@ -360,47 +360,73 @@ pub(crate) fn feed_screen(stderr: bool, bytes: &[u8], shown: usize) -> bool {
     true
 }
 
-/// Where the CLI's own output goes while a screen holds the terminal
-/// ([`route`]): its console's feed, and what its captures keep for
-/// the replay. Set and cleared with every target held, where the capture's
-/// copies go on and off, so a write is routed exactly when fds 1 and 2 are
-/// captured.
-pub(super) struct Sink {
+/// Where the CLI's own output goes while a screen holds the terminal: its
+/// console's feed, and what its captures keep for the replay.
+struct Sink {
     capture: Arc<Feed>,
     stdout: Arc<Mutex<Vec<u8>>>,
     stderr: Arc<Mutex<Vec<u8>>>,
 }
 
-pub(super) static SINK: Mutex<Option<Sink>> = Mutex::new(None);
+/// The way the CLI's own output takes: to a screen's [`Sink`] while one is
+/// set, else to fds 1 and 2. The process has one, [`ROUTER`], which
+/// [`route`] reads; a test routes through one of its own, so the CLI's
+/// writes from the tests running beside it never land in its sink. Set and
+/// cleared with every target held, where the capture's copies go on and
+/// off, so a write is routed exactly when fds 1 and 2 are captured.
+pub(super) struct Router(Mutex<Option<Sink>>);
 
-/// Route the CLI's writes to `capture` and the replays `out` and `err`
-/// keep, or (None) to fds 1 and 2 again.
-pub(super) fn set_sink(sink: Option<(&Arc<Feed>, &Redirect, &Redirect)>) {
-    *SINK.lock().unwrap_or_else(|p| p.into_inner()) = sink.map(|(capture, out, err)| Sink {
-        capture: capture.clone(),
-        stdout: out.written.clone(),
-        stderr: err.written.clone(),
-    });
+impl Router {
+    const fn new() -> Router {
+        Router(Mutex::new(None))
+    }
+
+    fn sink(&self) -> std::sync::MutexGuard<'_, Option<Sink>> {
+        self.0.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// Route the CLI's writes to `capture` and the replays `out` and `err`
+    /// keep, or (None) to fds 1 and 2 again.
+    pub(super) fn set(&self, sink: Option<(&Arc<Feed>, &Redirect, &Redirect)>) {
+        *self.sink() = sink.map(|(capture, out, err)| Sink {
+            capture: capture.clone(),
+            stdout: out.written.clone(),
+            stderr: err.written.clone(),
+        });
+    }
+
+    /// Whether the CLI's writes go to a screen now.
+    pub(super) fn is_set(&self) -> bool {
+        self.sink().is_some()
+    }
+
+    /// `bytes` for fd 1 or 2 to the sink, when one is set: to its console,
+    /// and kept for its replay, as its capture would have them, without
+    /// passing through the captured descriptors; the writer copies them to
+    /// the output files itself. Whether it took them.
+    fn route(&self, fd: i32, bytes: &[u8]) -> bool {
+        let sink = self.sink();
+        let Some(s) = sink.as_ref() else {
+            return false;
+        };
+        let (source, kept) = if fd == 2 {
+            (Source::Stderr, &s.stderr)
+        } else {
+            (Source::Stdout, &s.stdout)
+        };
+        s.capture.write(source, bytes);
+        keep(&mut kept.lock().unwrap_or_else(|p| p.into_inner()), bytes);
+        true
+    }
 }
 
+/// The process's [`Router`].
+pub(super) static ROUTER: Router = Router::new();
+
 /// The route the CLI's own writes are offered ([`axl_types::terminal`]):
-/// while a screen holds the terminal, `bytes` for fd 1 or 2 go to
-/// its console and are kept for its replay, as its capture would have them,
-/// without passing through the captured descriptors; the writer copies them
-/// to the output files itself. Whether it took them.
+/// [`ROUTER`]'s.
 fn route(fd: i32, bytes: &[u8]) -> bool {
-    let sink = SINK.lock().unwrap_or_else(|p| p.into_inner());
-    let Some(s) = sink.as_ref() else {
-        return false;
-    };
-    let (source, kept) = if fd == 2 {
-        (Source::Stderr, &s.stderr)
-    } else {
-        (Source::Stdout, &s.stdout)
-    };
-    s.capture.write(source, bytes);
-    keep(&mut kept.lock().unwrap_or_else(|p| p.into_inner()), bytes);
-    true
+    ROUTER.route(fd, bytes)
 }
 
 /// Install [`route`] for the CLI's own output. Once, at start-up.
@@ -426,7 +452,7 @@ pub(super) fn give_back_descriptors(
         r.drain();
     }
     crate::out::set_capture_copies(false);
-    set_sink(None);
+    ROUTER.set(None);
     moving
 }
 
@@ -470,23 +496,35 @@ mod tests {
 
     /// The CLI's own writes, with a screen's sink set, go to the screen's
     /// feed and its replay, never through the captured descriptors; with
-    /// none, nowhere but the descriptor.
+    /// none, nowhere but the descriptor. Through a router of the test's
+    /// own: the process's takes the CLI's writes from every test.
     #[test]
     fn the_clis_own_output_is_routed_past_a_capture() {
-        route_cli_output();
+        let router = Router::new();
         let (_read, write) = private_pipe();
         let capture = Arc::new(Feed::default());
         let out = Redirect::new(write.as_raw_fd(), capture.clone(), Source::Stdout, false).unwrap();
         let err = Redirect::new(write.as_raw_fd(), capture.clone(), Source::Stderr, false).unwrap();
-        set_sink(Some((&capture, &out, &err)));
-        assert!(axl_types::terminal::routed(2, b"routed line\n"));
-        set_sink(None);
-        assert!(!axl_types::terminal::routed(2, b"not routed\n"));
+        router.set(Some((&capture, &out, &err)));
+        assert!(router.is_set());
+        assert!(router.route(2, b"routed line\n"));
+        router.set(None);
+        assert!(!router.is_set());
+        assert!(!router.route(2, b"not routed\n"));
         assert_eq!(capture.drain().lines, vec!["routed line"]);
         assert_eq!(&*err.written.lock().unwrap(), b"routed line\n");
         assert!(out.written.lock().unwrap().is_empty());
         err.restore();
         out.restore();
+    }
+
+    /// Installed, the route is the process's router's: with no screen held
+    /// (tests never set it) the CLI's writes go to their descriptors.
+    #[test]
+    fn the_installed_route_takes_nothing_without_a_screen() {
+        route_cli_output();
+        assert!(!ROUTER.is_set());
+        assert!(!axl_types::terminal::routed(2, b"not routed\n"));
     }
 
     /// What is written to a redirected descriptor is captured as lines and
