@@ -551,6 +551,7 @@ def _actions_tests(ctx):
         action_cache_statistics = struct(hits = 4, misses = 3),
     ), build_graph_metrics = struct(built_values = [struct(skyfunction_name = "ACTION_EXECUTION", count = 7), struct(skyfunction_name = "FILE", count = 900)], cleaned_values = [struct(skyfunction_name = "ACTION_EXECUTION", count = 43)]))})
     _eq("in memory: the graph's cleaned keys", _split_of(action_split(rerun)), dict(done = 50, total = 50, ran = 2, local = 4, memory = 43, internal = 1))
+    _eq("shown first of the cache hits", [_visible(r) for r in action_results(action_split(rerun), 200)], ["█ 2 ran", "cache hits 47: ▒ 43 in memory · 4 local action cache", "░ 1 internal"])
     rerun["inv"]["build_metrics"] = struct(action_summary = rerun["inv"]["build_metrics"].action_summary)
     _eq("without them, not run", _split_of(action_split(rerun)), dict(done = 50, total = 50, ran = 2, local = 4, internal = 1, not_run = 43))
 
@@ -718,7 +719,7 @@ def _actions_tests(ctx):
     _eq("nothing unreported at the end", end["unreported"], 0)
     _eq("every frame sums to Bazel's count", [told["ran"] + told["disk"] + told["remote"] + told["local"] + told["internal"] + told["failed"] + told["other"] + told["unreported"]], [21])
     _eq("the final local action cache: shown at 0, no `~`", "▒ 0 local action cache" in _visible(" ".join(action_results(end, 90))), True)
-    _eq("the ? key: the local action cache", any(["▒ local action cache: Bazel's local action cache, or what it already knew in memory" in " ".join(help_rows(dict(live, all_actions = True), 300)) for r in help_rows(dict(live, all_actions = True), 200)]), True)
+    _eq("the ? key: in memory and the local action cache", "▒ in memory / local: outputs already known valid on this machine" in " ".join(help_rows(dict(live, all_actions = True), 300)), True)
 
     tested = _real(ctx, "failing test")
     _fail_event(tested, "TestRunner:spawn", 9)
@@ -859,7 +860,7 @@ def _actions_tests(ctx):
 
     # Out of room (Results at 60 columns, 17 cells, five rows): internal
     # goes first, then a cache with no hits, then counts in thousands, then
-    # whole parts; ran, failed, not run, the hits' total and what is not
+    # whole parts; ran, failed, skipped, the hits' total and what is not
     # done stay, and nothing is cut in half.
     jammed = dict(measured, ran = 30, local = 0, disk = 0, remote = 0, failed = 5, not_run = 10, internal = 1, done = 46, total = 46)
     got = [_visible(r) for r in action_results(jammed, 17, 5, short = True, stack = True)]
@@ -869,12 +870,12 @@ def _actions_tests(ctx):
     zero = dict(probe, done = 32, total = 32, failed = 16, not_run = 15, internal = 1)
     big9 = dict(probe, done = 9301, total = 9301, ran = 5705, local = 2836, disk = 300, failed = 4, not_run = 411, internal = 33)
     for split, room, rows, stack, want in [
-        (zero, 13, 2, True, ["╳ 16 failed", "○ 15 not run"]),
-        (zero, 30, 1, False, ["╳ 16 failed · ○ 15 not run"]),
-        (zero, 60, 1, False, ["╳ 16 failed · ○ 15 not run · ░ 1 internal"]),
-        (big9, 13, 2, True, ["╳ 4 failed", "○ 411 not run"]),
-        (big9, 30, 1, False, ["╳ 4 failed · ○ 411 not run"]),
-        (big9, 35, 2, False, ["ran 5,709: █ 5,705 ok · ╳ 4 failed", "▒ 3,136 hits · ○ 411 not run"]),
+        (zero, 13, 2, True, ["╳ 16 failed", "○ 15 skipped"]),
+        (zero, 30, 1, False, ["╳ 16 failed · ○ 15 skipped"]),
+        (zero, 60, 1, False, ["╳ 16 failed · ○ 15 skipped · ░ 1 internal"]),
+        (big9, 13, 2, True, ["╳ 4 failed", "○ 411 skipped"]),
+        (big9, 30, 1, False, ["╳ 4 failed · ○ 411 skipped"]),
+        (big9, 35, 2, False, ["ran 5,709: █ 5,705 ok · ╳ 4 failed", "▒ 3,136 hits · ○ 411 skipped"]),
     ]:
         _eq("drop order at %d cells, %d rows" % (room, rows), [_visible(r) for r in action_results(split, room, rows, short = room < 60, stack = stack)], want)
 
@@ -898,10 +899,10 @@ def _actions_tests(ctx):
     live_short = dict(probe, final = False, running = True, failed_build = False, done = 2411, total = 2420, ran = 210, local = 2200, failed = 2, running_now = 3, estimated = True)
     _eq("a short terminal keeps failed over a hit", [_visible(r) for r in action_results(live_short, 40, 1)], ["ran 212: █ 210 ok · ╳ 2 failed"])
 
-    _eq("a group's parts under its header; what counts nothing goes first", got, ["ran 35:", "  █ 30 ok", "  ╳ 5 failed", "○ 10 not run", "░ 1 internal"])
-    _eq("then the hit-less caches before internal", [_visible(r) for r in action_results(dict(jammed, disk_on = True, remote_on = True), 17, 5, short = True, stack = True)], ["ran 35:", "  █ 30 ok", "  ╳ 5 failed", "○ 10 not run", "░ 1 internal"])
-    _eq("then internal", [_visible(r) for r in action_results(jammed, 17, 4, short = True, stack = True)], ["ran 35:", "  █ 30 ok", "  ╳ 5 failed", "○ 10 not run"])
-    _eq("a lone hit's meaning in fewer words where narrow", [_visible(r) for r in action_results(dict(jammed, local = 1234), 12, 6, short = True, stack = True)], ["ran 35:", "  █ 30 ok", "  ╳ 5 failed", "▒ 1.2k local", "○ 10 not run"])
+    _eq("a group's parts under its header; what counts nothing goes first", got, ["ran 35:", "  █ 30 ok", "  ╳ 5 failed", "○ 10 skipped", "░ 1 internal"])
+    _eq("then the hit-less caches before internal", [_visible(r) for r in action_results(dict(jammed, disk_on = True, remote_on = True), 17, 5, short = True, stack = True)], ["ran 35:", "  █ 30 ok", "  ╳ 5 failed", "○ 10 skipped", "░ 1 internal"])
+    _eq("then internal", [_visible(r) for r in action_results(jammed, 17, 4, short = True, stack = True)], ["ran 35:", "  █ 30 ok", "  ╳ 5 failed", "○ 10 skipped"])
+    _eq("a lone hit's meaning in fewer words where narrow", [_visible(r) for r in action_results(dict(jammed, local = 1234), 12, 6, short = True, stack = True)], ["ran 35:", "  █ 30 ok", "  ╳ 5 failed", "▒ 1.2k local", "○ 10 skipped"])
     _eq("no label with no hit left", any(["hits" in _visible(r) for r in action_results(dict(jammed, final = False, local = 0, estimated = True), 17, 5, short = True, stack = True)]), False)
     _eq("never cut in half", [("…" in r, text_width(r) <= 17) for r in got], [(False, True)] * len(got))
     live_jam = dict(jammed, final = False, running = True, running_now = 4, total = 62, internal = 1, unreported = 2, local = 0, estimated = True, not_run = 0, disk_on = False, remote_on = False)
@@ -1011,7 +1012,7 @@ def _actions_tests(ctx):
         key = rows[rows.index("Actions"):]
         _eq("the key at %d" % width, [text_width(r) <= width for r in key if r not in ("Actions", "Tests")], [True for r in key if r not in ("Actions", "Tests")])
     keyed = " ".join([" ".join(r.split()) for r in help_rows(greg_screen, 300)])
-    for want in ["ran: ok + failed: actions executed this build", "█ ok: executed this build and succeeded", "▒ local action cache:", "▓ disk / remote:", "cache hits: local + disk + remote: actions whose results were reused", "╳ failed: executed this build and failed (test failures are under Tests)", "░ internal: Bazel bookkeeping", "▌ other: what Bazel's own counts leave out", "─ not done: running or pending", "The groups and parts don't overlap: they add up to the total actions.", "actions: what Bazel checked this build", "%: cache hits ÷ actions; targets Bazel skipped without checking aren't counted, so a warm and a fresh server aren't comparable"]:
+    for want in ["ran: ok + failed: actions executed this build", "█ ok: executed this build and succeeded", "▒ in memory / local: outputs already known valid on this machine: Bazel's in-memory build graph (warm server) or its action cache", "▓ disk / remote:", "cache hits: in memory + local + disk + remote: actions whose results were reused", "○ skipped: Bazel counted these done without running them or checking its action cache: an identical action of another target already made the same output (shared), or an input failed", "╳ failed: executed this build and failed (test failures are under Tests)", "░ internal: Bazel bookkeeping", "▌ other: what Bazel's own counts leave out", "─ not done: running or pending", "The groups and parts don't overlap: they add up to the total actions.", "actions: what Bazel checked this build", "%: cache hits ÷ actions; targets Bazel skipped without checking aren't counted, so a warm and a fresh server aren't comparable"]:
         _eq("keyed: %r" % want, want in keyed, True)
     _eq("the Tests row keyed", help_rows(greg_screen, 100)[-2:], ["Tests", "  ─ running · pending: test targets · (N cached): every run from a cache"])
 

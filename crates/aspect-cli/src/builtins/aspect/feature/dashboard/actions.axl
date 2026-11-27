@@ -904,7 +904,7 @@ def action_parts(split: dict) -> list:
     the rest add up to the actions: what ran (`ok`, `failed`) and the
     cache hits (the local action cache, always at the end; disk and remote
     where the build was given that cache, or hit it, live only once they
-    have a hit, `▓` once before the first); then not run, internal,
+    have a hit, `▓` once before the first); then skipped, internal,
     `other` (at the end, what of Bazel's counts fits no kind) and what
     Bazel counted done without saying how (`? 3 unreported`); with nothing
     to tell them apart, the done count; while it runs, what is not done
@@ -924,10 +924,10 @@ def action_parts(split: dict) -> list:
     parts = [("█", split["ran"], "ok", "accent", "")]
     if split["failed"]:
         parts.append(("╳", split["failed"], "failed", "error", ""))
-    if final or split["local"]:
-        parts.append(("▒", split["local"], "local action cache", "muted", "estimate" if split.get("estimated") else ""))
     if split.get("memory"):
         parts.append(("▒", split["memory"], MEMORY_WORD, "muted", ""))
+    if final or split["local"]:
+        parts.append(("▒" if not split.get("memory") else "", split["local"], "local action cache", "muted", "estimate" if split.get("estimated") else ""))
     glyph = "▓"
     for key, on in (("disk", split["disk_on"]), ("remote", split["remote_on"])):
         if split[key] or (final and on):
@@ -939,23 +939,22 @@ def action_parts(split: dict) -> list:
     parts.append(("?", split["unreported"], "unreported", "", "muted"))
     return [p for p in parts if p[1] or p[4] == "dim" or (p[2] == "local action cache" and final)] + remaining
 
-# The words of two parts whose names are not settled yet, each here alone:
-# the actions up to date in Bazel's memory (its graph's cleaned values), a
-# cache hit; and what Bazel counted done that no other part has (an action
-# another target's identical one produced the outputs of, or, in a build
-# where an action failed, one skipped as an input failed).
-MEMORY_WORD = "memory"
+# The words of the actions up to date in Bazel's memory (its graph's
+# cleaned values), a cache hit, and of those Bazel counted done without
+# running them or checking its action cache (an identical action of another
+# target made their outputs, or an input failed), each here alone.
+MEMORY_WORD = "in memory"
 
-NOT_RUN_WORD = "not run"
+NOT_RUN_WORD = "skipped"
 
 # The two groups of parts, each with its subtotal on its header: what ran,
 # and the cache hits.
 _RAN = ["ok", "failed"]
 
-_HITS = ["local action cache", MEMORY_WORD, "disk", "remote"]
+_HITS = [MEMORY_WORD, "local action cache", "disk", "remote"]
 
 # A group's one part, its header dropped, says the group's meaning.
-_ALONE = {"ok": "ran", "local action cache": "local action cache hits", MEMORY_WORD: MEMORY_WORD + " cache hits", "disk": "disk cache hits", "remote": "remote cache hits"}
+_ALONE = {"ok": "ran", "local action cache": "local action cache hits", MEMORY_WORD: "cache hits " + MEMORY_WORD, "disk": "disk cache hits", "remote": "remote cache hits"}
 
 def _part_text(part: tuple, level: int) -> tuple:
     """`(plain, drawn)` of one part at `level` (0 whole, 1 `local`, 2
@@ -967,6 +966,8 @@ def _part_text(part: tuple, level: int) -> tuple:
         words = "local"
     elif level >= 1 and words == "cache hits":
         words = "hits"
+    elif level >= 2 and words == _ALONE[MEMORY_WORD]:
+        words = ("hits " if level < 3 else "") + MEMORY_WORD
     elif level >= 1 and words.endswith(" cache hits") and words != "cache hits":
         # A group's one part, its meaning in fewer words where they're
         # short, and at last its cache's alone.
@@ -978,7 +979,7 @@ def _part_text(part: tuple, level: int) -> tuple:
     return (plain, ((_c(role) + glyph + _RESET) if role and glyph else glyph) + plain[len(glyph):])
 
 # The Actions rows' parts in their order, by their words.
-_PART_ORDER = ["done", "ok", "failed", "local action cache", MEMORY_WORD, "disk", "remote", NOT_RUN_WORD, "internal", "other", "unreported", "running", "pending"]
+_PART_ORDER = ["done", "ok", "failed", MEMORY_WORD, "local action cache", "disk", "remote", NOT_RUN_WORD, "internal", "other", "unreported", "running", "pending"]
 
 # The live parts that keep their place at 0 once shown: glyph and role.
 _HELD = {"unreported": ("?", ""), "running": ("─", "border"), "pending": ("", ""), "internal": ("░", "subtle")}
@@ -986,7 +987,7 @@ _HELD = {"unreported": ("?", ""), "running": ("─", "border"), "pending": ("", 
 # What goes first where the Actions rows have no room for every part: what
 # counts nothing (the end's `0 local` too) and the caches with no hits,
 # then internal, other, pending; then the hits become their total alone,
-# which goes next; then running, unreported, what ran ok, what was not run;
+# which goes next; then running, unreported, what ran ok, what was skipped;
 # failed never.
 _DROP_ORDER = ["zero", "internal", "other", "pending", "collapse", "cache hits", "running", "unreported", "ok", NOT_RUN_WORD]
 
@@ -1031,7 +1032,7 @@ def action_results(split: dict, room: int, rows = 3, short = False, stack = Fals
     fits, the caches with no hits go, then internal; then parts go in
     `_DROP_ORDER` (a zero count, internal, other, pending, then the hits
     as their header's total alone, then that, running, unreported, what
-    ran ok, not run; failed never), counts going to `short_count` before
+    ran ok, skipped; failed never), counts going to `short_count` before
     pending does: a part never goes from under its header but with all of
     them. With `memory` (the build's, while the pane's size holds) each
     part is measured at the widest it has been and no fewer go than went
@@ -1370,6 +1371,8 @@ def action_lines(state: dict) -> list:
     return out
 
 dashboard_actions = namespace(
+    MEMORY_WORD = MEMORY_WORD,
+    NOT_RUN_WORD = NOT_RUN_WORD,
     action_bar = action_bar,
     action_counts = action_counts,
     action_lines = action_lines,
