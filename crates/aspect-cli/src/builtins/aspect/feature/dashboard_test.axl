@@ -2698,6 +2698,50 @@ def _impl(ctx: TaskContext) -> int:
     _agree("pair", dict(kinds, counts = dict(new_counts(), failures = ["//pair:plain", "//pair:ansi", "//pair:crlf", "//pair:same"], failed_labels = {}, failed = 4), root_causes = {}, logged_index = None, fails = pair_recs, read = lambda p, n: (pair_logs[p], 0) if p in pair_logs else None, build = struct(kept_action_log = lambda output: pair_kept.get(output, {})), kept_errors = {"errors": pair_errs, "distinct": 8}, excerpts = {}, ansi = ctx.std.re.compile(ANSI), building = False, ended = True), 8)
     _eq("each its own exit and line", sorted([e[0] for e in ov_got]), sorted(["✗ //ov:%s  %s · exit %d · ov/BUILD.bazel:%d:%d" % (n, "Genrule" if n.startswith("g") else "Proc", c, l, 8 if n.startswith("g") else 4) for n, l, c in [("g2", 11, 1), ("g1", 10, 1), ("d", 6, 2), ("c", 2, 1), ("d", 6, 2), ("c", 2, 1)]]))
 
+    # ws/no (Bazel 7.7.3 to 9.3.3; x's first, within the excerpts shown): //no:x's Prep makes x.a but its progress
+    # message names x.b, its Fin the other way about: each error goes with
+    # the action whose log says it. //no:p's p.1 and p.10 say the same, told
+    # apart by the output named; //no:n's two say the same and name none:
+    # one each, both located.
+    no_errs = []
+    no_recs = []
+    no_logs = {}
+    no_kept = {}
+    for label, line, what, mnemonic, output, said in [
+        ("x", "3:6", "Preparing no/x.b", "Prep", "x.a", "A side broke"),
+        ("x", "3:6", "Finishing no/x.a", "Fin", "x.b", "B side broke"),
+        ("p", "2:4", "Processing no/p.1", "Proc", "p.1", "same text"),
+        ("n", "4:6", "Working", "W", "n.a", "same"),
+        ("n", "4:6", "Working", "W", "n.b", "same"),
+        ("p", "2:4", "Processing no/p.10", "Proc", "p.10", "same text"),
+    ]:
+        no_errs.append({"header": "ERROR: no/BUILD.bazel:%s: %s failed: (Exit 1)" % (line, what), "body": [said], "log": None, "label": None, "target": "//no:" + label})
+        no_recs.append(_act("//no:" + label, mnemonic, "bazel-out/bin/no/" + output, 1))
+        no_logs["/h/no/" + output] = said + "\n"
+        no_kept["bazel-out/bin/no/" + output] = {"stderr": "/h/no/" + output}
+    got, _ = _entries(no_recs, no_errs, no_logs, no_kept)
+    _eq("each action its own error, whatever its message names", sorted([(e[0], e[1]) for e in got if "//no:x" in e[0]]), [("✗ //no:x  Fin · exit 1 · no/BUILD.bazel:3:6", ["B side broke"]), ("✗ //no:x  Prep · exit 1 · no/BUILD.bazel:3:6", ["A side broke"])])
+    got, _ = _entries(no_recs, [e for k, e in enumerate(no_errs) if k != 4], no_logs, no_kept)
+    _eq("a repeat kept once: both located", [e[0] for e in got if "//no:n" in e[0]], ["✗ //no:n  W · exit 1 · no/BUILD.bazel:4:6", "✗ //no:n  W · exit 1 · no/BUILD.bazel:4:6"])
+    got, _ = _entries(no_recs, no_errs, no_logs, no_kept)
+    _eq("alike errors: one each, located", [e[0] for e in got if "//no:x" not in e[0]], ["✗ //no:p  Proc · exit 1 · no/BUILD.bazel:2:4", "✗ //no:n  W · exit 1 · no/BUILD.bazel:4:6", "✗ //no:n  W · exit 1 · no/BUILD.bazel:4:6", "✗ //no:p  Proc · exit 1 · no/BUILD.bazel:2:4"])
+
+    # ws/at2 + q2 (Bazel 9.3.3): //at2:t1's and //at2:t2's own attribute
+    # errors put at2 in error; ok and ok2 fail with it, and //q2:u needs ok.
+    at2_errs = [{"header": h, "body": [], "log": None, "label": None, "target": None} for h in [
+        "ERROR: at2/BUILD.bazel:1:8: //at2:t1: expected value of type 'list(output)' for attribute 'outs' of 'genrule', but got \"a.txt\" (string)",
+        "ERROR: at2/BUILD.bazel:1:8: //at2:t1: missing value for mandatory attribute 'outs' in 'genrule' rule",
+        "ERROR: at2/BUILD.bazel:2:8: //at2:t2: expected value of type 'string' for attribute 'cmd' of 'genrule', but got 5 (int)",
+        "ERROR: package contains errors: at2: //at2:t1: expected value of type 'list(output)' for attribute 'outs' of 'genrule', but got \"a.txt\" (string)",
+        "ERROR: q2/BUILD.bazel:1:8: Target '//at2:ok' contains an error and its package is in error and referenced by '//q2:u'",
+    ]]
+    at2 = dict(kinds, counts = dict(new_counts(), failures = ["//at2:t1", "//at2:t2", "//at2:ok", "//at2:ok2", "//q2:u"], failed_labels = {"//at2:t1": True, "//at2:t2": True, "//at2:ok": True, "//at2:ok2": True, "//q2:u": True}, failed = 5), root_causes = {"//q2:u": ["//at2:ok"]}, logged_index = None, blocked_cache = None, listed_cache = None, fails = [], kept_errors = {"errors": at2_errs, "distinct": 5}, read = None, build = None)
+    for label in ("//at2:t1", "//at2:t2", "//at2:ok", "//at2:ok2"):
+        note_event(at2, "unconfigured_label", struct(label = label), struct(), True)
+    got = [_visible(l) for l in failure_summary(at2, {"errors": at2_errs, "distinct": 5}, "t-9", False)]
+    _eq("a target its own error names is its own failure", [l for l in got if l.startswith("✗") or l.startswith("──") or "blocked:" in l], ["── Failures (2) ──", "✗ //at2:t1  analysis · at2/BUILD.bazel:1:8", "  ○ blocked: //at2:ok, //at2:ok2, //q2:u", "✗ //at2:t2  analysis · at2/BUILD.bazel:2:8"])
+    _eq("its counts", summary_counts(at2), "0 built, 2 failed, 3 blocked · 0 tests passed, 0 failed")
+
     # ws/at (Bazel 9.3.3): //at:t's attribute type error puts its package in
     # error, so //at:ok fails with it: //at:t's entry, //at:ok blocked.
     at_errs = [{"header": h, "body": [], "log": None, "label": None, "target": None} for h in [

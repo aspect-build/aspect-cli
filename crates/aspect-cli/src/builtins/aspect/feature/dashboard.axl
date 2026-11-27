@@ -1439,7 +1439,8 @@ def blocked_targets(state: dict) -> dict:
     input file '//a:x.txt'`, each target that says so), so what depends on
     that target is blocked by it; each such target, and one whose roots
     are targets that never failed, failed itself. A target of a package
-    one target's own error put in error is blocked by that target.
+    its targets' own errors put in error is blocked by the first of
+    them, unless an error of its own names it too.
     Decided from the failures so far, so a target
     Bazel reported before its root cause's failure counts once that
     comes; cached until they, the root causes or the kept errors
@@ -1475,19 +1476,36 @@ def blocked_targets(state: dict) -> dict:
 
     # A package in error for one target's own error (`package contains
     # errors: at: //at:t: expected value of type 'list(output)'`): its
-    # other failed targets are blocked by that one.
+    # other failed targets no error of its own names are blocked by the
+    # first that one names (`own_error_targets`).
     for e in errors:
         header = e.get("header", "")
         if not header.startswith("ERROR: package contains errors: "):
             continue
         pkg, _, said = header[len("ERROR: package contains errors: "):].partition(": ")
         named = [l for l in header_labels(said) if l.partition("//")[2].partition(":")[0] == pkg]
+        selves = own_error_targets(errors, pkg)
         if len(named) == 1 and named[0] in failed:
             for label in failed:
-                if label != named[0] and label not in blocked and label.partition("//")[2].partition(":")[0] == pkg:
-                    blocked[label] = [named[0]]
+                if label not in selves and label != named[0] and label not in blocked and label.partition("//")[2].partition(":")[0] == pkg:
+                    blocked[label] = [(selves or named)[0]]
     state["blocked_cache"] = (key, blocked)
     return blocked
+
+def own_error_targets(errors: list, pkg: str) -> list:
+    """The targets of package `pkg` an error of its own names first
+    (`at2/BUILD.bazel:2:8: //at2:t2: expected value of type 'string'`),
+    in Bazel's order: each a failure of its own, never blocked by its
+    package's other errors."""
+    out = []
+    for e in errors:
+        header = e.get("header", "")
+        if header.startswith("ERROR: package contains errors: "):
+            continue
+        label = error_parts(header)[2].partition(": ")[0]
+        if label.startswith("//" + pkg + ":") and " " not in label and label not in out:
+            out.append(label)
+    return out
 
 def blocked_text(label: str, roots: list) -> str:
     """`blocked by :broken`: a root cause in `label`'s package by its name,
@@ -6464,11 +6482,11 @@ def action_errors(state: dict) -> dict:
     and its `(Exit N)` is not another than the record's exit code (a
     record whose command exited 0, or ran none, takes no error with one). A
     record and a candidate pair, rule by rule, when the error says the
-    record's output was not created (`_makes`), else when what it says
-    failed names that output (`_names_output`), else when the lines of the
+    record's output was not created (`_makes`), else when the lines of the
     error's body that no rival error's body has (escapes and CRs left out,
     a line cut with `…` the text before it) are in the record's own kept
-    log (`_plain_text`), else when the source it compiled is the record's
+    log (`_plain_text`), else, for an error whose body has no such line,
+    when what it says failed names that output (`_names_output`), else when the source it compiled is the record's
     object (`_compiles`), else when the console matched it to that very
     log, else when it names the record's label and each is the other's
     only one left, else, for a record no error names, when it says the
@@ -6477,8 +6495,10 @@ def action_errors(state: dict) -> dict:
     again, until none does. A further error that says what failed goes
     with the paired record whose error is at its BUILD line (by its name
     where several are), and a record left whose candidates are all at one
-    BUILD line no other has a candidate at takes them all (`also`). A
-    record no rule settles gets no error, and the summary tells it from
+    BUILD line no other has a candidate at takes them all (`also`), and
+    records left whose candidates are the same errors that each say the
+    same take one each (the same one, where the console kept one of
+    Bazel's repeats). A record no rule settles gets no error, and the summary tells it from
     the record alone. An error left that says what failed, or names a
     failed record's output or target, is a record's, never an entry of its
     own; one about the package stays for its analysis root. A second error
@@ -6577,8 +6597,11 @@ def action_errors(state: dict) -> dict:
                     pair(i, j)
 
     by(lambda i, j: _makes(state["fails"][i], errors[j]))
-    by(lambda i, j: _names_output(state["fails"][i], errors[j]))
     by(lambda i, j: bool(text[i]) and any([l in text[i] for l in distinct[j]]))
+
+    # A progress message may name any output (`Preparing x.b` of the
+    # action making `x.a`): only where the body says nothing apart.
+    by(lambda i, j: not distinct[j] and _names_output(state["fails"][i], errors[j]))
     by(lambda i, j: _compiles(state["fails"][i], errors[j]))
     by(lambda i, j: bool(own[i]) and errors[j].get("log") == own[i])
     by(lambda i, j: _error_names(errors[j], state["fails"][i]["label"]))
@@ -6617,6 +6640,21 @@ def action_errors(state: dict) -> dict:
             out[i] = dict(out[i], also = [errors[j] for j in js[1:] if not used[j]])
             for j in js[1:]:
                 used[j] = True
+
+    # Records left whose candidates are the same errors, each saying just
+    # what the others say (`Working failed: (Exit 1)`, `same`): whichever
+    # goes with whichever, one each, or, Bazel's repeat of one kept once,
+    # the same one.
+    for i in [i for i in records if i not in out]:
+        if i in out:
+            continue
+        js = candidates(i)
+        alike = {(errors[j].get("header", ""), tuple(said(errors[j]))): True for j in js}
+        rivals = [k for k in records if k not in out and k != i and [j for j in candidates(k) if j in js]]
+        if js and len(alike) == 1 and not [k for k in rivals if candidates(k) != js]:
+            if len(rivals) < len(js):
+                used[js[0]] = True
+            out[i] = errors[js[0]]
 
     # An error left that says what failed of an action, or names a failed
     # record's output or target, is that record's, never an entry of its
@@ -6977,14 +7015,29 @@ def failure_summary(state: dict, kept, task_id: str, tty: bool, log_path: str = 
                 # own error: said once.
                 if not again:
                     found.append((j, e))
-        details, lines, _ = from_errors(found)
 
         # Headed by an error of one of its targets, the entry is that
-        # target's, the package's other roots blocked under it.
+        # target's, the package's other roots no error of their own names
+        # blocked under it.
         named = [l for l in header_labels(errors[k].get("header", "")) if l.partition("//")[2].partition(":")[0] == pkg]
         title = named[0] if len(named) == 1 else "//" + pkg
-        others = [r["label"] for r in groups.get(pkg, []) if r["label"] != title] if title != "//" + pkg else []
-        entries.append(dict(entry(0, k, title, "analysis", details, lines, ""), blocked = others + [l for l in stopped if l not in others]))
+
+        # Another target an error of its own names (`//at2:t2: expected
+        # value of type 'string'`) is a failure of its own.
+        selves = [l for l in own_error_targets(errors, pkg) if l != title] if title != "//" + pkg else []
+        apart = {}
+        for f in found:
+            label = error_parts(f[1].get("header", ""))[2].partition(": ")[0]
+            if label in selves:
+                apart.setdefault(label, []).append(f)
+        found = [f for f in found if error_parts(f[1].get("header", ""))[2].partition(": ")[0] not in selves]
+        details, lines, _ = from_errors(found)
+        others = [r["label"] for r in groups.get(pkg, []) if r["label"] != title and r["label"] not in selves] if title != "//" + pkg else []
+        entries.append(dict(entry(0, k, title, "analysis", details, lines, ""), blocked = others + [l for l in stopped if l not in others and l not in selves]))
+        for label in selves:
+            if apart.get(label):
+                own_details, own_lines, _ = from_errors(apart[label])
+                entries.append(entry(0, apart[label][0][0], label, "analysis", own_details, own_lines, ""))
     for i, rec in enumerate(state["fails"]):
         if rec["kind"] == "action" and rec.get("detail") == "analysis failed" and rec["label"].partition("//")[2].partition(":")[0] in groups:
             continue
