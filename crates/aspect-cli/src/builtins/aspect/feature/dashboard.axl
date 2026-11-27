@@ -6420,17 +6420,23 @@ def action_errors(state: dict) -> dict:
     by(lambda i, j: _says_name(state["fails"][i], errors[j]))
     by(lambda i, j: _error_names(errors[j], state["fails"][i]["label"]))
 
-    # A record's further errors at its error's BUILD line that name it
-    # alone (`Checking d0 failed: not all outputs were created or valid`
-    # after `output 'mc/d0.out' was not created`).
-    for i in records:
-        if i not in out:
+    # A record's further errors (`Checking d0 failed: not all outputs were
+    # created or valid` after `output 'mc/d0.out' was not created`): each
+    # paired record whose name it says (both of `Building docs for api`),
+    # else the one record whose error is at its BUILD line.
+    for j in range(len(errors)):
+        e = errors[j]
+        if used[j] or not _failed_action(e.get("header", "")):
             continue
-        line = error_parts(out[i].get("header", ""))[0]
-        for j in candidates(i):
-            if line and error_parts(errors[j].get("header", ""))[0] == line and len([k for k in records if j in candidates(k) and _says_name(state["fails"][k], errors[j])]) == 1 and _says_name(state["fails"][i], errors[j]):
-                used[j] = True
-                out[i] = dict(out[i], also = list(out[i].get("also", [])) + [errors[j]])
+        line = error_parts(e.get("header", ""))[0]
+        mine = [i for i in records if i in out and j in candidates(i)]
+        namers = [i for i in mine if _says_name(state["fails"][i], e)]
+        if not namers:
+            namers = [i for i in mine if line and error_parts(out[i].get("header", ""))[0] == line]
+            namers = namers if len(namers) == 1 else []
+        for i in namers:
+            used[j] = True
+            out[i] = dict(out[i], also = list(out[i].get("also", [])) + [e])
 
     # A record left whose candidates, narrowed to the BUILD line of those
     # that name it where any do, are all at one line no other record left
@@ -6449,10 +6455,16 @@ def action_errors(state: dict) -> dict:
             for j in js[1:]:
                 used[j] = True
 
-    # No error a failed record could claim is an entry of its own.
+    # An error left that says what failed of an action, or names a failed
+    # record's output or target, is that record's, never an entry of its
+    # own; one about the package (an analysis root's `no such package`)
+    # stays for its root to claim.
     for i in records:
+        rec = state["fails"][i]
         for j in candidates(i):
-            used[j] = True
+            e = errors[j]
+            if _failed_action(e.get("header", "")) or _makes(rec, e) or _says_name(rec, e):
+                used[j] = True
     state["action_errors_cache"] = (key, out)
     state["action_errors_used"] = [j for j in range(len(errors)) if used[j]]
     state["action_logs"] = own
@@ -6600,7 +6612,7 @@ def failure_summary(state: dict, kept, task_id: str, tty: bool, log_path: str = 
             location, exit, reason = error_parts(e.get("header", ""))
             if not details:
                 details = [d for d in (exit, location) if d]
-            if reason:
+            if reason and reason not in lines:
                 lines.append(reason)
             lines.extend(e.get("body") or [])
             log = log or (e.get("log") or "")

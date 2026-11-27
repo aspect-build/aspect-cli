@@ -684,6 +684,7 @@ def _actions_tests(ctx):
     # done stay, and nothing is cut in half.
     jammed = dict(greg, ran = 30, local = 0, disk = 0, remote = 0, failed = 5, blocked = 10, internal = 1, done = 46, total = 46)
     got = [_visible(r) for r in action_results(jammed, 17, 5, short = True, stack = True)]
+
     # Short terminals (round 50's probe): the drop order, failed last.
     probe = dict(done = 0, total = 0, more = False, counted = True, known = True, final = True, estimated = False, ran = 0, local = 0, disk = 0, remote = 0, internal = 0, other = 0, rest = 0, failed = 0, blocked = 0, unreported = 0, failed_build = True, running = False, running_now = 0, disk_on = True, remote_on = False, published = True)
     zero = dict(probe, done = 32, total = 32, failed = 16, blocked = 15, internal = 1)
@@ -2437,6 +2438,37 @@ def _impl(ctx: TaskContext) -> int:
             ("✗ //mc:e  Check · mc/BUILD.bazel:3:4", ["output 'mc/e.out' was not created", "not all outputs were created or valid"]),
         ])
         _eq("mc flipped %s: the tab alike" % flip, sorted(tab), sorted([e[0] for e in got]))
+
+    # ws/ar (Bazel 7.7.3 and 9.3.3): //ar:boom fails in the package whose
+    # //ar:badlabel names `//nowhere:x`: the analysis root keeps its own
+    # error at the BUILD line, the failed action takes none of it.
+    ar_errs = [
+        {"header": "ERROR: no such package 'nowhere': BUILD file not found in any of the following directories. Add a BUILD file to a directory to mark it as a package.", "body": ["- nowhere"], "log": None, "label": None, "target": None},
+        {"header": "ERROR: ar/BUILD.bazel:3:8: no such package 'nowhere': BUILD file not found in any of the following directories. Add a BUILD file to a directory to mark it as a package.", "body": ["- nowhere and referenced by '//ar:badlabel'"], "log": None, "label": None, "target": None},
+        {"header": "ERROR: ar/BUILD.bazel:1:8: Executing genrule //ar:boom failed: (Exit 1)", "body": ["boom broke"], "log": None, "label": None, "target": "//ar:boom"},
+    ]
+    ar = dict(kinds, counts = dict(new_counts(), failures = ["//ar:boom"], failed_labels = {"//ar:boom": True}, failed = 1, failed_roots = {"//nowhere:x": True}), root_causes = {"//ar:badlabel": ["//nowhere:x"]}, logged_index = None, blocked_cache = None, listed_cache = None, fails = [
+        {"kind": "action", "label": "//nowhere:x", "detail": "analysis failed", "files": [("error", ("no such package 'nowhere': BUILD file not found in any of the following directories. Add a BUILD file to a directory to mark it as a package.\n - nowhere", False))], "output": "", "success": False},
+        _act("//ar:boom", "Genrule", "bazel-out/ar/boom.txt", 1),
+    ], kept_errors = {"errors": ar_errs, "distinct": 3}, read = None, build = None)
+    got = [_visible(l) for l in failure_summary(ar, {"errors": ar_errs, "distinct": 3}, "t-9", False)]
+    _eq("the analysis root's located error stays its own", [l for l in got if l.startswith("✗") or "referenced by" in l], ["✗ //nowhere:x  analysis · ar/BUILD.bazel:3:8", "  │ - nowhere and referenced by '//ar:badlabel'", "✗ //ar:boom  Genrule · exit 1 · ar/BUILD.bazel:1:8"])
+
+    # ws/sn (Bazel 9.3.3): `Building docs for api failed` names both
+    # //sn:docs and //sn:api, `Packaging failed` neither; each entry has
+    # its output's error, the line naming it, and api the one at its line, a
+    # reason said once.
+    sn_errs = [{"header": h, "body": [], "log": None, "label": None, "target": None} for h in [
+        "ERROR: sn/BUILD.bazel:3:4: output 'sn/api.out' was not created",
+        "ERROR: sn/BUILD.bazel:3:4: Packaging failed: not all outputs were created or valid",
+        "ERROR: sn/BUILD.bazel:2:4: output 'sn/docs.out' was not created",
+        "ERROR: sn/BUILD.bazel:2:4: Building docs for api failed: not all outputs were created or valid",
+    ]]
+    got, _ = _entries([_act("//sn:%s" % n, "Check", "bazel-out/bin/sn/%s.out" % n, 0) for n in ("docs", "api")], sn_errs, {}, {})
+    _eq("a line naming two goes with each", sorted([(e[0], e[1]) for e in got]), [
+        ("✗ //sn:api  Check · sn/BUILD.bazel:3:4", ["output 'sn/api.out' was not created", "not all outputs were created or valid"]),
+        ("✗ //sn:docs  Check · sn/BUILD.bazel:2:4", ["output 'sn/docs.out' was not created", "not all outputs were created or valid"]),
+    ])
 
     # A signal-killed action (//f:killed, Bazel 9.3.3): `killed` where the
     # exit code goes, and no command line quoted.
