@@ -3,6 +3,7 @@ entries (`failure_entries`), from the records `failure_records.axl`
 collects and the console text `failure_ties.axl` ties to them."""
 
 load("@std//theme.axl", "theme")
+load("@aspect//bazel/console.axl", "RECAP_MAX")
 load("./failure_records.axl", "failure_records")
 load("./failure_ties.axl", "failure_ties")
 load("./term_text.axl", "term_text")
@@ -95,9 +96,10 @@ def _failure_counts(state: dict):
 # The most flaky tests' failed attempts the scrollback lists.
 _MAX_FLAKY_LISTED = 20
 
-# The most entries, and of Bazel's other errors, the failure summary lists;
-# the rest are counted.
-_SUMMARY_MAX = 10
+# The most entries, and of Bazel's other errors, the failure summary lists
+# unless told (`failure_summary`'s `max_entries`): as many as the console
+# recaps; the rest are counted.
+_SUMMARY_MAX = RECAP_MAX
 
 def summary_counts(state: dict) -> str:
     """The failure summary's counts: targets built, failed and blocked,
