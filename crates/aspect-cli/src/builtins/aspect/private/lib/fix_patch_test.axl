@@ -248,6 +248,18 @@ exec patch "$@"
     _eq("each run names one copy, none for a missing file or a header alone", fs.read_to_string(log).split("\n"), ["1 ./src/a.txt", "1 ./src/new.txt", "1 ./src/gone.txt", ""])
     _eq("all applied", (fs.read_to_string(tree + "/src/a.txt"), fs.read_to_string(tree + "/src/new.txt"), fs.exists(tree + "/src/gone.txt")), ("A\n", "n\n", False))
 
+# Set in a nested run that does only `_test_environment`.
+_ENVIRONMENT_ONLY = "ASPECT_TEST_FIX_PATCH_ENVIRONMENT"
+
+def _test_environment_nested(ctx: TaskContext):
+    """`_test_environment` in a nested run of this suite whose stdin is a
+    pipe, so an inherited stdin would reach patch as one, whatever the
+    suite's own stdin is."""
+    out = ctx.std.process.command(ctx.std.env.current_exe()).args(["dev", "test-fix-patch"]) \
+        .env(_ENVIRONMENT_ONLY, "1").stdin("piped").stdout("piped").stderr("piped").spawn().wait_with_output()
+    said = out.stdout + out.stderr
+    _eq("the environment case, nested:\n" + said, (out.status.code, "fix_patch_test.axl: environment OK" in said), (0, True))
+
 def _test_environment(ctx: TaskContext, root: str):
     """patch runs with no terminal, `--forward --batch`, `LC_ALL=C`, and
     none of what changes its backups, file lookups or quoting, whatever the
@@ -559,11 +571,15 @@ def _impl(ctx: TaskContext) -> int:
     fs = ctx.std.fs
     root = fs.mkdtemp()
     ctx.defer(fs.remove_dir_all, root)
+    if ctx.std.env.var(_ENVIRONMENT_ONLY) != None:
+        _test_environment(ctx, root)
+        print("fix_patch_test.axl: environment OK")
+        return 0
     _test_scan()
     _test_ignored()
     _test_apply(ctx, root)
     _test_one_file_per_run(ctx, root)
-    _test_environment(ctx, root)
+    _test_environment_nested(ctx)
     _test_bsd_and_gnu(ctx, root)
     _test_escapes(ctx, root)
     _test_refused(ctx, root)
