@@ -468,7 +468,7 @@ def _actions_tests(ctx):
         _fail_event(cut, "Genrule:remote_execution:CAPABILITIES_QUERY_FAILURE", i)
     split = action_split(cut)
     _eq("cut short: the known failures", [split[k] for k in ("final", "ran", "rest", "failed", "done")], [False, 0, 1, 3, 4])
-    _eq("drawn as failed", [_visible(r) for r in action_results(split, 60)], ["╳ 3 failed · 1 other"])
+    _eq("drawn as failed", [_visible(r) for r in action_results(split, 60)], ["╳ 3 failed · ▞ 1 other"])
     _eq("and on the bar", "╳" in _visible(action_bar(split, 40)), True)
     _eq("not while it runs", action_split(dict(cut, building = True, progress = ["[4 / 4] no actions running"]))["failed"], 0)
 
@@ -479,7 +479,7 @@ def _actions_tests(ctx):
     early = _screen(ctx, ["x"], building = False, ended = True, done_total = (4, 4, False), all_actions = False, inv = {"build_finished": struct(exit_code = struct(name = "REMOTE_ERROR", code = 34))})
     split = action_split(early)
     _eq("cut after configuration", [split[k] for k in ("final", "ran", "rest", "failed", "done")], [False, 0, 4, 0, 4])
-    _eq("drawn as other", [_visible(r) for r in action_results(split, 40)], ["4 other"])
+    _eq("drawn as other", [_visible(r) for r in action_results(split, 40)], ["▞ 4 other"])
     _eq("its key says what other is", any(["while it runs, also the local action cache" in r for r in help_rows(early, 200)]), True)
 
     # Every action published (the default), live: r39's run of //dc:all
@@ -609,7 +609,7 @@ def _actions_tests(ctx):
     _eq("final bar glyphs", [bar.count(g) for g in ("█", "▓", "▒", "░", "─")], [1, 3, 34, 2, 0])
     _eq("as wide as asked", text_width(bar), 40)
     bar = _visible(action_bar(action_split(mid), 50))
-    _eq("mid-build bar", [bar.count(g) for g in ("█", "▓", "▒", "░", "─")], [1, 6, 15, 0, 28])
+    _eq("mid-build bar: the rest other, never the local action cache's", [bar.count(g) for g in ("█", "▓", "▒", "▞", "░", "─")], [1, 6, 0, 15, 0, 28])
     failed_bar = _visible(action_bar(action_split(big), 60))
     _eq("a failed build's", ("╳" in failed_bar, text_width(failed_bar)), (True, 60))
 
@@ -674,7 +674,7 @@ def _actions_tests(ctx):
     _eq("at 100 columns", [_visible(r) for r in action_results(greg, 89, 2)], ["█ 5,705 ran · cache hits 3,148: ▒ 2,836 local action cache · ▓ 300 disk · 12 remote", "╳ 4 failed · ░ 33 internal"])
     _eq("under 100, local", [_visible(r) for r in action_results(greg, 79, 3, short = True)], ["█ 5,705 ran · cache hits 3,148: ▒ 2,836 local · ▓ 300 disk · 12 remote", "╳ 4 failed · ░ 33 internal"])
     _eq("at 60: ran and failed, the hits, internal last", [_visible(r) for r in action_results(greg, 49, 3, short = True, stack = True)], ["█ 5,705 ran · ╳ 4 failed", "cache hits 3,148: ▒ 2,836 local · ▓ 300 disk", "12 remote · ░ 33 internal"])
-    _eq("in Results at 100 columns: the hits wrap after their label", [_visible(r) for r in action_results(greg, 26, 4, short = True)], ["█ 5,705 ran · ╳ 4 failed", "cache hits 3,148:", "▒ 2,836 local · ▓ 300 disk", "12 remote · ░ 33 internal"])
+    _eq("in Results at 100 columns: `hits N:`, the hits wrapping after their first", [_visible(r) for r in action_results(greg, 26, 4, short = True)], ["█ 5,705 ran · ╳ 4 failed", "hits 3,148: ▒ 2,836 local", "▓ 300 disk · 12 remote", "░ 33 internal"])
     for room in range(26, 90):
         _eq("no row wider than %d" % room, [text_width(_visible(r)) <= room for r in action_results(greg, room, 4, short = room < 80)], [True for r in action_results(greg, room, 4, short = room < 80)])
 
@@ -684,7 +684,11 @@ def _actions_tests(ctx):
     # done stay, and nothing is cut in half.
     jammed = dict(greg, ran = 30, local = 0, disk = 0, remote = 0, failed = 5, blocked = 10, internal = 1, done = 46, total = 46)
     got = [_visible(r) for r in action_results(jammed, 17, 5, short = True, stack = True)]
-    _eq("internal and the hit-less caches go", got, ["█ 30 ran", "╳ 5 failed", "cache hits 0:", "▒ 0 local", "○ 10 blocked"])
+    _eq("`hits N:` before anything goes", got, ["█ 30 ran", "╳ 5 failed", "hits 0: ▒ 0 local", "○ 10 blocked", "░ 1 internal"])
+    _eq("then the hit-less caches before internal", [_visible(r) for r in action_results(dict(jammed, disk_on = True, remote_on = True), 17, 5, short = True, stack = True)], ["█ 30 ran", "╳ 5 failed", "hits 0: ▒ 0 local", "○ 10 blocked", "░ 1 internal"])
+    _eq("then internal", [_visible(r) for r in action_results(jammed, 17, 4, short = True, stack = True)], ["█ 30 ran", "╳ 5 failed", "hits 0: ▒ 0 local", "○ 10 blocked"])
+    _eq("no label where even `hits N:` won't fit", [_visible(r) for r in action_results(dict(jammed, local = 1234), 12, 5, short = True, stack = True)][2], "▒ 1.2k local")
+    _eq("no label with no hit left", any(["hits" in _visible(r) for r in action_results(dict(jammed, final = False, local = 0, estimated = True), 17, 5, short = True, stack = True)]), False)
     _eq("never cut in half", [("…" in r, text_width(r) <= 17) for r in got], [(False, True)] * len(got))
     live_jam = dict(jammed, final = False, running = True, running_now = 4, total = 62, internal = 1, unreported = 2, local = 0, estimated = True, blocked = 0, disk_on = False, remote_on = False)
     got = [_visible(r) for r in action_results(live_jam, 17, 5, short = True, stack = True)]
@@ -710,8 +714,8 @@ def _actions_tests(ctx):
         at = [i for i, r in enumerate(rows) if r.startswith("Actions")][0]
         want = {
             140: ["Actions  █ 5,612 ran · ╳ 4 failed", "         cache hits 2,834: ▒ 2,834 local", "         ░ 33 internal"],
-            100: ["Actions  █ 5,612 ran · ╳ 4 failed", "         cache hits 2,834:", "         ▒ 2,834 local action cache", "         ░ 33 internal"],
-            60: ["Actions  █ 5,612 ran", "         ╳ 4 failed", "         cache hits 2,834:"],
+            100: ["Actions  █ 5,612 ran · ╳ 4 failed", "         hits 2,834: ▒ 2,834 local", "         ░ 33 internal"],
+            60: ["Actions  █ 5,612 ran", "         ╳ 4 failed", "         ▒ 2,834 local", "         ░ 33 internal"],
         }[cols]
         _eq("Results' Actions rows at %d columns" % cols, rows[at:at + len(want)], want)
         _eq("its label at %d columns" % cols, drawn[1].rstrip(" \r").endswith("8,483 · 2,834 hits (33%)" if cols == 60 else "8,483 actions · 2,834 cache hits (33%)"), True)
@@ -720,7 +724,7 @@ def _actions_tests(ctx):
     _eq("and at 40", _visible(render(wide_meld, 40, 30)).split("\n")[1].rstrip(" \r").endswith(" 3,830/8,563+"), True)
 
     # Without colour, the glyphs keep the segments apart.
-    _eq("one glyph a kind", len({g: 1 for g in ("█", "▓", "▒", "░", "╳", "━", "─")}), 7)
+    _eq("one glyph a kind", len({g: 1 for g in ("█", "▓", "▒", "▞", "░", "╳", "○", "┈", "━", "─")}), 10)
 
     # Metrics: the done count and its cache hits, each kind with what
     # makes it up, the action cache's misses by reason.
@@ -732,7 +736,7 @@ def _actions_tests(ctx):
     _eq("remote and disk hits apart", ["remote cache hit 600 spawns" in lines, "disk cache hit 40 spawns" in lines], [True, True])
     mid["counts"]["runners"] = {"darwin-sandbox": 200, "remote cache hit": 1100}
     lines = [" ".join(_visible(l).split()) for l in metrics_lines(mid)]
-    _eq("mid-build Metrics", ["done 3,830 of 8,563" in lines, "darwin-sandbox 200 spawns" in lines, "other 2,530" in lines, "local action cache, internal, or not yet in the execution log" in lines], [True, True, True, True])
+    _eq("mid-build Metrics", ["done 3,830 of 8,563" in lines, "darwin-sandbox 200 spawns" in lines, "▞ other 2,530" in lines, "local action cache, internal, or not yet in the execution log" in lines], [True, True, True, True])
 
     # Metrics: one spawn, long mnemonics in the column, no kind there is
     # none of, and the internal kinds said to be some where they don't sum.
@@ -1477,7 +1481,7 @@ def _impl(ctx: TaskContext) -> int:
         count_event(kept["counts"], "test_summary", struct(label = label), struct(overall_status = "passed"))
     kept["progress"] = ["[5 / 9] 2 actions running"]
     drawn = _visible(render(kept, 140, 30))
-    for want in ["Actions  █ 1 ran", "cache hits 1: ▓ 1 remote", "3 other · ─ 2 running · 2 pending", "Tests    2 passed (1 cached) ", " 5 of 9 actions"]:
+    for want in ["Actions  █ 1 ran", "cache hits 1: ▓ 1 remote", "▞ 3 other", "─ 2 running · 2 pending", "Tests    2 passed (1 cached) ", " 5 of 9 actions"]:
         if want not in drawn:
             fail("render: %r should be drawn:\n%s" % (want, drawn))
     _eq("no spawns row in Results", ("spawns" in drawn, "test runs" in drawn, "Cached " in drawn), (False, False, False))
@@ -1486,7 +1490,7 @@ def _impl(ctx: TaskContext) -> int:
     many["counts"]["log_kinds"] = {"ran": 1394, "disk": 58, "remote": 0, "mixed": 0}
     shown = _visible(render(many, 140, 30))
     _eq("counts with thousands separators", ["12,345 configured" in shown, "12,000 built" in shown], [True, True])
-    _eq("whole counts, what runs and is pending too", ["█ 1,394 ran" in shown, "cache hits 58: ▓ 58 disk" in shown, "2,378 other" in shown and "─ 16 running" in shown and "4,717 pending" in shown], [True, True, True])
+    _eq("whole counts, what runs and is pending too", ["█ 1,394 ran" in shown, "cache hits 58: ▓ 58 disk" in shown, "▞ 2,378 other" in shown and "─ 16 running" in shown and "4,717 pending" in shown], [True, True, True])
     many["counts"].update(test_runs = 15, test_cached = 9, tests_cached = 9, tests_passed = 9, tests_failed = 6)
     _eq("the Tests row's cached count", "Tests    9 passed, 6 failed (9 cached)" in _visible(render(many, 140, 30)), True)
     _eq("no part there is none of", ("Tests    9 passed (9 cached)  " in _visible(render(dict(many, counts = dict(many["counts"], tests_failed = 0)), 140, 30)), "0 failed" in _visible(render(dict(many, counts = dict(many["counts"], tests_failed = 0)), 140, 30)).split("Tests")[1].split("\n")[0]), (True, False))

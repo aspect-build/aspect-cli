@@ -14,7 +14,8 @@ It takes the screen when the task starts and shows:
   build runs, or `p` asks, its panes:
   - a bar of the build's actions (`action_split`, one unit throughout):
     ran `█`, disk and remote cache hits `▓`, the local action cache `▒`,
-    internal `░`, failed `╳`, blocked `○`, done but not reported yet `┈`,
+    internal `░`, other `▞`, failed `╳`, blocked `○`, done but not reported
+    yet `┈`,
     then not done `─`, each kind
     its own glyph so they stay apart without colour; while it runs from
     the actions Bazel reports with every one published
@@ -3457,7 +3458,8 @@ def actions_text(split: dict) -> list:
 _SEGMENTS = [
     ("█", "accent", ["ran"]),
     ("▓", "success", ["disk", "remote"]),
-    ("▒", "muted", ["local", "rest", "other"]),
+    ("▒", "muted", ["local"]),
+    ("▞", "muted", ["rest", "other"]),
     ("░", "subtle", ["internal"]),
     ("╳", "error", ["failed"]),
     ("○", "muted", ["blocked"]),
@@ -3594,7 +3596,7 @@ def action_parts(split: dict) -> list:
         parts.append(("╳", split["failed"], "failed", "error", ""))
     parts.append(("○", split["blocked"], "blocked", "muted", ""))
     parts.append(("░", split["internal"], "internal", "subtle", ""))
-    parts.append(("", split["other"] + split["rest"], "other", "", ""))
+    parts.append(("▞", split["other"] + split["rest"], "other", "muted", ""))
     parts.append(("?", split["unreported"], "unreported", "", "muted"))
     return [p for p in parts if p[1] or p[4] == "dim" or (p[2] == "local action cache" and final)] + remaining
 
@@ -3622,13 +3624,14 @@ def action_results(split: dict, room: int, rows = 3, short = False, stack = Fals
     beside ran they get a row of their own, after ran and failed, as they
     do where `stack` (a screen under 70 columns), and wrap after their
     label where they are wider than a row, what follows going on with the
-    last of them. The local action cache is `local` where `short` (a
-    screen under 100 columns) or the whole words fit no `rows`. Where
-    nothing fits, parts go by priority: internal first, then the caches
-    with no hits, then every count is `short_count`; then whole parts from
-    the end, never ran, failed, blocked, the hits' total, unreported,
-    running or pending while another can go, and never a part cut in
-    half."""
+    last of them; their label is `hits N:` where `cache hits N:` fits no
+    `rows`, none where that doesn't either, and none once no hit is left.
+    The local action cache is `local` where `short` (a screen under 100
+    columns) or the whole words fit no `rows`. Where nothing fits, parts
+    go by priority: the caches with no hits first, then internal, then
+    every count is `short_count`; then whole parts from the end, never
+    ran, failed, blocked, unreported, running or pending while another can
+    go. No part is cut in half but one wider than a row alone."""
     parts = action_parts(split)
     if not parts:
         return []
@@ -3638,6 +3641,9 @@ def action_results(split: dict, room: int, rows = 3, short = False, stack = Fals
         total += p[1]
     approx = "~" if [p for p in hits_all if p[4] == "estimate"] else ""
 
+    # The hits' label: `cache hits N:`, else `hits N:`, else none.
+    form = [0]
+
     def text(unit, level):
         # `(plain, drawn)` of a unit: its parts joined, the hits after
         # their label and total.
@@ -3646,9 +3652,13 @@ def action_results(split: dict, room: int, rows = 3, short = False, stack = Fals
         drawn = " · ".join([t[1] for t in texts])
         if unit[0] != "hits":
             return (plain, drawn)
-        label = "cache hits %s%s:" % (approx, _thousands(total) if level < 2 else short_count(total))
+        label = ["cache hits ", "hits ", ""][form[0]]
+        if label:
+            label += "%s%s:" % (approx, _thousands(total) if level < 2 else short_count(total))
         if not unit[1]:
             return (label, _c("muted") + label + _RESET)
+        if not label:
+            return (plain, drawn)
         return (label + " " + plain, _c("muted") + label + _RESET + " " + drawn)
 
     def width_of(row, level):
@@ -3667,12 +3677,16 @@ def action_results(split: dict, room: int, rows = 3, short = False, stack = Fals
         # The hits on as few rows as they fit: their label with as many as
         # fit after it, the rest after them.
         group = []
-        if hits_all:
+        if hits:
             k = len(hits)
             for _ in range(len(hits)):
                 if k == 0 or width_of([("hits", hits[:k])], fit) <= room:
                     break
                 k -= 1
+
+            # A label with no hit after it fits nothing: a shorter one, or none.
+            if k == 0 and form[0] < 2:
+                return [[]] * (rows + 1)
             group = [("hits", hits[:k])] + [("hit", [p]) for p in hits[k:]]
         beside = not group or (not stack and len(group) == 1 and width_of(lead + group, fit) <= room)
         packed = [[]]
@@ -3686,25 +3700,32 @@ def action_results(split: dict, room: int, rows = 3, short = False, stack = Fals
     def fits(packed, fit):
         return len(packed) <= rows and all([width_of(r, fit) <= room for r in packed])
 
-    # Whole counts with every part, then with fewer, then in thousands;
-    # the fewest rows that fit, the wholest words among them.
-    no_internal = [p for p in parts if p[2] != "internal"]
-    stages = [(parts, [(0, 0), (1, 1)]), (no_internal, [(0, 0), (1, 1)]), ([p for p in no_internal if p[4] != "dim"], [(0, 0), (1, 1), (1, 2)])]
+    # Whole counts with every part, then without the caches with no hits,
+    # then without internal too, then in thousands; the fewest rows that
+    # fit, the wholest words and the longest label among them.
+    no_dim = [p for p in parts if p[4] != "dim"]
+    no_internal = [p for p in no_dim if p[2] != "internal"]
+    stages = [(parts, [(0, 0), (1, 1)]), (no_dim, [(0, 0), (1, 1)]), (no_internal, [(0, 0), (1, 1), (1, 2)])]
     best = None
     for kept, levels in stages:
-        for level, fit in levels:
-            if short and level == 0:
-                continue
-            packed = pack(kept, level, fit)
-            if fits(packed, fit) and (best == None or len(packed) < len(best[1])):
-                best = (fit, packed)
+        for f in range(3):
+            for level, fit in levels:
+                if short and level == 0:
+                    continue
+                form[0] = f
+                packed = pack(kept, level, fit)
+                if fits(packed, fit) and (best == None or len(packed) < len(best[1])):
+                    best = (fit, packed, f)
+            if best != None:
+                break
         if best != None:
             break
     if best == None:
         # Whole parts from the end until what is left fits, the ones that
         # say what happened last to go.
         keep = ("ran", "failed", "blocked", "unreported", "running", "pending")
-        kept = [p for p in no_internal if p[4] != "dim"]
+        kept = no_internal
+        form[0] = 2
         names = [p[2] for p in kept]
         order = [n for n in reversed(names) if n not in keep] + [n for n in reversed(names) if n in keep]
         for name in order:
@@ -3712,8 +3733,9 @@ def action_results(split: dict, room: int, rows = 3, short = False, stack = Fals
                 break
             kept = [p for p in kept if p[2] != name]
         packed = pack(kept, 1, 2)
-        best = (2, packed[:rows])
-    fit, packed = best
+        best = (2, packed[:rows], 2)
+    fit, packed, f = best
+    form[0] = f
     out = []
     for row in packed:
         drawn = fit if width_of(row, fit) <= room else 2
@@ -3956,11 +3978,12 @@ def _top(state: dict, cols: int, rows: int) -> list:
     if failed_n or blocked_n:
         failed_row = _counts("Failed   %s✗ %d%s%s", (_c("error"), failed_n, _RESET, (_counts("  ○ %d blocked", blocked_n)) if blocked_n else "")) if wide else _counts("%s✗%d%s ○%d", (_c("error"), failed_n, _RESET, blocked_n))
 
-    # Too many for the pane (a short terminal): the critical path goes
-    # first, then the actions fold to fewer rows, then the tests' running
-    # rows; the failures' row stays, last.
-    most = 5
-    for _ in range(9):
+    # The actions get every row the pane has free; too many for it (a short
+    # terminal): the critical path goes first, then the actions fold to
+    # fewer rows, then the tests' running rows; the failures' row stays,
+    # last.
+    most = max(1, pane - len(summary) - len(tests_rows) - (1 if failed_row != None else 0))
+    for _ in range(most + 4):
         actions_rows = action_results(split, right_w - 4 - len(lead), most, short = cols < 100, stack = cols < 70)
         wanted = len(summary) + len(actions_rows) + len(tests_rows) + len([r for r in (critical, failed_row) if r != None])
         if wanted <= pane:
@@ -5711,7 +5734,7 @@ _ACTIONS_KEY = [
     "╳ failed: executed and failed (tests excluded)",
     "○ blocked: counted done but never run, as an action they need failed",
     "░ internal: Bazel bookkeeping with no command (runfiles trees, file writes, workspace status)",
-    "other: actions whose spawns had mixed results; while a build where an action failed runs, also what Bazel counted done with no event (blocked, or the local action cache's)",
+    "▞ other: actions whose spawns had mixed results, or that the execution log has none for; while a build where an action failed runs, also what Bazel counted done with no event (blocked, or the local action cache's)",
     "? unreported: Bazel counted these done but hasn't said how yet; they settle into ran, a cache hit or failed (┈ on the bar)",
     "─ not done: running or pending",
     "actions: what Bazel checked this build. Targets whose inputs didn't change are skipped before this count, so it isn't the whole graph",
@@ -5720,7 +5743,7 @@ _ACTIONS_KEY = [
 
 # `other`'s key where a build does not publish every action: while it runs
 # it cannot tell those apart.
-_OTHER_KEY = "other: actions whose spawns had mixed results; while it runs, also the local action cache, internal, or not logged yet"
+_OTHER_KEY = "▞ other: actions whose spawns had mixed results; while it runs, also the local action cache, internal, or not logged yet"
 
 def _actions_key(width: int, published = True) -> list:
     """The `?` overlay's rows saying what the actions' glyphs and words
@@ -5728,7 +5751,7 @@ def _actions_key(width: int, published = True) -> list:
     without a width); without every action `published` (`actions =
     "failed"`), what `other` is while a build runs."""
     rows = ["Actions"]
-    for part in _ACTIONS_KEY if published else [_OTHER_KEY if p.startswith("other:") else p for p in _ACTIONS_KEY]:
+    for part in _ACTIONS_KEY if published else [_OTHER_KEY if p.startswith("▞ other:") else p for p in _ACTIONS_KEY]:
         lines = [""]
         for word in part.split(" "):
             if width and lines[-1] and text_width(lines[-1] + " " + word) > width - (2 if len(lines) == 1 else 4):
