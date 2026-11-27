@@ -1111,7 +1111,7 @@ def _closest(asked: str, names: list[str]) -> str:
     Close means within a quarter of the name's length in single-character
     edits, and at least two: near enough to be a slip of the keyboard rather
     than a different name. Looser than `closest` in `text.axl` on purpose:
-    branch names run long (`greg/task-key-typos`), so the reach grows with
+    branch names run long (`ada/task-key-typos`), so the reach grows with
     the name instead of stopping at two edits.
     """
     best = ""

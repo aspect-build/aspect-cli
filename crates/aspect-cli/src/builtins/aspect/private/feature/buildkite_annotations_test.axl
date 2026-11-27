@@ -148,7 +148,7 @@ def _render_ctx(subject, task_kind):
     which renders with no subject in the title.
     """
     state = {
-        "_triggered_by": "Greg Magolan (BUILDKITE_BUILD_CREATOR)",
+        "_triggered_by": "Ada Lovelace (BUILDKITE_BUILD_CREATOR)",
         "_subject": subject,
         "_started_ms": 1744630000000,
         "_ended_ms": 1744630004500,

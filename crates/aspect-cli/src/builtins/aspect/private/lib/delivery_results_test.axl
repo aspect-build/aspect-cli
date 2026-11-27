@@ -59,11 +59,11 @@ def _make_base():
         "BRANCH_NAME": "main",
         "COMMIT_SHA": "abc123def456789abcdef",
         "COMMIT_MESSAGE": "deploy: cut release v1.42.0",
-        "COMMIT_AUTHOR": "Greg Magolan <greg@aspect.build>",
-        "COMMIT_AUTHOR_NAME": "Greg Magolan",
-        "COMMIT_AUTHOR_EMAIL": "greg@aspect.build",
+        "COMMIT_AUTHOR": "Ada Lovelace <ada.l@example.com>",
+        "COMMIT_AUTHOR_NAME": "Ada Lovelace",
+        "COMMIT_AUTHOR_EMAIL": "ada.l@example.com",
         "COMMIT_TIMESTAMP": "2026-04-14 16:32:09 -0700",
-        "USER": "Greg Magolan",
+        "USER": "Ada Lovelace",
         "CI_HOST": "BUILDKITE",
         "VCS": "GITHUB",
         "REPO_OWNER": "aspect-build",
@@ -258,7 +258,7 @@ def _make_build_failed():
 
 def _render_ctx(subject = "//apps/...", task_kind = "delivery", progress = ""):
     return {
-        "triggered_by": "Greg Magolan (workflow_dispatch)",
+        "triggered_by": "Ada Lovelace (workflow_dispatch)",
         "subject": subject,
         "started_ms": 1744630000000,
         "ended_ms": 1744630012500,
