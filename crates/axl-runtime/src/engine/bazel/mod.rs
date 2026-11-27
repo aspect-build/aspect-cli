@@ -1907,8 +1907,29 @@ fn register_types(globals: &mut GlobalsBuilder) {
         StarlarkValueAsType::new();
 }
 
+#[starlark_module]
+fn register_functions(globals: &mut GlobalsBuilder) {
+    /// `flags` as a screen may show them, what may be a secret hidden: the
+    /// rules the build event stream is redacted by (a header's value, an
+    /// env var's not on the `ALLOW_ENV` allowlist, a URL's login), and
+    /// what a setting named like a secret holds, whatever flag carries it
+    /// (`--define=API_TOKEN=x`, `--test_arg=--password=x`, and the next
+    /// `--test_arg=` after a bare `--test_arg=--password`). A `key=value`
+    /// string is redacted as such a setting, so a workspace status or build
+    /// metadata entry passed as one comes back with its value hidden when
+    /// its key reads as a secret's. One string out per string in.
+    fn redact_flags(
+        #[starlark(require = pos)] flags: UnpackList<String>,
+    ) -> anyhow::Result<Vec<String>> {
+        Ok(bazel::bes::redact::redact_shown_args(
+            flags.items.iter().map(String::as_str),
+        ))
+    }
+}
+
 pub fn register_globals(globals: &mut GlobalsBuilder) {
     register_types(globals);
+    register_functions(globals);
 
     globals.namespace("query", |globals| {
         register_query_types(globals);
@@ -2024,6 +2045,21 @@ mod tests {
                 ["--plain"]
             );
         });
+    }
+
+    /// `bazel.redact_flags` gives one string per string, flags and
+    /// `key=value` settings redacted as a screen shows them.
+    #[test]
+    fn redact_flags_hides_secret_named_settings() {
+        let got = crate::test::eval(
+            r#"bazel.redact_flags(["--define=API_TOKEN=x", "--jobs=4", "STABLE_KEY=k", "//a:b"])"#,
+        )
+        .repr()
+        .unwrap();
+        assert_eq!(
+            got,
+            r#"["--define=API_TOKEN=<REDACTED>", "--jobs=4", "STABLE_KEY=<REDACTED>", "//a:b"]"#
+        );
     }
 
     #[test]

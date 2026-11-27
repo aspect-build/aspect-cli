@@ -28,7 +28,11 @@
 //! list ([`redact_command_args`]) also takes a header or env-passthrough flag
 //! given as two arguments (`--remote_header` `Authorization: Bearer <token>`),
 //! as a command line typed at a shell can be; and a flag carried in another's
-//! value (`--bazel-flag=--remote_header=…`) is redacted as itself.
+//! value (`--bazel-flag=--remote_header=…`) is redacted as itself. For a
+//! screen that shows the flags (the Dashboard's Invocation tab, through
+//! `bazel.redact_flags`), [`redact_shown_args`] also hides what any setting
+//! named like a secret holds (`--define=API_TOKEN=…`), which the stream
+//! keeps for its backend.
 
 use axl_proto::build_event_stream::BuildEvent;
 use axl_proto::build_event_stream::build_event::Payload;
@@ -462,6 +466,112 @@ pub fn redact_command_args<'a>(args: impl IntoIterator<Item = &'a str> + Clone) 
             redact_flag(a, &allow_env).into_owned()
         })
         .collect()
+}
+
+/// Words that mark a setting's name as one whose value may be a secret,
+/// matched lowercased as substrings.
+const SECRET_WORDS: &[&str] = &[
+    "header",
+    "token",
+    "password",
+    "passwd",
+    "pwd",
+    "secret",
+    "credential",
+    "auth",
+    "key",
+    "cookie",
+    "session",
+];
+
+/// Whether a flag's or a setting's `name` reads as one that may hold a
+/// secret ([`SECRET_WORDS`]).
+fn secret_name(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    SECRET_WORDS.iter().any(|w| lower.contains(w))
+}
+
+/// [`redact_command_args`] for a screen that shows the args, which also
+/// hides what a setting named like a secret ([`SECRET_WORDS`]) holds,
+/// whatever flag carries it ([`hide_secret_setting`]): `--client_secret=x`,
+/// `--define=API_TOKEN=x`, `--test_arg=--password=x`, `--copt=-DKEY=x`,
+/// `--test_arg=--token x`, and a positional `API_TOKEN=x` (a workspace
+/// status or build metadata entry, given as `key=value`). A flag whose value
+/// is a secret-named flag with none of its own (`--test_arg=--password`)
+/// hides the next arg's value when that is the same flag again
+/// (`--test_arg=hunter2`). A bare flag never takes the next arg: a boolean
+/// one (`--google_default_credentials`) has none.
+pub fn redact_shown_args<'a>(args: impl IntoIterator<Item = &'a str> + Clone) -> Vec<String> {
+    let user_patterns = collect_allow_env(args.clone());
+    let allow_env = effective_allow_env(&user_patterns);
+    let mut owner: Option<String> = None;
+    redact_command_args(args)
+        .into_iter()
+        .map(|arg| {
+            let (name, value) = arg.split_once('=').unwrap_or((&arg, ""));
+            if let Some(o) = owner.take()
+                && arg.contains('=')
+                && name == o
+            {
+                return format!("{name}={REDACTED}");
+            }
+            if arg.contains('=')
+                && !value.contains(['=', ' '])
+                && value.starts_with('-')
+                && secret_name(value)
+            {
+                owner = Some(name.to_string());
+            }
+            hide_secret_setting(&arg, &allow_env).into_owned()
+        })
+        .collect()
+}
+
+/// `arg`, a `name=value` flag or setting, with what a secret-named setting
+/// in it holds hidden: its whole value when `name` reads as a secret's;
+/// else, when its value is a setting (`API_TOKEN=x`, `--password=x`,
+/// `-DKEY=x`) or a flag and its value (`--token x`) whose name reads as
+/// one, that setting's value. A header flag keeps the name [`redact_flag`]
+/// leaves it, and a flag whose name ends in `_env` takes the
+/// env-passthrough rule, `allow_env` included; a `--default_override`'s
+/// option is hidden as itself; a URL is never read as a name.
+fn hide_secret_setting<'a>(arg: &'a str, allow_env: &[&str]) -> Cow<'a, str> {
+    if let Some(payload) = crate::rc::override_payload(arg) {
+        let wrapper = &arg[..arg.len() - payload.len()];
+        return match hide_secret_setting(payload, allow_env) {
+            Cow::Owned(hidden) => Cow::Owned(format!("{wrapper}{hidden}")),
+            Cow::Borrowed(_) => Cow::Borrowed(arg),
+        };
+    }
+    let Some((name, value)) = arg.split_once('=') else {
+        return Cow::Borrowed(arg);
+    };
+    let bare = name.strip_prefix("--").unwrap_or(name);
+    if HEADER_OPTION_NAMES.contains(&bare) {
+        return Cow::Borrowed(arg);
+    }
+    if name.starts_with("--") && name.to_lowercase().ends_with("_env") {
+        return match redact_env_value(value, allow_env) {
+            Cow::Owned(v) => Cow::Owned(format!("{name}={v}")),
+            Cow::Borrowed(_) => Cow::Borrowed(arg),
+        };
+    }
+    if secret_name(name) {
+        return Cow::Owned(format!("{name}={REDACTED}"));
+    }
+    if let Some((inner, _)) = value.split_once('=')
+        && !inner.contains("://")
+        && secret_name(inner)
+    {
+        return Cow::Owned(format!("{name}={inner}={REDACTED}"));
+    }
+    if let Some((head, _)) = value.split_once(' ')
+        && !head.contains("://")
+        && secret_name(head)
+    {
+        return Cow::Owned(format!("{name}={head} {REDACTED}"));
+    }
+    Cow::Borrowed(arg)
 }
 
 /// Build a redactor closure that scrubs a single flag string via [`redact_flag`].
@@ -1139,6 +1249,62 @@ mod tests {
             vec!["build", "--remote_header"],
             "a flag at the end, its value missing"
         );
+    }
+
+    /// What a screen shows of the flags: the stream's rules, then a setting
+    /// named like a secret hidden wherever a flag carries it, the next
+    /// arg's value after a secret-named flag with none, and a `key=value`
+    /// string read as such a setting.
+    #[test]
+    fn shown_args_hide_secret_named_settings() {
+        let r = REDACTED;
+        let args = [
+            "--remote_header=Authorization=Bearer abc",
+            "--action_env=TOKEN=zzz",
+            "--action_env=USER=alice",
+            "--remote_cache=grpcs://u:p@host",
+            "--define=API_TOKEN=d1",
+            "--test_arg=--password=t1",
+            "--copt=-DKEY=c1",
+            "--define=mode=fast",
+            "--test_arg=--password",
+            "--test_arg=hunter2",
+            "--test_arg=--token x9",
+            "--google_default_credentials",
+            "//keep:me",
+            "--test_arg=--token",
+            "--copt=-Ikept",
+            "--test_arg=after",
+            "--client_secret=s3",
+            "--default_override=0:build=--define=API_TOKEN=o1",
+            "--run_env=DB_PASSWORD=e1",
+            "STABLE_API_TOKEN=tok-123",
+            "BUILD_USER=alice",
+        ];
+        let want = [
+            format!("--remote_header=Authorization={r}"),
+            format!("--action_env=TOKEN={r}"),
+            "--action_env=USER=alice".into(),
+            format!("--remote_cache=grpcs://{r}@host"),
+            format!("--define=API_TOKEN={r}"),
+            format!("--test_arg=--password={r}"),
+            format!("--copt=-DKEY={r}"),
+            "--define=mode=fast".into(),
+            "--test_arg=--password".into(),
+            format!("--test_arg={r}"),
+            format!("--test_arg=--token {r}"),
+            "--google_default_credentials".into(),
+            "//keep:me".into(),
+            "--test_arg=--token".into(),
+            "--copt=-Ikept".into(),
+            "--test_arg=after".into(),
+            format!("--client_secret={r}"),
+            format!("--default_override=0:build=--define=API_TOKEN={r}"),
+            format!("--run_env=DB_PASSWORD={r}"),
+            format!("STABLE_API_TOKEN={r}"),
+            "BUILD_USER=alice".into(),
+        ];
+        assert_eq!(redact_shown_args(args), want);
     }
 
     /// The authority ends at the path, query or fragment: an `@` past it is
