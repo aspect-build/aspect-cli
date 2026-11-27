@@ -355,10 +355,12 @@ pub const RECAP_MAX: usize = 10;
 const RECAP_BODY_HELD: usize = 400;
 
 /// A failed action's error header up to its exit code, or the signal that
-/// ended it (`(Killed)`, `(Segmentation fault)`): what follows (the tool
-/// that failed, its whole command line) the recap leaves out.
+/// ended it as Bazel's `TerminationStatus` names it (`(Killed)`,
+/// `(Trace/breakpoint trap)`, `(User defined signal 1)`, `(Signal 24)`):
+/// what follows (the tool that failed, its whole command line) the recap
+/// leaves out.
 static EXIT_TAIL: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
-    Regex::new(r"^(.*? failed: \((?:Exit [^)]*|[A-Z][a-z]+(?: [a-z]+)*)\)): .+$").unwrap()
+    Regex::new(r"^(.*? failed: \((?:Exit [^)]*|[A-Z][^()]*)\)): .+$").unwrap()
 });
 
 /// Bazel's hint under every sandboxed failure, which a recapped body leaves
@@ -1471,6 +1473,18 @@ mod tests {
                 "ERROR: f/BUILD.bazel:4:8: Executing genrule //f:segv failed: (Segmentation fault): bash failed: error executing Genrule command (from target //f:segv) /bin/bash -c 'kill -11 $$'",
                 "ERROR: f/BUILD.bazel:4:8: Executing genrule //f:segv failed: (Segmentation fault)",
             ),
+            (
+                "ERROR: sig/BUILD.bazel:1:8: Executing genrule //sig:s5 failed: (Trace/breakpoint trap): bash failed: error executing Genrule command (from genrule rule target //sig:s5) /bin/bash -c 'kill -5 $$'",
+                "ERROR: sig/BUILD.bazel:1:8: Executing genrule //sig:s5 failed: (Trace/breakpoint trap)",
+            ),
+            (
+                "ERROR: sig/BUILD.bazel:1:8: Executing genrule //sig:s10 failed: (User defined signal 1): bash failed: error executing Genrule command (from target //sig:s10) /bin/bash -c 'kill -10 $$'",
+                "ERROR: sig/BUILD.bazel:1:8: Executing genrule //sig:s10 failed: (User defined signal 1)",
+            ),
+            (
+                "ERROR: sig/BUILD.bazel:1:8: Executing genrule //sig:s24 failed: (Signal 24): bash failed: error executing Genrule command (from target //sig:s24) /bin/bash -c 'kill -24 $$'",
+                "ERROR: sig/BUILD.bazel:1:8: Executing genrule //sig:s24 failed: (Signal 24)",
+            ),
         ] {
             let observations =
                 std::sync::Arc::new(super::super::processors::Observations::default());
@@ -1481,14 +1495,11 @@ mod tests {
             );
             let kept = observations.errors().expect("kept");
             assert_eq!(kept.errors[0].header, want);
-            assert_eq!(
-                kept.errors[0].target.as_deref(),
-                Some(if want.contains("segv") {
-                    "//f:segv"
-                } else {
-                    "//f:killed"
-                })
-            );
+            let target = line
+                .split("target ")
+                .nth(1)
+                .and_then(|t| t.split(')').next());
+            assert_eq!(kept.errors[0].target.as_deref(), target);
         }
     }
 

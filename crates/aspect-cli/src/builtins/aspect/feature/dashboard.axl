@@ -6195,6 +6195,29 @@ def _unlabelled_in(e: dict, label: str, workspace: str = "") -> bool:
         build = build[len(root):]
     return build.rpartition("/")[0] == package
 
+def _makes(rec: dict, e: dict) -> bool:
+    """Whether `e` says the record's own output was not created (`output
+    'mc/d0.out' was not created` of `bazel-out/…/bin/mc/d0.out`)."""
+    header = e.get("header", "")
+    at = header.find(": output '")
+    if at < 0 or not header.endswith("' was not created"):
+        return False
+    path = header[at + len(": output '"):-len("' was not created")]
+    output = rec.get("output", "")
+    return bool(path) and (output == path or output.endswith("/" + path))
+
+def _says_name(rec: dict, e: dict) -> bool:
+    """Whether an error naming no target says the record's target's name
+    as a word of what failed (`Checking d0 failed: …` of `//mc:d0`)."""
+    if e.get("target") or header_labels(e.get("header", "")):
+        return False
+    what = _failed_action(e.get("header", "")).rpartition(": ")[2]
+    name = rec["label"].rpartition(":")[2]
+    words = what
+    for c in ["'", "\"", "(", ")", ","]:
+        words = words.replace(c, " ")
+    return bool(name) and name in words.split(" ")
+
 def _compiled(e: dict) -> str:
     """The source an error's action compiled (`Compiling cc/sub/d.cc
     failed` gives `cc/sub/d.cc`), else ""."""
@@ -6351,17 +6374,34 @@ def action_errors(state: dict) -> dict:
                 if i not in out and not used[j]:
                     pair(i, j)
 
+    by(lambda i, j: _makes(state["fails"][i], errors[j]))
     by(lambda i, j: bool(text[i]) and any([l in text[i] for l in distinct[j]]))
     by(lambda i, j: _compiles(state["fails"][i], errors[j]))
     by(lambda i, j: bool(own[i]) and errors[j].get("log") == own[i])
+    by(lambda i, j: _says_name(state["fails"][i], errors[j]))
     by(lambda i, j: _error_names(errors[j], state["fails"][i]["label"]))
 
-    # A record left whose candidates are all at one BUILD line no other
-    # record left has a candidate at: they are its errors (`output 'x' was
-    # not created`, then `not all outputs were created or valid`).
+    # A record's further errors at its error's BUILD line that name it
+    # alone (`Checking d0 failed: not all outputs were created or valid`
+    # after `output 'mc/d0.out' was not created`).
+    for i in records:
+        if i not in out:
+            continue
+        line = error_parts(out[i].get("header", ""))[0]
+        for j in candidates(i):
+            if line and error_parts(errors[j].get("header", ""))[0] == line and len([k for k in records if j in candidates(k) and _says_name(state["fails"][k], errors[j])]) == 1 and _says_name(state["fails"][i], errors[j]):
+                used[j] = True
+                out[i] = dict(out[i], also = list(out[i].get("also", [])) + [errors[j]])
+
+    # A record left whose candidates, narrowed to the BUILD line of those
+    # that name it where any do, are all at one line no other record left
+    # has a candidate at: they are its errors.
     left = [i for i in records if i not in out]
     for i in left:
         js = candidates(i)
+        lines = {error_parts(errors[j].get("header", ""))[0]: True for j in js if _says_name(state["fails"][i], errors[j]) or _makes(state["fails"][i], errors[j])}
+        if lines:
+            js = [j for j in js if error_parts(errors[j].get("header", ""))[0] in lines]
         at = {error_parts(errors[j].get("header", ""))[0]: True for j in js}
         others = [k for k in left if k != i and k not in out and [j for j in candidates(k) if j in js]]
         if js and len(at) == 1 and "" not in at and not others:
@@ -6369,11 +6409,11 @@ def action_errors(state: dict) -> dict:
             out[i] = dict(out[i], also = [errors[j] for j in js[1:] if not used[j]])
             for j in js[1:]:
                 used[j] = True
+
+    # No error a failed record could claim is an entry of its own.
     for i in records:
-        if i not in out:
-            for j in candidates(i):
-                if _failed_action(errors[j].get("header", "")):
-                    used[j] = True
+        for j in candidates(i):
+            used[j] = True
     state["action_errors_cache"] = (key, out)
     state["action_errors_used"] = [j for j in range(len(errors)) if used[j]]
     state["action_logs"] = own

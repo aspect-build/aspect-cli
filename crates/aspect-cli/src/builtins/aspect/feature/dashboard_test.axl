@@ -2368,6 +2368,28 @@ def _impl(ctx: TaskContext) -> int:
         "0 built, 1 failed, 2 blocked · 0 tests passed, 0 failed",
     ])
 
+    # ws/mc (Bazel 7.7.3 and 9.3.3, --keep_going): d0 and d1 from one list
+    # comprehension on line 2, e on line 3, none creating its output: each
+    # its own two errors, by the output they name and the name they say;
+    # three entries, none an error of its own.
+    mc_errs = [{"header": h, "body": [], "log": None, "label": None, "target": None} for h in [
+        "ERROR: mc/BUILD.bazel:3:4: output 'mc/e.out' was not created",
+        "ERROR: mc/BUILD.bazel:2:5: output 'mc/d0.out' was not created",
+        "ERROR: mc/BUILD.bazel:3:4: Checking e failed: not all outputs were created or valid",
+        "ERROR: mc/BUILD.bazel:2:5: Checking d0 failed: not all outputs were created or valid",
+        "ERROR: mc/BUILD.bazel:2:5: output 'mc/d1.out' was not created",
+        "ERROR: mc/BUILD.bazel:2:5: Checking d1 failed: not all outputs were created or valid",
+    ]]
+    for flip in [False, True]:
+        mc_recs = [_act("//mc:%s" % n, "Check", "bazel-out/darwin_arm64-fastbuild/bin/mc/%s.out" % n, 0) for n in ("e", "d0", "d1")]
+        got, tab = _entries(mc_recs[::-1] if flip else mc_recs, mc_errs, {}, {})
+        _eq("mc flipped %s: three entries, each its own" % flip, sorted([(e[0], e[1]) for e in got]), [
+            ("✗ //mc:d0  Check · mc/BUILD.bazel:2:5", ["output 'mc/d0.out' was not created", "not all outputs were created or valid"]),
+            ("✗ //mc:d1  Check · mc/BUILD.bazel:2:5", ["output 'mc/d1.out' was not created", "not all outputs were created or valid"]),
+            ("✗ //mc:e  Check · mc/BUILD.bazel:3:4", ["output 'mc/e.out' was not created", "not all outputs were created or valid"]),
+        ])
+        _eq("mc flipped %s: the tab alike" % flip, sorted(tab), sorted([e[0] for e in got]))
+
     # A signal-killed action (//f:killed, Bazel 9.3.3): `killed` where the
     # exit code goes, and no command line quoted.
     killed = [{"header": "ERROR: f/BUILD.bazel:3:8: Executing genrule //f:killed failed: (Killed)", "body": ["about to die"], "log": None, "label": None, "target": "//f:killed"}]
