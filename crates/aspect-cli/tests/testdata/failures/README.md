@@ -1,12 +1,33 @@
 # BEP failure fixtures
 
 Recorded Bazel output for every failure shape the Failures summary has to handle, on Bazel
-7.7.3, 8.9.0 and 9.3.3. `aspect dev test-failure-replay` feeds each recording through the
+**7.7.3, 8.9.0 and 9.3.3**. `aspect dev test-failure-replay` feeds each recording through the
 failure summary and the Dashboard's Failures tab and compares the result with `<ver>.golden`
-(`--update` rewrites them). Regenerate one recording with
-`tools/failure-fixtures/record.sh <case> <version>`, or all of them with
-`tools/failure-fixtures/refresh_all.sh 7.7.3 8.9.0 9.3.3`; both need Bazelisk and network
-access, the replay test neither.
+(`--update` rewrites them; `--case=<name>` replays one case). The replay needs no Bazel.
+
+## Refreshing
+
+Recording needs Bazelisk (`$BAZELISK`, else `bazelisk` or `bazel` on PATH), bash, perl,
+python3, `script` (BSD or util-linux) and network access for Bazel and its modules. Bazelisk's
+cache is `$BAZELISK_HOME` if set, else its own default. Bazel runs under `env -i` with a
+throwaway HOME, so no rc file, environment variable or token of yours reaches a recording;
+`tools/failure-fixtures/env.sh` says exactly what it gets. Scratch state goes under
+`$FIXTURE_SCRATCH` (default `${TMPDIR:-/tmp}/aspect-failure-fixtures`).
+
+```sh
+# One case on one version, then its goldens:
+tools/failure-fixtures/record.sh xn 9.3.3
+aspect dev test-failure-replay --update --case=xn
+
+# Every case on every recorded version:
+tools/failure-fixtures/refresh_all.sh 7.7.3 8.9.0 9.3.3
+aspect dev test-failure-replay --update
+```
+
+Review the golden diff: event order and timings vary run to run (see Non-determinism), so a
+re-recorded case can reorder its entries without anything having changed. A new case is a
+folder with `src/` (Bazel files suffixed `.in`), `cmd` and `variants`; record it, then
+`--update`.
 
 ## Layout
 
