@@ -50,3 +50,5 @@ All of it: aspect history show t-replay
   │ progress 100%
   │ real error
 ✗ //fk:empty  Genrule · exit 5 · fk/BUILD.bazel:6:8
+  │ bash failed: error executing Genrule command (from genrule rule target //fk:empty) /bin/bash -c 'source external/ba…
+  │ Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging

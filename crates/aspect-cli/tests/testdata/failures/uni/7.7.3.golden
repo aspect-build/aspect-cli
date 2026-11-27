@@ -9,6 +9,10 @@ exit 36
   log ${OUTPUT_BASE}/execroot/_main/bazel-out/_tmp/actions/stderr-8
 
 ✗ //uni:тест  TestRunner · exit -1 · uni/BUILD.bazel:4:8
+  │ test-setup.sh failed: error executing TestRunner command (from target //uni:тест)
+  │   external/bazel_tools/tools/test/test-setup.sh 'uni/тест'
+  │ Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root
+  │   for debugging
 1 built, 3 failed · 0 tests passed, 0 failed, 1 skipped · Bazel's raw log: ${FIXTURE}/7.7.3.console
 All of it: aspect history show t-replay
 --- Failures tab
@@ -17,3 +21,5 @@ All of it: aspect history show t-replay
 ✗ //uni:привет  Genrule · exit 3 · uni/BUILD.bazel:2:8
   │ ошибка: всё сломалось ✗ 中文
 ✗ //uni:тест  TestRunner · exit -1 · uni/BUILD.bazel:4:8
+  │ test-setup.sh failed: error executing TestRunner command (from target //uni:тест) external/bazel_tools/tools/test/t…
+  │ Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging

@@ -13,6 +13,10 @@ exit 1
   log ${OUTPUT_BASE}/execroot/_main/bazel-out/_tmp/actions/stdout-3
 
 ✗ //actk:silent  Genrule · exit 9 · actk/BUILD.bazel:5:8
+  │ bash failed: error executing Genrule command (from genrule rule target //actk:silent) /bin/bash
+  │   -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; exit 9'
+  │ Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root
+  │   for debugging
 
 ✗ //actk:sbx  Genrule · exit 8 · actk/BUILD.bazel:4:8
   │ sandboxed action broke
@@ -27,5 +31,7 @@ All of it: aspect history show t-replay
 ✗ //actk:outonly  Genrule · exit 6 · actk/BUILD.bazel:6:8
   │ stdout only text
 ✗ //actk:silent  Genrule · exit 9 · actk/BUILD.bazel:5:8
+  │ bash failed: error executing Genrule command (from genrule rule target //actk:silent) /bin/bash -c 'source external…
+  │ Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
 ✗ //actk:sbx  Genrule · exit 8 · actk/BUILD.bazel:4:8
   │ sandboxed action broke

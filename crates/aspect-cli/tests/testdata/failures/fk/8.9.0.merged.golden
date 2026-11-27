@@ -13,6 +13,10 @@ exit 1
   log ${OUTPUT_BASE}/execroot/_main/bazel-out/_tmp/actions/stderr-2
 
 ✗ //fk:empty  Genrule · exit 5 · fk/BUILD.bazel:6:8
+  │ bash failed: error executing Genrule command (from target //fk:empty) /bin/bash -c 'source
+  │   external/bazel_tools/tools/genrule/genrule-setup.sh; exit 5'
+  │ Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root
+  │   for debugging
 
 ✗ //fk:outonly  Genrule · exit 4 · fk/BUILD.bazel:5:8
   │ only on stdout
@@ -33,6 +37,8 @@ All of it: aspect history show t-replay
 ✗ //fk:both  Genrule · exit 3 · fk/BUILD.bazel:4:8
   │ to stderr second
 ✗ //fk:empty  Genrule · exit 5 · fk/BUILD.bazel:6:8
+  │ bash failed: error executing Genrule command (from target //fk:empty) /bin/bash -c 'source external/bazel_tools/too…
+  │ Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
 ✗ //fk:outonly  Genrule · exit 4 · fk/BUILD.bazel:5:8
   │ only on stdout
 ✗ //fk:liar  Genrule · exit 1 · fk/BUILD.bazel:1:8

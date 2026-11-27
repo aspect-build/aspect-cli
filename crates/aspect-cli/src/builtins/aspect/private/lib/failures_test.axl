@@ -143,6 +143,16 @@ def _test_relay_cap(ctx):
     state = _ended(ctx, [action], header + big, logs = {"/out/e": big}, relay_cap = -1)
     _eq("no relay cap: a stderr past 1 MiB ties whole", failure_ties.console_ties(state)["actions"][0]["location"], "/ws/a/BUILD:3:8")
 
+def _test_failure_message_quoted(ctx):
+    # A test Bazel failed itself has no log of its own and its line names
+    # it as what failed: its `failure_detail` message is the entry's.
+    message = "Testing //tx:t (shard 1 of 2) failed: Sharding requested, but the test runner did not advertise support for it by touching TEST_SHARD_STATUS_FILE."
+    runner = _failed_action("//tx:t", "bazel-out/k8-fastbuild/testlogs/tx/t/shard_1_of_2/test.log", message, exit_code = 0, code = "", mnemonic = "TestRunner")
+    state = _ended(ctx, [runner], _error("/ws/tx/BUILD:2:8: " + message))
+    entries = failures.failure_entries(state)["entries"]
+    _eq("the message quoted", failures.entry_text(state, entries[0])["lines"], [message])
+    _eq("its line no other error", failure_ties.console_ties(state)["others"], [])
+
 def _test_target_counts(ctx):
     # Built from the events; failed, the targets with an entry of their own;
     # blocked, those a failed root cause stopped.
@@ -175,6 +185,7 @@ def _impl(ctx: TaskContext) -> int:
     _test_an_unclaimed_error_is_listed(ctx)
     _test_timestamps(ctx)
     _test_relay_cap(ctx)
+    _test_failure_message_quoted(ctx)
     _test_target_counts(ctx)
     _test_last_words(ctx)
     print("failures_test.axl: OK")

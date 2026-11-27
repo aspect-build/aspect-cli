@@ -20,6 +20,10 @@ exit 1
   log ${OUTPUT_BASE}/execroot/_main/bazel-out/_tmp/actions/stderr-5
 
 ✗ //fk:empty  Genrule · exit 5 · fk/BUILD.bazel:6:8
+  │ bash failed: error executing Genrule command (from genrule rule target //fk:empty) /bin/bash -c
+  │   'source external/bazel_tools/tools/genrule/genrule-setup.sh; exit 5'
+  │ Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root
+  │   for debugging
 
 ✗ //fk:liar  Genrule · exit 1 · fk/BUILD.bazel:1:8
 
@@ -41,6 +45,8 @@ All of it: aspect history show t-replay
   │ progress 100%
   │ real error
 ✗ //fk:empty  Genrule · exit 5 · fk/BUILD.bazel:6:8
+  │ bash failed: error executing Genrule command (from genrule rule target //fk:empty) /bin/bash -c 'source external/ba…
+  │ Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
 ✗ //fk:liar  Genrule · exit 1 · fk/BUILD.bazel:1:8
   │ ERROR: /elsewhere/BUILD:1:1: Executing genrule //fk:ghost failed: (Exit 9): fake
   │ ERROR: coloured fake from liar

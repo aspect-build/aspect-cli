@@ -1,6 +1,10 @@
 exit 1
 ── Failures (2) ──
 ✗ //min2:a_silent  Genrule · exit 4 · min2/BUILD.bazel:1:8
+  │ bash failed: error executing Genrule command (from genrule rule target //min2:a_silent)
+  │   /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; exit 4'
+  │ Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root
+  │   for debugging
 
 ✗ //min2:b_loud  Genrule · exit 1 · min2/BUILD.bazel:2:8
   │ b_loud: real error text
@@ -9,5 +13,7 @@ exit 1
 All of it: aspect history show t-replay
 --- Failures tab
 ✗ //min2:a_silent  Genrule · exit 4 · min2/BUILD.bazel:1:8
+  │ bash failed: error executing Genrule command (from genrule rule target //min2:a_silent) /bin/bash -c 'source extern…
+  │ Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
 ✗ //min2:b_loud  Genrule · exit 1 · min2/BUILD.bazel:2:8
   │ b_loud: real error text

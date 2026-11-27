@@ -397,7 +397,10 @@ def entry_text(state: dict, e: dict) -> dict:
 
     - a failed action: its mnemonic and its command's exit code (its
       `failure_detail`'s `spawn_exit_code`), its own log's excerpt (what
-      `std.excerpt` picks, `own_excerpt`) and that log;
+      `std.excerpt` picks, `own_excerpt`) and that log; with neither an
+      excerpt nor a tie's lines, its `failure_detail`'s message (a test
+      Bazel failed itself: `Sharding requested, but the test runner did
+      not advertise support for it`);
     - a test: `test_group`'s heading and its chosen attempt's `test.log`
       excerpt; each other failed shard or run a line;
     - a target: `analysis` or `loading`, and Bazel's description of it (a
@@ -432,7 +435,10 @@ def entry_text(state: dict, e: dict) -> dict:
         tied = ties["actions"].get(e["index"]) or {"location": "", "status": "", "lines": []}
         if tied["status"]:
             details = [_status_word(tied["status"])]
-        out.update(kind = rec["detail"], details = details + ([tied["location"]] if tied["location"] else []), lines = tied["lines"] + lines, log = log)
+        lines = tied["lines"] + lines
+        if not lines and rec.get("failure"):
+            lines = [l for l in rec["failure"].split("\n") if l.strip()]
+        out.update(kind = rec["detail"], details = details + ([tied["location"]] if tied["location"] else []), lines = lines, log = log)
     elif rec["kind"] == "test":
         recs = [r for r in fails if r["kind"] == "test" and r["label"] == rec["label"]]
         group = test_group(state, recs)

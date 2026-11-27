@@ -1,12 +1,20 @@
 exit 1
 ── Failures (first 10 of 14) ──
 ✗ //two:three  Step · exit 5 · two/BUILD.bazel:6:6
+  │ bash failed: error executing Step command (from three rule target //two:three) /bin/bash -c
+  │   'exit 5'
+  │ Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root
+  │   for debugging
 
 ✗ //two:nolabel  CcLike · exit 2 · two/BUILD.bazel:7:8
   │ first anon
   log ${OUTPUT_BASE}/execroot/_main/bazel-out/_tmp/actions/stderr-2
 
 ✗ //two:empty  Genrule · exit 4 · two/BUILD.bazel:4:8
+  │ bash failed: error executing Genrule command (from genrule rule target //two:empty) /bin/bash
+  │   -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; exit 4'
+  │ Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root
+  │   for debugging
 
 ✗ //two:two  Beta · exit 3 · two/BUILD.bazel:2:4
   │ error: beta.c:9: bad beta
@@ -31,9 +39,13 @@ exit 1
 All of it: aspect history show t-replay
 --- Failures tab
 ✗ //two:three  Step · exit 5 · two/BUILD.bazel:6:6
+  │ bash failed: error executing Step command (from three rule target //two:three) /bin/bash -c 'exit 5'
+  │ Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
 ✗ //two:nolabel  CcLike · exit 2 · two/BUILD.bazel:7:8
   │ first anon
 ✗ //two:empty  Genrule · exit 4 · two/BUILD.bazel:4:8
+  │ bash failed: error executing Genrule command (from genrule rule target //two:empty) /bin/bash -c 'source external/b…
+  │ Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
 ✗ //two:two  Beta · exit 3 · two/BUILD.bazel:2:4
   │ error: beta.c:9: bad beta
   │ second line

@@ -14,8 +14,15 @@ exit 1
   log ${OUTPUT_BASE}/execroot/_main/bazel-out/_tmp/actions/stderr-3
 
 ✗ //two:empty  Genrule · exit 4 · two/BUILD.bazel:4:8
+  │ bash failed: error executing Genrule command (from target //two:empty) /bin/bash -c 'source
+  │   external/bazel_tools/tools/genrule/genrule-setup.sh; exit 4'
+  │ Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root
+  │   for debugging
 
 ✗ //two:three  Step · exit 5 · two/BUILD.bazel:6:6
+  │ bash failed: error executing Step command (from target //two:three) /bin/bash -c 'exit 5'
+  │ Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root
+  │   for debugging
 
 ✗ //two:nospace  Genrule · exit 1 · two/BUILD.bazel:9:8
 
@@ -38,7 +45,11 @@ All of it: aspect history show t-replay
 ✗ //two:nolabel  CcLike · exit 2 · two/BUILD.bazel:7:8
   │ first anon
 ✗ //two:empty  Genrule · exit 4 · two/BUILD.bazel:4:8
+  │ bash failed: error executing Genrule command (from target //two:empty) /bin/bash -c 'source external/bazel_tools/to…
+  │ Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
 ✗ //two:three  Step · exit 5 · two/BUILD.bazel:6:6
+  │ bash failed: error executing Step command (from target //two:three) /bin/bash -c 'exit 5'
+  │ Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
 ✗ //two:nospace  Genrule · exit 1 · two/BUILD.bazel:9:8
   │ XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX…
 ✗ //two:tabcjk  Genrule · exit 1 · two/BUILD.bazel:11:8
