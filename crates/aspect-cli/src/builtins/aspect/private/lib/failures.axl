@@ -225,10 +225,9 @@ def _test_excerpt(text: str, excerpt, timed_out: bool) -> tuple:
     got = excerpt("\n".join(lines), max_lines = 2 if timed_out else _EXCERPT_LINES, before = 1, after = 2, tail = 1)
     picked = list(got["lines"])
     between = 0
-    for l in picked:
-        if _is_gap(l):
-            between += int(l[len("… "):].partition(" ")[0].replace(",", ""))
-    shown = len([l for l in picked if not _is_gap(l)])
+    for _, n in got["gaps"]:
+        between += n
+    shown = len(picked) - len(got["gaps"])
     return (picked, max(0, len(lines) - shown - between))
 
 def _is_gap(line: str) -> bool:
@@ -301,30 +300,15 @@ def test_group(state: dict, recs: list) -> dict:
 # What an entry says when Bazel's events give a failed target no reason.
 _NO_REASON = "Bazel's events give no reason; its error is in the console"
 
-def _traceback_lines(lines: list) -> list:
-    """A Starlark `Traceback`'s excerpt, as the console's recap makes one:
-    what comes before it, its first line, the first frame at a BUILD file
-    and its code line, then the last `Error in …:` line, the lines between
-    counted (`… N more lines`); any other text's lines as they are. The
-    line that starts it may say more before it (`package contains errors:
-    mf: Traceback …`)."""
-    start = [k for k, l in enumerate(lines) if l.strip().endswith(_BAZEL.traceback)]
-    errors = [k for k, l in enumerate(lines) if l.strip().startswith(_BAZEL.error_in)]
-    if not start or not errors or errors[-1] < start[0]:
+def _traceback_lines(state: dict, lines: list) -> list:
+    """`lines` with a Starlark `Traceback` in them cut as the console's recap
+    cuts one (`std.excerpt(traceback = True)`: what comes before it, its
+    first frame at a BUILD file and that frame's code line, and its last
+    `Error in` line, the rest counted); any other text's lines as they are."""
+    excerpt = state.get("excerpt")
+    if excerpt == None or not lines:
         return lines
-    error = errors[-1]
-    build = [k for k in range(start[0], error) if lines[k].strip().startswith("File \"") and ("/BUILD\"" in lines[k] or "/BUILD.bazel\"" in lines[k] or lines[k].strip().startswith("File \"BUILD"))]
-    keep = list(range(start[0] + 1)) + ([build[0]] + ([build[0] + 1] if build[0] + 1 < error else []) if build else []) + [error]
-    out = []
-    at = 0
-    for k in keep:
-        if k > at:
-            out.append(_more_lines(k - at))
-        out.append(lines[k])
-        at = k + 1
-    if at < len(lines):
-        out.append(_more_lines(len(lines) - at))
-    return out
+    return list(excerpt("\n".join(lines), traceback = True, max_lines = len(lines) + 1)["lines"])
 
 # The targets an entry's blocked line names; the rest are counted.
 _BLOCKED_SHOWN = 3
@@ -468,7 +452,7 @@ def entry_text(state: dict, e: dict) -> dict:
         text = rec.get("description", "")
         if not text and (state.get("root_causes") or {}).get(rec["label"]) == [rec["label"]]:
             text = "its package has an error"
-        lines = _traceback_lines([l for l in text.split("\n") if l.strip()]) if text else []
+        lines = _traceback_lines(state, [l for l in text.split("\n") if l.strip()]) if text else []
         tied = ties["targets"].get(rec["label"]) or {"location": "", "lines": []}
         lines += [l for l in tied["lines"] if l not in lines]
         workspace = _workspace(state)
@@ -600,7 +584,7 @@ def failure_summary(state: dict, task_id: str, tty: bool, log_path: str = "", li
             out.append("")
         out.append(red + bold + "── Other errors from Bazel ──" + reset)
         for i, block in enumerate(others[:max_entries]):
-            lines = _traceback_lines(block["lines"])
+            lines = _traceback_lines(state, block["lines"])
             for j, row in enumerate(quoted_rows(lines[0], max(_MIN_QUOTE, width - _OTHER_GUTTER))):
                 out.append((red + "ERROR:" + reset + " " if not j else "         ") + row)
             if i < _EXCERPTED:

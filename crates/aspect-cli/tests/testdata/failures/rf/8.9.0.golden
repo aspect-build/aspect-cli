@@ -13,6 +13,7 @@ All of it: aspect history show t-replay
 ✗ //rf:x  analysis · rf/BUILD.bazel:2:2
   │ in r rule //rf:x:
   │ Traceback (most recent call last):
-  │ …
+  │         File "rf/defs.bzl", line 2, column 9, in _impl
+  │                 fail("impl refuses " + ctx.label.name)
   │ Error in fail: impl refuses x
 ○ //rf:dep  blocked by :x
