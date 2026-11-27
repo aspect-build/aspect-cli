@@ -117,10 +117,12 @@ It puts `default_stages` from `@aspect//bazel/console.axl` on
   loading, a toolchain, any other `ERROR:` line) first, then the builds',
   then the tests'. An entry is a heading (`✗ //pkg:t  Genrule · exit 1 ·
   pkg/BUILD.bazel:3:8`, Bazel's `ERROR:` line folded into its exit code and
-  location), then, for the first five, an excerpt of what the tool said
-  behind a `│` (at most five lines; a test's from its last failed attempt's
-  `test.log`, a sharded one's first failed shard, each other one a line),
-  its log (`log <path>`) and the targets it blocked; a blank line apart.
+  location; a target with two failed actions has two), then, for the first
+  five, an excerpt of what the tool said behind a `│` (at most five rows,
+  `│ …` where lines between are left out; a test's from its last failed
+  attempt's `test.log`, a sharded or repeated one's first failed shard or
+  run), its log (`log <path>`) and each other failed shard or run a line;
+  every entry names the targets it blocked; a blank line apart.
   The first 10 are listed, `first 10 of 14` counting the rest. Then, on every build, one line of counts (`193 built, 1
   failed · 47 tests passed, 2 failed · Bazel's raw log: <path>`) and where the
   rest is (`All of it: aspect history show <id>`). Under the Dashboard the
