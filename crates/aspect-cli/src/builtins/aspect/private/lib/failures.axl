@@ -21,6 +21,7 @@ _plain_text = failure_records.plain_text
 _referrers = failure_records.referrers
 _tail_text = failure_records.tail_text
 _target_entry = failure_records.target_entry
+_COMMAND_FAILURES = failure_records.COMMAND_FAILURES
 _workspace = failure_records.workspace
 blocked_targets = failure_records.blocked_targets
 build_outcome = failure_records.build_outcome
@@ -411,11 +412,14 @@ def entry_text(state: dict, e: dict) -> dict:
     Failures list, kept once worked out:
 
     - a failed action: its mnemonic and its command's exit code (its
-      `failure_detail`'s `spawn_exit_code`), its own log's excerpt (what
-      `std.excerpt` picks, `own_excerpt`) and that log; with neither an
-      excerpt nor a tie's lines, its `failure_detail`'s message (a test
-      Bazel failed itself: `Sharding requested, but the test runner did
-      not advertise support for it`);
+      `failure_detail`'s `spawn_exit_code`), and the code of a command
+      that timed out, ran out of memory or could not start in its sandbox
+      (`timeout`); its own log's excerpt (what `std.excerpt` picks,
+      `own_excerpt`) and that log; with neither an excerpt nor a tie's
+      lines, its `failure_detail`'s message where it says more than the
+      failed command (`COMMAND_FAILURES`), such as a test Bazel failed
+      itself (`Sharding requested, but the test runner did not advertise
+      support for it`);
     - a test: `test_group`'s heading and its chosen attempt's `test.log`
       excerpt; each other failed shard or run a line;
     - a target: `analysis` or `loading`, and Bazel's description of it (a
@@ -450,9 +454,13 @@ def entry_text(state: dict, e: dict) -> dict:
         tied = ties["actions"].get(e["index"]) or {"location": "", "status": "", "lines": []}
         if tied["status"]:
             details = [_status_word(tied["status"])]
+        category, code = rec.get("failure_category") or ("", "")
+        command = code in _COMMAND_FAILURES.get(category, [])
+        if command and code != "non_zero_exit" and code not in details:
+            details.append(code)
         gaps = [(i + len(tied["lines"]), n) for i, n in gaps]
         lines = tied["lines"] + lines
-        if not lines and rec.get("failure"):
+        if not lines and rec.get("failure") and not command:
             lines = [l for l in rec["failure"].split("\n") if l.strip()]
         out.update(kind = rec["detail"], details = details + ([tied["location"]] if tied["location"] else []), lines = lines, gaps = gaps, log = log)
     elif rec["kind"] == "test":

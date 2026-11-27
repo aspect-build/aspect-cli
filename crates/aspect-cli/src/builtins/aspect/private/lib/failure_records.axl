@@ -92,9 +92,10 @@ def _attempt_ms(payload) -> int:
 
 def _action_record(label: str, payload, event_id = None) -> dict:
     """An action's record for a list: its label, mnemonic, logs, primary
-    output (which the history keeps its logs by), whether it succeeded and
-    what its command exited with (`spawn_exit_code`) and what Bazel's
-    `failure_detail` says of it (`failure`, decoded, `repaired`)."""
+    output (which the history keeps its logs by), whether it succeeded,
+    what its command exited with (`spawn_exit_code`), what Bazel's
+    `failure_detail` says of it (`failure`, decoded, `repaired`) and its
+    category (`failure_category`)."""
     files = []
     for name in ("stderr", "stdout"):
         f = bes_get(payload, name, None)
@@ -110,7 +111,24 @@ def _action_record(label: str, payload, event_id = None) -> dict:
         "config": _config_id(event_id),
         "success": bool(bes_get(payload, "success", False)),
         "exit_code": spawn_exit_code(payload),
+        "failure_category": failure_category(payload),
     }
+
+# The failures whose `failure_detail` message is only Bazel's command and its
+# hints (`--sandbox_debug`), by category and code (`failure_category`): the
+# command exited non-zero, timed out, ran out of memory, or its sandbox could
+# not start it.
+_COMMAND_FAILURES = {"spawn": ["non_zero_exit", "timeout", "out_of_memory"], "sandbox": ["subprocess_start_failed"]}
+
+def failure_category(payload) -> tuple:
+    """`(kind, code)` of a failed action's `failure_detail`: which message
+    of its `category` oneof it has (`spawn`, `sandbox`, `test_action`,
+    `execution`, …) and that message's code, lowercase
+    (`non_zero_exit`); `("", "")` without one."""
+    category = bes_get(bes_get(payload, "failure_detail", None), "category", None)
+    if category == None:
+        return ("", "")
+    return (type(category), str(bes_get(category, "code", "") or "").lower())
 
 def spawn_exit_code(payload) -> int:
     """What a failed action's command exited with (its `failure_detail`'s
@@ -851,6 +869,7 @@ failure_records = namespace(
     build_outcome = build_outcome,
     build_succeeded = build_succeeded,
     collect_event = collect_event,
+    COMMAND_FAILURES = _COMMAND_FAILURES,
     testonly_count_aborted = count_aborted,
     testonly_count_aborted_test = count_aborted_test,
     testonly_count_event = count_event,

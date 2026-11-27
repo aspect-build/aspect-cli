@@ -13,10 +13,6 @@ exit 1
   log ${OUTPUT_BASE}/execroot/_main/bazel-out/_tmp/actions/stdout-4
 
 ✗ //actk:silent  Genrule · exit 9 · actk/BUILD.bazel:5:8
-  │ bash failed: error executing Genrule command (from target //actk:silent) /bin/bash -c 'source
-  │   external/bazel_tools/tools/genrule/genrule-setup.sh; exit 9'
-  │ Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root
-  │   for debugging
 
 ✗ //actk:wk  PyWork · exit 3 · actk/BUILD.bazel:7:3
   │ worker says: wk broke on bazel-out/darwin_arm64-fastbuild/bin/actk/wk.out
@@ -31,7 +27,5 @@ All of it: aspect history show t-replay
 ✗ //actk:outonly  Genrule · exit 6 · actk/BUILD.bazel:6:8
   │ stdout only text
 ✗ //actk:silent  Genrule · exit 9 · actk/BUILD.bazel:5:8
-  │ bash failed: error executing Genrule command (from target //actk:silent) /bin/bash -c 'source external/bazel_tools/…
-  │ Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
 ✗ //actk:wk  PyWork · exit 3 · actk/BUILD.bazel:7:3
   │ worker says: wk broke on bazel-out/darwin_arm64-fastbuild/bin/actk/wk.out

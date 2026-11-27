@@ -1,9 +1,6 @@
 exit 1
 ── Failures (2) ──
 ✗ //sl:s  W · exit 1 · sl/BUILD.bazel:2:3
-  │ bash failed: error executing W command (from target //sl:s) /bin/bash -c 'exit 1'
-  │ Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root
-  │   for debugging
 
 ✗ //sl:s  W · exit 1 · sl/BUILD.bazel:2:3
   │ loud one broke
@@ -12,7 +9,5 @@ exit 1
 All of it: aspect history show t-replay
 --- Failures tab
 ✗ //sl:s  W · exit 1 · sl/BUILD.bazel:2:3
-  │ bash failed: error executing W command (from target //sl:s) /bin/bash -c 'exit 1'
-  │ Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
 ✗ //sl:s  W · exit 1 · sl/BUILD.bazel:2:3
   │ loud one broke

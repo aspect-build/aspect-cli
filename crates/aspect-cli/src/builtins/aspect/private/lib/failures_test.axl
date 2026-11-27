@@ -1,6 +1,9 @@
 """Tests for the failure summary's libraries, one small synthetic case per
 rule: the records (`failure_records.axl`), the console ties
-(`failure_ties.axl`), and the entries and counts (`failures.axl`).
+(`failure_ties.axl`), and the entries and counts (`failures.axl`). Events
+are fakes, but where a rule reads which message of a oneof an event has
+(a failure's category), which a fake cannot say: those are JSON, read as
+the runtime reads a `--build_event_json_file`.
 
 Run with:
   aspect dev test-failures
@@ -149,15 +152,55 @@ def _test_relay_cap(ctx):
     state = _ended(ctx, [action], header + big, logs = {"/out/e": big}, relay_cap = -1)
     _eq("no relay cap: a stderr past 1 MiB ties whole", failure_ties.console_ties(state)["actions"][0]["location"], "/ws/a/BUILD:3:8")
 
-def _test_failure_message_quoted(ctx):
-    # A test Bazel failed itself has no log of its own and its line names
-    # it as what failed: its `failure_detail` message is the entry's.
-    message = "Testing //tx:t (shard 1 of 2) failed: Sharding requested, but the test runner did not advertise support for it by touching TEST_SHARD_STATUS_FILE."
-    runner = _failed_action("//tx:t", "bazel-out/k8-fastbuild/testlogs/tx/t/shard_1_of_2/test.log", message, exit_code = 0, code = "", mnemonic = "TestRunner")
-    state = _ended(ctx, [runner], _error("/ws/tx/BUILD:2:8: " + message))
-    entries = failures.failure_entries(state)["entries"]
-    _eq("the message quoted", failures.entry_text(state, entries[0])["lines"], [message])
-    _eq("its line no other error", failure_ties.console_ties(state)["others"], [])
+def _json_events(ctx, events: list) -> list:
+    """`events`, each a build event in proto3's JSON form, as the runtime
+    reads them from a `--build_event_json_file`: a oneof's kind is then its
+    message's (`spawn`), which a fake's (`struct`) cannot be."""
+    tmp = ctx.std.fs.mkdtemp(prefix = "aspect-failures-test")
+    path = tmp + "/bep.json"
+    ctx.std.fs.write(path, "".join([json.encode(e) + "\n" for e in events]))
+    read = bazel.build_events.read(path, format = "json")
+    got = [e for e in read]
+    ctx.std.fs.remove_dir_all(tmp)
+    if read.error != None:
+        fail("the events did not decode: %s" % read.error)
+    return got
+
+def _json_failed_action(label: str, mnemonic: str, message: str, category: dict) -> dict:
+    """A failed action's `action_completed` event in JSON, its
+    `failure_detail`'s `category` oneof `category`."""
+    output = "bazel-out/k8-fastbuild/bin/" + label.partition("//")[2].replace(":", "/")
+    return {
+        "id": {"actionCompleted": {"primaryOutput": output, "label": label, "configuration": {"id": "c1"}}},
+        "action": {"success": False, "type": mnemonic, "exitCode": 1, "failureDetail": dict({"message": message}, **category)},
+    }
+
+def _test_quoted_failure_detail(ctx):
+    # An action with no log of its own and no tie quotes its
+    # `failure_detail` message where it says more than the failed command:
+    # a test Bazel failed itself does; a command that exited non-zero,
+    # timed out or could not start in its sandbox does not, its code in the
+    # heading where its exit code does not say it.
+    command = "bash failed: error executing Genrule command (from genrule rule target //a:g) /bin/bash -c 'exit 1'\n\nUse --sandbox_debug to see verbose messages from the sandbox"
+    sharding = "Testing //tx:t (shard 1 of 2) failed: Sharding requested, but the test runner did not advertise support for it by touching TEST_SHARD_STATUS_FILE."
+    evicted = "Failed to fetch blobs because they do not exist remotely: lost inputs with digests: abc/1"
+    cases = [
+        ("exited non-zero", _json_failed_action("//a:g", "Genrule", command, {"spawn": {"code": "NON_ZERO_EXIT", "spawnExitCode": 1}}), (["exit 1"], [])),
+        ("timed out", _json_failed_action("//a:g", "Genrule", command, {"spawn": {"code": "TIMEOUT", "spawnExitCode": 142}}), (["exit 142", "timeout"], [])),
+        ("out of memory", _json_failed_action("//a:g", "Genrule", command, {"spawn": {"code": "OUT_OF_MEMORY"}}), (["out_of_memory"], [])),
+        ("not started", _json_failed_action("//a:g", "Genrule", command, {"sandbox": {"code": "SUBPROCESS_START_FAILED"}}), (["subprocess_start_failed"], [])),
+        ("a test Bazel failed itself", _json_failed_action("//tx:t", "TestRunner", sharding, {"testAction": {"code": "LOCAL_TEST_PREREQ_UNMET"}}), ([], [sharding])),
+        ("a remote cache's evicted input", _json_failed_action("//a:g", "Genrule", evicted, {"spawn": {"code": "REMOTE_CACHE_EVICTED"}}), ([], [evicted])),
+    ]
+    for name, event, want in cases:
+        state = _ended(ctx, _json_events(ctx, [event]), "")
+        got = failures.entry_text(state, failures.failure_entries(state)["entries"][0])
+        _eq(name, (got["details"], got["lines"]), want)
+
+    # Its console line names it as what failed: no other error.
+    runner = _json_failed_action("//tx:t", "TestRunner", sharding, {"testAction": {"code": "LOCAL_TEST_PREREQ_UNMET"}})
+    state = _ended(ctx, _json_events(ctx, [runner]), _error("/ws/tx/BUILD:2:8: " + sharding))
+    _eq("a test Bazel failed itself: its line no other error", failure_ties.console_ties(state)["others"], [])
 
 def _test_bad_pattern(ctx):
     # A pattern Bazel cannot parse: its `Skipping` line and its repeat after
@@ -259,7 +302,7 @@ def _impl(ctx: TaskContext) -> int:
     _test_an_unclaimed_error_is_listed(ctx)
     _test_timestamps(ctx)
     _test_relay_cap(ctx)
-    _test_failure_message_quoted(ctx)
+    _test_quoted_failure_detail(ctx)
     _test_bad_pattern(ctx)
     _test_sandboxed_relay(ctx)
     _test_local_exit(ctx)

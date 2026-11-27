@@ -49,7 +49,5 @@ All of it: aspect history show t-replay
   │ ERROR: coloured fake from liar
   │ FAIL: //fk:phantom (see /tmp/nowhere/test.log)
 ✗ //fk:empty  Genrule · exit 5 · fk/BUILD.bazel:6:8
-  │ bash failed: error executing Genrule command (from target //fk:empty) /bin/bash -c 'source external/bazel_tools/too…
-  │ Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
 ✗ //fk:outonly  Genrule · exit 4 · fk/BUILD.bazel:5:8
   │ only on stdout
