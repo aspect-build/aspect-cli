@@ -2636,6 +2636,22 @@ def _impl(ctx: TaskContext) -> int:
     got = [_visible(l) for l in failure_summary(ms, {"errors": ms_errs, "distinct": 4}, "t-9", False)]
     _eq("a source two need: two failures", [l for l in got if l.startswith("✗") or l.startswith("──") or "blocked" in l], ["── Failures (2) ──", "✗ //ms2:b  ms2/BUILD.bazel:2:8", "✗ //ms2:a  ms2/BUILD.bazel:1:8"])
 
+    # ws/asp (Bazel 9.3.3, --aspects): an aspect's `fail()` aborts //asp:x's
+    # analysis and its genrule's output is not created: one entry, the
+    # label counted once.
+    asp_desc = "in //asp:defs.bzl%bad_aspect aspect on genrule rule //asp:x: \nTraceback (most recent call last):\n\tFile \"/ws/asp/defs.bzl\", line 2, column 9, in _a\n\t\tfail(\"aspect refuses \" + str(target.label))\nError in fail: aspect refuses @@//asp:x"
+    asp_errs = [
+        {"header": "ERROR: asp/BUILD.bazel:1:8: in //asp:defs.bzl%bad_aspect aspect on genrule rule //asp:x: ", "body": ["Traceback (most recent call last):", "… 2 more lines", "Error in fail: aspect refuses @@//asp:x"], "log": None, "label": None, "target": None},
+        {"header": "ERROR: asp/BUILD.bazel:1:8: declared output 'asp/x.txt' was not created by genrule.", "body": [], "log": None, "label": None, "target": None},
+        {"header": "ERROR: asp/BUILD.bazel:1:8: Executing genrule //asp:x failed: not all outputs were created or valid", "body": [], "log": None, "label": None, "target": None},
+    ]
+    asp = dict(kinds, counts = dict(new_counts(), failures = ["//asp:x"], failed_labels = {"//asp:x": True}, failed = 1), root_causes = {}, logged_index = None, blocked_cache = None, listed_cache = None, fails = [
+        {"kind": "action", "label": "//asp:x", "detail": "analysis failed", "files": [("error", (asp_desc, False))], "output": "", "success": False},
+        _act("//asp:x", "Genrule", "bazel-out/bin/asp/x.txt", 0),
+    ], kept_errors = {"errors": asp_errs, "distinct": 3}, read = None, build = None)
+    got = [_visible(l) for l in failure_summary(asp, {"errors": asp_errs, "distinct": 3}, "t-9", False)]
+    _eq("an aspect's fail(): one entry", [l for l in got if l.startswith("✗") or l.startswith("──")][:2], ["── Failures (1) ──", "✗ //asp:x  Genrule · asp/BUILD.bazel:1:8"])
+
     # A signal-killed action (//f:killed, Bazel 9.3.3): `killed` where the
     # exit code goes, and no command line quoted.
     killed = [{"header": "ERROR: f/BUILD.bazel:3:8: Executing genrule //f:killed failed: (Killed)", "body": ["about to die"], "log": None, "label": None, "target": "//f:killed"}]

@@ -1636,7 +1636,8 @@ def listed_failures(state: dict) -> list:
     order: every failed action, and for a test the attempt the failure
     summary quotes (`test_group`), its other attempts, shards and runs
     reached with `}` `{` from it; never a missing source file's root
-    (`missing_sources`)."""
+    (`missing_sources`), nor an analysis failure (an aspect's) of a target
+    whose action has its row."""
     fails = state["fails"]
     missing = missing_sources(state)
     key = (len(fails), len(missing))
@@ -1651,7 +1652,8 @@ def listed_failures(state: dict) -> list:
     for label, at in by_label.items():
         chosen[label] = test_group(state, [fails[i] for i in at])["index"]
         chosen[label] = at[chosen[label]]
-    listed = [i for i, rec in enumerate(fails) if (rec["kind"] != "test" or chosen.get(rec["label"]) == i) and not (rec.get("detail") == "analysis failed" and rec["label"] in missing)]
+    acted = {rec["label"]: True for rec in fails if rec["kind"] == "action" and rec.get("detail") != "analysis failed"}
+    listed = [i for i, rec in enumerate(fails) if (rec["kind"] != "test" or chosen.get(rec["label"]) == i) and not (rec.get("detail") == "analysis failed" and (rec["label"] in missing or rec["label"] in acted))]
     state["listed_cache"] = (key, listed)
     return listed
 
@@ -6629,6 +6631,12 @@ def _entry_lines(e: dict) -> list:
         if row == _GAP_ROW or _is_gap(row):
             continue
         row = row.strip()
+
+        # A frame's file by its package path, however Bazel spelled it
+        # (`File "/ws/asp/defs.bzl"` or `File "asp/defs.bzl"`).
+        if row.startswith("File \""):
+            path, quote, rest = row[len("File \""):].partition("\"")
+            row = "File \"" + "/".join(path.split("/")[-2:]) + quote + rest
         head, sep, rest = row.partition(": ")
         if sep and " " not in head and ("BUILD" in head or head.count(":") >= 1):
             row = rest
@@ -6914,6 +6922,11 @@ def failure_summary(state: dict, kept, task_id: str, tty: bool, log_path: str = 
         if rec["kind"] == "action" and rec.get("detail") == "analysis failed" and rec["label"].partition("//")[2].partition(":")[0] in groups:
             continue
         if rec["kind"] == "action" and rec.get("detail") == "analysis failed" and rec["label"] in missing_sources(state):
+            continue
+
+        # An aspect's failure on a target whose own action failed too: the
+        # action's entry tells it, the target once.
+        if rec["kind"] == "action" and rec.get("detail") == "analysis failed" and [r for r in state["fails"] if r["label"] == rec["label"] and r["kind"] == "action" and r.get("detail") != "analysis failed"]:
             continue
         if rec["kind"] == "action" and rec.get("detail") == "analysis failed":
             found = claim(rec["label"]) + aborted_by.pop(rec["label"], [])
