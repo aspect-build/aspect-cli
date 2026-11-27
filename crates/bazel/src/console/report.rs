@@ -417,10 +417,10 @@ fn block_cap(relay: Option<u64>) -> usize {
 
 /// The most a [`ErrorCollector`] block keeps by default
 /// ([`BAZEL_UI_MAX_STDOUTERR_BYTES`] relayed).
-pub const MAX_BLOCK_BYTES: usize = BAZEL_UI_MAX_STDOUTERR_BYTES as usize + BLOCK_ROOM;
+const MAX_BLOCK_BYTES: usize = BAZEL_UI_MAX_STDOUTERR_BYTES as usize + BLOCK_ROOM;
 
 /// The most every [`ErrorCollector`] block together keeps.
-pub const MAX_BLOCKS_BYTES: usize = 64 * 1024 * 1024;
+const MAX_BLOCKS_BYTES: usize = 64 * 1024 * 1024;
 
 /// The longest last line of an action's `INFO: From` output a
 /// [`ErrorCollector`] keeps; a longer one is kept as none, so no tie can use it.
@@ -521,7 +521,8 @@ impl ErrorCollector {
     }
 
     /// This collector with its caps at `block` and `all` bytes.
-    pub fn with_caps(mut self, block: usize, all: usize) -> Self {
+    #[cfg(test)]
+    fn with_caps(mut self, block: usize, all: usize) -> Self {
         self.caps = (block, all);
         self
     }
@@ -573,11 +574,6 @@ impl LineProcessor for ErrorCollector {
     fn process(&mut self, record: &[u8]) -> Option<Vec<u8>> {
         use super::processors::BlockKind;
         let line = self.given.take(record);
-        // The CLI's own line between Bazel's (where it kept a log): never
-        // part of what Bazel wrote, nor an end to it.
-        if line.note {
-            return None;
-        }
         let text = line.text.trim_end();
         let ending: &[u8] = if line.returns {
             b"\r"
@@ -1550,41 +1546,6 @@ mod tests {
                     "\x1b[32mINFO: \x1b[0mFrom Executing genrule //a:ok:\n"
                 ),
                 ("tail", "\x1b[1A\x1b[K\x1b[31m\x1b[1mERROR: \x1b[0mlast\n"),
-            ]
-        );
-    }
-
-    /// The CLI's own note between Bazel's lines (where it kept a log), which
-    /// the forwarder may write inside an action's output, is no part of the
-    /// block and does not end it.
-    #[test]
-    fn a_note_in_an_actions_output_is_left_out() {
-        let observations = Arc::new(super::super::processors::Observations::default());
-        let mut p = ErrorCollector::new(true, observations.clone());
-        let mut c = super::super::line::Classifier::default();
-        for (record, note) in [
-            (
-                "\x1b[31m\x1b[1mERROR: \x1b[0ma/BUILD:1:1: Executing genrule //a:a failed: (Exit 1): bash failed",
-                false,
-            ),
-            ("first", false),
-            ("INFO: //a:a Genrule stderr: /h/a.stderr", true),
-            ("second", false),
-        ] {
-            let mut line = c.classify(record.as_bytes());
-            line.note = note;
-            p.see(&line);
-            p.process(record.as_bytes());
-        }
-        p.finish();
-        let kept = observations.collected_errors().expect("kept");
-        assert_eq!(
-            kept.blocks
-                .iter()
-                .map(|b| b.text.as_str())
-                .collect::<Vec<_>>(),
-            vec![
-                "\x1b[31m\x1b[1mERROR: \x1b[0ma/BUILD:1:1: Executing genrule //a:a failed: (Exit 1): bash failed\nfirst\nsecond\n"
             ]
         );
     }

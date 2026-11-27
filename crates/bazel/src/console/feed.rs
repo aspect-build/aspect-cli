@@ -176,7 +176,7 @@ impl Feed {
 /// (`10%\r20%` is `20%`), then escape sequences stripped, then every control
 /// character but a tab dropped (C0, DEL and C1, a backspace removed rather
 /// than applied), as a screen drawing it would be thrown out by them.
-pub fn plain_line(raw: &[u8]) -> String {
+fn plain_line(raw: &[u8]) -> String {
     let raw = raw.strip_suffix(b"\r").unwrap_or(raw);
     let shown = raw
         .iter()
@@ -197,7 +197,7 @@ fn line_of(raw: &[u8]) -> (String, Vec<Link>, String) {
 /// [`plain_line`] with its colour (SGR) kept: the same visible text, every
 /// other escape and control character but a tab dropped, the colour set
 /// before a redraw (`\r`) carried over it.
-pub fn coloured_line(raw: &[u8]) -> String {
+fn coloured_line(raw: &[u8]) -> String {
     let raw = raw.strip_suffix(b"\r").unwrap_or(raw);
     let (before, shown) = match raw.iter().rposition(|&b| b == b'\r') {
         Some(i) => (&raw[..i], &raw[i + 1..]),
@@ -222,7 +222,7 @@ pub fn coloured_line(raw: &[u8]) -> String {
 
 /// [`plain_line`], with the line's OSC 8 links as spans of that text: none
 /// for a line that is not UTF-8, whose text is a lossy copy.
-pub fn linked_line(raw: &[u8]) -> (String, Vec<Link>) {
+fn linked_line(raw: &[u8]) -> (String, Vec<Link>) {
     let text = plain_line(raw);
     let raw = raw.strip_suffix(b"\r").unwrap_or(raw);
     let shown = raw
