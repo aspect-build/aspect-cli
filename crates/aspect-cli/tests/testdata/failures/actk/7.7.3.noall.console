@@ -5,41 +5,40 @@
 [1A[K[32mAnalyzing:[0m 5 targets (0 packages loaded, 0 targets configured)
 
 [1A[K[1A[K[32mINFO: [0mAnalyzed 5 targets (0 packages loaded, 0 targets configured).
-[32m[0 / 5][0m 4 actions, 0 running
-    Executing genrule //actk:silent; 0s darwin-sandbox
-    [Prepa] BazelWorkspaceStatusAction stable-status.txt
+[32m[1 / 5][0m 3 actions, 2 running
     Executing genrule //actk:loc; 0s local
+    Executing genrule //actk:outonly; 0s darwin-sandbox
+    Executing genrule //actk:silent; 0s darwin-sandbox
     [Sched] Working on //actk:wk in a worker
-    [Sched] Executing genrule //actk:sbx
-[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/actk/BUILD.bazel:3:8: Executing genrule //actk:loc failed: (Exit 7): bash failed: error executing Genrule command (from target //actk:loc) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo '\''local action broke'\'' >&2; exit 7'
+[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/actk/BUILD.bazel:3:8: Executing genrule //actk:loc failed: (Exit 7): bash failed: error executing Genrule command (from target //actk:loc) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo '\''local action broke'\'' >&2; exit 7'
 local action broke
 [32m[1 / 6][0m 5 actions running
-    Executing genrule //actk:silent; 0s darwin-sandbox
     Executing genrule //actk:loc; 0s local
-    Executing genrule //actk:sbx; 0s darwin-sandbox
-    Working on //actk:wk in a worker; 0s worker
     Executing genrule //actk:outonly; 0s darwin-sandbox
+    Executing genrule //actk:silent; 0s darwin-sandbox
+    Working on //actk:wk in a worker; 0s worker
+    Executing genrule //actk:sbx; 0s darwin-sandbox
 [1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/actk/BUILD.bazel:7:3: Working on //actk:wk in a worker failed: (Exit 3): worker.py failed: error executing PyWork command (from target //actk:wk) actk/worker.py @bazel-out/darwin_arm64-fastbuild/bin/actk/wk.out-0.params
 worker says: wk broke on bazel-out/darwin_arm64-fastbuild/bin/actk/wk.out
 [32m[2 / 6][0m 4 actions running
+    Executing genrule //actk:outonly; 0s darwin-sandbox
     Executing genrule //actk:silent; 0s darwin-sandbox
-    Executing genrule //actk:sbx; 0s darwin-sandbox
     Working on //actk:wk in a worker; 0s worker
-    Executing genrule //actk:outonly; 0s darwin-sandbox
-[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/actk/BUILD.bazel:6:8: Executing genrule //actk:outonly failed: (Exit 6): bash failed: error executing Genrule command (from target //actk:outonly) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo '\''stdout only text'\''; exit 6'
-
-Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
-[32m[3 / 6][0m 3 actions running
-    Executing genrule //actk:silent; 0s darwin-sandbox
     Executing genrule //actk:sbx; 0s darwin-sandbox
-    Executing genrule //actk:outonly; 0s darwin-sandbox
-[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/actk/BUILD.bazel:4:8: Executing genrule //actk:sbx failed: (Exit 8): bash failed: error executing Genrule command (from target //actk:sbx) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo '\''sandboxed action broke'\'' >&2; exit 8'
+[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/actk/BUILD.bazel:4:8: Executing genrule //actk:sbx failed: (Exit 8): bash failed: error executing Genrule command (from target //actk:sbx) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo '\''sandboxed action broke'\'' >&2; exit 8'
 
 Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
 sandboxed action broke
-[32m[4 / 6][0m 2 actions running
+[32m[3 / 6][0m 3 actions running
+    Executing genrule //actk:outonly; 0s darwin-sandbox
     Executing genrule //actk:silent; 0s darwin-sandbox
     Executing genrule //actk:sbx; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/actk/BUILD.bazel:6:8: Executing genrule //actk:outonly failed: (Exit 6): bash failed: error executing Genrule command (from target //actk:outonly) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo '\''stdout only text'\''; exit 6'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+[32m[4 / 6][0m 2 actions running
+    Executing genrule //actk:outonly; 0s darwin-sandbox
+    Executing genrule //actk:silent; 0s darwin-sandbox
 [1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/actk/BUILD.bazel:5:8: Executing genrule //actk:silent failed: (Exit 9): bash failed: error executing Genrule command (from target //actk:silent) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; exit 9'
 
 Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
@@ -48,7 +47,7 @@ Use --sandbox_debug to see verbose messages from the sandbox and retain the sand
 [32m[6 / 6][0m no actions running
 [1A[KUse --verbose_failures to see the command lines of failed build steps.
 [32m[6 / 6][0m no actions running
-[1A[K[32mINFO: [0mElapsed time: 0.081s, Critical Path: 0.02s
+[1A[K[32mINFO: [0mElapsed time: 0.070s, Critical Path: 0.02s
 [32m[6 / 6][0m no actions running
 [1A[K[32mINFO: [0m6 processes: 6 internal.
 [32m[6 / 6][0m no actions running

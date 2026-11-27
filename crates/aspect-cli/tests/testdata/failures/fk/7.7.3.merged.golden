@@ -1,0 +1,51 @@
+exit 1
+── Failures (8) ──
+✗ //fk:loc1  Genrule · exit 1 · fk/BUILD.bazel:7:8
+  │ same
+  log ${OUTPUT_BASE}/execroot/_main/bazel-out/_tmp/actions/stderr-2
+
+✗ //fk:loc2  Genrule · exit 1 · fk/BUILD.bazel:8:8
+  │ same
+  log ${OUTPUT_BASE}/execroot/_main/bazel-out/_tmp/actions/stderr-9
+
+✗ //fk:empty  Genrule · exit 5 · fk/BUILD.bazel:6:8
+
+✗ //fk:crlf  Genrule · exit 2 · fk/BUILD.bazel:3:8
+  │ crlf one
+  │ crlf two
+  log ${OUTPUT_BASE}/execroot/_main/bazel-out/_tmp/actions/stderr-4
+
+✗ //fk:cr  Genrule · exit 6 · fk/BUILD.bazel:9:8
+  │ progress 10%
+  │ progress 100%
+  │ real error
+  log ${OUTPUT_BASE}/execroot/_main/bazel-out/_tmp/actions/stderr-6
+
+✗ //fk:both  Genrule · exit 3 · fk/BUILD.bazel:4:8
+
+✗ //fk:outonly  Genrule · exit 4 · fk/BUILD.bazel:5:8
+
+✗ //fk:liar  Genrule · exit 1 · fk/BUILD.bazel:1:8
+1 built, 8 failed · 0 tests passed, 0 failed · Bazel's raw log: ${FIXTURE}/7.7.3.merged.console
+All of it: aspect history show t-replay
+--- Failures tab
+✗ //fk:loc1  Genrule · exit 1 · fk/BUILD.bazel:7:8
+  │ same
+✗ //fk:loc2  Genrule · exit 1 · fk/BUILD.bazel:8:8
+  │ same
+✗ //fk:empty  Genrule · exit 5 · fk/BUILD.bazel:6:8
+✗ //fk:crlf  Genrule · exit 2 · fk/BUILD.bazel:3:8
+  │ crlf one
+  │ crlf two
+✗ //fk:cr  Genrule · exit 6 · fk/BUILD.bazel:9:8
+  │ progress 10%
+  │ progress 100%
+  │ real error
+✗ //fk:both  Genrule · exit 3 · fk/BUILD.bazel:4:8
+  │ to stderr second
+✗ //fk:outonly  Genrule · exit 4 · fk/BUILD.bazel:5:8
+  │ only on stdout
+✗ //fk:liar  Genrule · exit 1 · fk/BUILD.bazel:1:8
+  │ ERROR: /elsewhere/BUILD:1:1: Executing genrule //fk:ghost failed: (Exit 9): fake
+  │ ERROR: coloured fake from liar
+  │ FAIL: //fk:phantom (see /tmp/nowhere/test.log)

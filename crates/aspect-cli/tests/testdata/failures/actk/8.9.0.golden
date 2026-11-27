@@ -2,15 +2,15 @@ exit 1
 ── Failures (5) ──
 ✗ //actk:loc  Genrule · exit 7 · actk/BUILD.bazel:3:8
   │ local action broke
-  log ${OUTPUT_BASE}/execroot/_main/bazel-out/_tmp/actions/stderr-3
+  log ${OUTPUT_BASE}/execroot/_main/bazel-out/_tmp/actions/stderr-4
 
 ✗ //actk:outonly  Genrule · exit 6 · actk/BUILD.bazel:6:8
   │ stdout only text
-  log ${OUTPUT_BASE}/execroot/_main/bazel-out/_tmp/actions/stdout-2
+  log ${OUTPUT_BASE}/execroot/_main/bazel-out/_tmp/actions/stdout-3
 
 ✗ //actk:sbx  Genrule · exit 8 · actk/BUILD.bazel:4:8
   │ sandboxed action broke
-  log ${OUTPUT_BASE}/execroot/_main/bazel-out/_tmp/actions/stderr-4
+  log ${OUTPUT_BASE}/execroot/_main/bazel-out/_tmp/actions/stderr-2
 
 ✗ //actk:silent  Genrule · exit 9 · actk/BUILD.bazel:5:8
 

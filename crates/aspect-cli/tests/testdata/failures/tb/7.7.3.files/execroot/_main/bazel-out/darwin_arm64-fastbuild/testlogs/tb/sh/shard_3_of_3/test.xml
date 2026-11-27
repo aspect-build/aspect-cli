@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites>
+  <testsuite name="tb/sh_shard_3/3" tests="1" failures="0" errors="0">
+    <testcase name="tb/sh_shard_3/3" status="run" duration="1" time="1"></testcase>
+      <system-out>
+Generated test.log (if the file is not UTF-8, then this may be unreadable):
+<![CDATA[exec ${PAGER:-/usr/bin/less} "$0" || exit 1
+Executing tests from //tb:sh
+-----------------------------------------------------------------------------]]>
+      </system-out>
+    </testsuite>
+</testsuites>

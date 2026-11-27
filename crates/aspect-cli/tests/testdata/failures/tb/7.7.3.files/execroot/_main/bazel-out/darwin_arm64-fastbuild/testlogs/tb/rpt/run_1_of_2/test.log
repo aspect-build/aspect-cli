@@ -1,0 +1,5 @@
+exec ${PAGER:-/usr/bin/less} "$0" || exit 1
+Executing tests from //tb:rpt
+-----------------------------------------------------------------------------
+FAIL: inner says fail
+ERROR: inner error line

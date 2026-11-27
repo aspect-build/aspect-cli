@@ -5,14 +5,14 @@
 [1A[K[32mAnalyzing:[0m 5 targets (0 packages loaded, 0 targets configured)
 [32m[0 / 1][0m checking cached actions
 [1A[K[1A[K[32mINFO: [0mAnalyzed 5 targets (0 packages loaded, 0 targets configured).
-[32m[0 / 1][0m checking cached actions
+[32m[0 / 5][0m [Prepa] BazelWorkspaceStatusAction stable-status.txt
 [1A[K[31m[1mERROR: [0m${WORKSPACE}/actk/BUILD.bazel:3:8: Executing genrule //actk:loc failed: (Exit 7): bash failed: error executing Genrule command (from target //actk:loc) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo '\''local action broke'\'' >&2; exit 7'
 local action broke
 [32m[1 / 6][0m 5 actions running
+    Executing genrule //actk:loc; 0s local
     Executing genrule //actk:sbx; 0s darwin-sandbox
     Executing genrule //actk:outonly; 0s darwin-sandbox
     Executing genrule //actk:silent; 0s darwin-sandbox
-    Executing genrule //actk:loc; 0s local
     Working on //actk:wk in a worker; 0s worker
 [1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/actk/BUILD.bazel:6:8: Executing genrule //actk:outonly failed: (Exit 6): bash failed: error executing Genrule command (from target //actk:outonly) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo '\''stdout only text'\''; exit 6'
 
@@ -43,7 +43,7 @@ worker says: wk broke on bazel-out/darwin_arm64-fastbuild/bin/actk/wk.out
 [32m[6 / 6][0m no actions running
 [1A[KUse --verbose_failures to see the command lines of failed build steps.
 [32m[6 / 6][0m no actions running
-[1A[K[32mINFO: [0mElapsed time: 0.376s, Critical Path: 0.27s
+[1A[K[32mINFO: [0mElapsed time: 0.309s, Critical Path: 0.26s
 [32m[6 / 6][0m no actions running
 [1A[K[32mINFO: [0m6 processes: 6 internal.
 [32m[6 / 6][0m no actions running

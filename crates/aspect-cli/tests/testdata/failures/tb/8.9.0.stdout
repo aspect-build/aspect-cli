@@ -1,0 +1,18 @@
+//tb:noc                                                        [0m[31m[1mFAILED TO BUILD[0m
+//tb:unbuilt                                                    [0m[31m[1mFAILED TO BUILD[0m
+//tb:good                                                                [0m[32mPASSED[0m in 0.3s
+//tb:bad                                                                 [0m[31m[1mFAILED[0m in 0.7s
+  ${OUTPUT_BASE}/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/tb/bad/test.log
+//tb:fl                                                                   [0m[35mFLAKY[0m, failed in 1 out of 2 in 0.2s
+  Stats over 2 runs: max = 0.2s, min = 0.0s, avg = 0.1s, dev = 0.1s
+  ${OUTPUT_BASE}/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/tb/fl/test_attempts/attempt_1.log
+//tb:rpt                                                                 [0m[31m[1mFAILED[0m in 2 out of 2 in 0.4s
+  Stats over 2 runs: max = 0.4s, min = 0.4s, avg = 0.4s, dev = 0.0s
+  ${OUTPUT_BASE}/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/tb/rpt/run_2_of_2/test.log
+  ${OUTPUT_BASE}/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/tb/rpt/run_1_of_2/test.log
+//tb:sh                                                                  [0m[31m[1mFAILED[0m in 1 out of 3 in 0.6s
+  Stats over 3 runs: max = 0.6s, min = 0.6s, avg = 0.6s, dev = 0.0s
+  ${OUTPUT_BASE}/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/tb/sh/shard_2_of_3/test.log
+
+Executed 5 out of 7 tests: 2 tests pass, [0m[31m[1m2 fail to build[0m, and [0m[31m[1m3 fail locally[0m.
+There were tests whose specified size is too big. Use the --test_verbose_timeout_warnings command line option to see which ones these are.

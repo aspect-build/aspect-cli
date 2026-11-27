@@ -1,0 +1,4 @@
+//uni:тест                                                           [0m[31m[1mFAILED[0m in 0.0s
+  ${OUTPUT_BASE}/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/uni/тест/test.log
+
+Executed 1 out of 1 test: [0m[31m[1m1 fails locally[0m.

@@ -1,0 +1,154 @@
+[32mComputing main repo mapping:[0m 
+[1A[K[32mLoading:[0m 
+[1A[K[32mLoading:[0m 0 packages loaded
+[1A[K[32mAnalyzing:[0m 8 targets (0 packages loaded, 0 targets configured)
+[1A[K[32mAnalyzing:[0m 8 targets (0 packages loaded, 0 targets configured)
+[32m[0 / 1][0m checking cached actions
+[1A[K[1A[K[32mINFO: [0mAnalyzed 8 targets (0 packages loaded, 0 targets configured).
+[32m[27 / 51][0m 9 actions running
+    Executing genrule //tb:brk; 0s darwin-sandbox
+    Compiling tb/bad.cc; 0s darwin-sandbox
+    Compiling tb/ok.cc; 0s darwin-sandbox
+    Compiling tb/fl.cc; 0s local
+    Compiling tb/bad.cc; 0s darwin-sandbox
+    //tb:rpt; 0s local
+    Writing repo mapping manifest for //tb:noc; 0s local
+    Creating source manifest for //tb:noc; 0s local ...
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/tb/BUILD.bazel:2:8: Executing genrule //tb:brk failed: (Exit 7): bash failed: error executing Genrule command (from genrule rule target //tb:brk) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo '\''brk gen failed'\'' >&2; exit 7'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+brk gen failed
+[32m[36 / 58][0m 7 actions running
+    Executing genrule //tb:brk; 0s darwin-sandbox
+    Compiling tb/bad.cc; 0s darwin-sandbox
+    Compiling tb/ok.cc; 0s darwin-sandbox
+    Compiling tb/fl.cc; 0s local
+    Compiling tb/bad.cc; 0s darwin-sandbox
+    Compiling tb/noc.cc; 0s darwin-sandbox
+    Compiling tb/sh.cc; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/tb/BUILD.bazel:5:8: Compiling tb/noc.cc failed: (Exit 1): wrapped_clang_pp failed: error executing CppCompile command (from cc_test rule target //tb:noc) bazel-out/darwin_arm64-opt-exec/bin/external/apple_support+/crosstool/wrapped_clang_pp '-D_FORTIFY_SOURCE=1' -fstack-protector -fcolor-diagnostics -Wall -Wthread-safety -Wself-assign ... (remaining 36 arguments skipped)
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+[1mtb/noc.cc:1:13: [0m[0;1;31merror: [0m[1minvalid use of 'this' outside of a non-static member function[0m
+    1 | [0;34mint[0m main(){ [0;34mthis[0m does not compile }[0m
+      | [0;1;32m            ^
+[0m1 error generated.
+Error in child process '/usr/bin/xcrun'. 1
+[32m[42 / 58][0m 1 / 7 tests, [31m[1m1 failed[0m;[0m 5 actions running[0m; last test: [31m[1m//tb:unbuilt[0m
+    Compiling tb/bad.cc; 0s darwin-sandbox
+    Compiling tb/noc.cc; 0s darwin-sandbox
+    Compiling tb/sh.cc; 0s darwin-sandbox
+    Linking tb/good; 0s darwin-sandbox
+    Linking tb/bad; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[32m[58 / 66][0m 2 / 7 tests, [31m[1m2 failed[0m;[0m 8 actions running[0m; last test: [31m[1m//tb:noc[0m
+    Testing //tb:fl; 0s local
+    Testing //tb:good; 0s darwin-sandbox
+    Testing //tb:bad; 0s darwin-sandbox
+    Testing //tb:rpt (run 1 of 2); 0s darwin-sandbox
+    Testing //tb:rpt (run 2 of 2); 0s darwin-sandbox
+    Testing //tb:sh (shard 2 of 3); 0s darwin-sandbox
+    Testing //tb:sh (shard 3 of 3); 0s darwin-sandbox
+    Testing //tb:sh (shard 1 of 3); 0s darwin-sandbox
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mFAIL: [0m//tb:fl (Exit 1) (see ${OUTPUT_BASE}/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/tb/fl/test_attempts/attempt_1.log)
+[32m[58 / 66][0m 2 / 7 tests, [31m[1m2 failed[0m;[0m 8 actions running[0m; last test: [31m[1m//tb:noc[0m
+    Testing //tb:fl; 0s local
+    Testing //tb:good; 0s darwin-sandbox
+    Testing //tb:bad; 0s darwin-sandbox
+    Testing //tb:rpt (run 1 of 2); 0s darwin-sandbox
+    Testing //tb:rpt (run 2 of 2); 0s darwin-sandbox
+    Testing //tb:sh (shard 2 of 3); 0s darwin-sandbox
+    Testing //tb:sh (shard 3 of 3); 0s darwin-sandbox
+    Testing //tb:sh (shard 1 of 3); 0s darwin-sandbox
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K
+[35mFLAKY: [0m//tb:fl (Summary)
+      ${OUTPUT_BASE}/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/tb/fl/test_attempts/attempt_1.log
+[32m[58 / 66][0m 3 / 7 tests, [31m[1m2 failed[0m;[0m 8 actions running[0m; last test: [31m[1m//tb:fl[0m
+    Testing //tb:fl; 0s local
+    Testing //tb:good; 0s darwin-sandbox
+    Testing //tb:bad; 0s darwin-sandbox
+    Testing //tb:rpt (run 1 of 2); 0s darwin-sandbox
+    Testing //tb:rpt (run 2 of 2); 0s darwin-sandbox
+    Testing //tb:sh (shard 2 of 3); 0s darwin-sandbox
+    Testing //tb:sh (shard 3 of 3); 0s darwin-sandbox
+    Testing //tb:sh (shard 1 of 3); 0s darwin-sandbox
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[32m[59 / 66][0m 4 / 7 tests, [31m[1m2 failed[0m;[0m 7 actions running[0m; last test: [32m//tb:good[0m
+    Testing //tb:good; 0s darwin-sandbox
+    Testing //tb:bad; 0s darwin-sandbox
+    Testing //tb:rpt (run 1 of 2); 0s darwin-sandbox
+    Testing //tb:rpt (run 2 of 2); 0s darwin-sandbox
+    Testing //tb:sh (shard 2 of 3); 0s darwin-sandbox
+    Testing //tb:sh (shard 3 of 3); 0s darwin-sandbox
+    Testing //tb:sh (shard 1 of 3); 0s darwin-sandbox
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mFAIL: [0m//tb:bad (Exit 1) (see ${OUTPUT_BASE}/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/tb/bad/test.log)
+[32m[60 / 66][0m 4 / 7 tests, [31m[1m2 failed[0m;[0m 6 actions running[0m; last test: [32m//tb:good[0m
+    Testing //tb:bad; 0s darwin-sandbox
+    Testing //tb:rpt (run 1 of 2); 0s darwin-sandbox
+    Testing //tb:rpt (run 2 of 2); 0s darwin-sandbox
+    Testing //tb:sh (shard 2 of 3); 0s darwin-sandbox
+    Testing //tb:sh (shard 3 of 3); 0s darwin-sandbox
+    Testing //tb:sh (shard 1 of 3); 0s darwin-sandbox
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[32m[61 / 66][0m 5 / 7 tests, [31m[1m3 failed[0m;[0m 5 actions running[0m; last test: [31m[1m//tb:bad[0m
+    Testing //tb:rpt (run 1 of 2); 0s darwin-sandbox
+    Testing //tb:rpt (run 2 of 2); 0s darwin-sandbox
+    Testing //tb:sh (shard 2 of 3); 0s darwin-sandbox
+    Testing //tb:sh (shard 3 of 3); 0s darwin-sandbox
+    Testing //tb:sh (shard 1 of 3); 0s darwin-sandbox
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mFAIL: [0m//tb:rpt (run 2 of 2) (Exit 1) (see ${OUTPUT_BASE}/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/tb/rpt/run_2_of_2/test.log)
+[32m[61 / 66][0m 5 / 7 tests, [31m[1m3 failed[0m;[0m 5 actions running[0m; last test: [31m[1m//tb:bad[0m
+    Testing //tb:rpt (run 1 of 2); 1s darwin-sandbox
+    Testing //tb:rpt (run 2 of 2); 1s darwin-sandbox
+    Testing //tb:sh (shard 2 of 3); 1s darwin-sandbox
+    Testing //tb:sh (shard 3 of 3); 1s darwin-sandbox
+    Testing //tb:sh (shard 1 of 3); 1s darwin-sandbox
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mFAIL: [0m//tb:rpt (run 1 of 2) (Exit 1) (see ${OUTPUT_BASE}/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/tb/rpt/run_1_of_2/test.log)
+[32m[61 / 66][0m 5 / 7 tests, [31m[1m3 failed[0m;[0m 5 actions running[0m; last test: [31m[1m//tb:bad[0m
+    Testing //tb:rpt (run 1 of 2); 1s darwin-sandbox
+    Testing //tb:rpt (run 2 of 2); 1s darwin-sandbox
+    Testing //tb:sh (shard 2 of 3); 1s darwin-sandbox
+    Testing //tb:sh (shard 3 of 3); 1s darwin-sandbox
+    Testing //tb:sh (shard 1 of 3); 1s darwin-sandbox
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K
+[31m[1mFAILED: [0m//tb:rpt (Summary)
+      ${OUTPUT_BASE}/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/tb/rpt/run_2_of_2/test.log
+      ${OUTPUT_BASE}/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/tb/rpt/run_1_of_2/test.log
+[32m[61 / 66][0m 6 / 7 tests, [31m[1m4 failed[0m;[0m 5 actions running[0m; last test: [31m[1m//tb:rpt[0m
+    Testing //tb:rpt (run 1 of 2); 1s darwin-sandbox
+    Testing //tb:rpt (run 2 of 2); 1s darwin-sandbox
+    Testing //tb:sh (shard 2 of 3); 1s darwin-sandbox
+    Testing //tb:sh (shard 3 of 3); 1s darwin-sandbox
+    Testing //tb:sh (shard 1 of 3); 1s darwin-sandbox
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mFAIL: [0m//tb:sh (shard 2 of 3) (Exit 1) (see ${OUTPUT_BASE}/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/tb/sh/shard_2_of_3/test.log)
+[32m[63 / 66][0m 6 / 7 tests, [31m[1m4 failed[0m;[0m 3 actions running[0m; last test: [31m[1m//tb:rpt[0m
+    Testing //tb:sh (shard 2 of 3); 1s darwin-sandbox
+    Testing //tb:sh (shard 3 of 3); 1s darwin-sandbox
+    Testing //tb:sh (shard 1 of 3); 1s darwin-sandbox
+[1A[K[1A[K[1A[K[1A[K[32mINFO: [0mBuild succeeded for only 5 of 8 top-level targets
+[32m[66 / 66][0m 7 / 7 tests, [31m[1m5 failed[0m;[0m no actions running[0m; last test: [31m[1m//tb:sh[0m
+[1A[K[32mINFO: [0mFound 1 target and 7 test targets...
+[32m[66 / 66][0m 7 / 7 tests, [31m[1m5 failed[0m;[0m no actions running[0m; last test: [31m[1m//tb:sh[0m
+[1A[KUse --verbose_failures to see the command lines of failed build steps.
+[32m[66 / 66][0m 7 / 7 tests, [31m[1m5 failed[0m;[0m no actions running[0m; last test: [31m[1m//tb:sh[0m
+[1A[K[32mINFO: [0mElapsed time: 1.454s, Critical Path: 1.38s
+[32m[66 / 66][0m 7 / 7 tests, [31m[1m5 failed[0m;[0m no actions running[0m; last test: [31m[1m//tb:sh[0m
+[1A[K[32mINFO: [0m54 processes: 7 action cache hit, 36 internal, 22 darwin-sandbox, 6 local.
+[32m[66 / 66][0m 7 / 7 tests, [31m[1m5 failed[0m;[0m no actions running[0m; last test: [31m[1m//tb:sh[0m
+[1A[K[31m[1mERROR: [0mBuild did NOT complete successfully
+[31m[1mFAILED:[0m 
+[1A[K[31m[1mFAILED:[0m 
+[1A[K[31m[1mFAILED:[0m 
+[1A[K[31m[1mFAILED:[0m 
+[1A[K[31m[1mFAILED:[0m 
+[1A[K[31m[1mFAILED:[0m 
+[1A[K[31m[1mFAILED:[0m 
+[1A[K[31m[1mFAILED:[0m 
+[1A[K[31m[1mFAILED:[0m 
+[1A[K[31m[1mFAILED:[0m 
+[1A[K[31m[1mFAILED:[0m 
+[1A[K[31m[1mFAILED:[0m 
+[1A[K[31m[1mFAILED:[0m 
+[1A[K[31m[1mFAILED:[0m 
+[1A[K[31m[1mFAILED:[0m 
+[1A[K[31m[1mFAILED:[0m 
+[1A[K[31m[1mFAILED:[0m 
+[1A[K[32mINFO: [0mBuild Event Protocol files produced successfully.
+[0m

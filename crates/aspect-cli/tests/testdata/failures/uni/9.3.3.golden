@@ -1,0 +1,22 @@
+exit 1
+── Failures (3) ──
+✗ //uni:привет  Genrule · exit 3 · uni/BUILD.bazel:2:8
+  │ ошибка: всё сломалось ✗ 中文
+  log ${OUTPUT_BASE}/execroot/_main/bazel-out/_tmp/actions/stderr-3
+
+✗ //uni:café  Genrule · exit 2 · uni/BUILD.bazel:3:8
+  │ café broke
+  log ${OUTPUT_BASE}/execroot/_main/bazel-out/_tmp/actions/stderr-2
+
+✗ //uni:тест  test · failed 1 of 1 attempt
+  │ тест сломан
+  log ${OUTPUT_BASE}/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/uni/тест/test.log
+1 built, 2 failed · 0 tests passed, 1 failed · Bazel's raw log: ${FIXTURE}/9.3.3.console
+All of it: aspect history show t-replay
+--- Failures tab
+✗ //uni:привет  Genrule · exit 3 · uni/BUILD.bazel:2:8
+  │ ошибка: всё сломалось ✗ 中文
+✗ //uni:café  Genrule · exit 2 · uni/BUILD.bazel:3:8
+  │ café broke
+✗ //uni:тест  test · failed 1 of 1 attempt
+  │ тест сломан

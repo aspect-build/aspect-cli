@@ -1,0 +1,19 @@
+exit 36
+── Failures (3) ──
+✗ //uni:café  Genrule · exit 2 · uni/BUILD.bazel:3:8
+  │ café broke
+  log ${OUTPUT_BASE}/execroot/_main/bazel-out/_tmp/actions/stderr-9
+
+✗ //uni:привет  Genrule · exit 3 · uni/BUILD.bazel:2:8
+  │ ошибка: всё сломалось ✗ 中文
+  log ${OUTPUT_BASE}/execroot/_main/bazel-out/_tmp/actions/stderr-8
+
+✗ //uni:тест  TestRunner · exit -1 · uni/BUILD.bazel:4:8
+1 built, 3 failed · 0 tests passed, 0 failed, 1 skipped · Bazel's raw log: ${FIXTURE}/7.7.3.console
+All of it: aspect history show t-replay
+--- Failures tab
+✗ //uni:café  Genrule · exit 2 · uni/BUILD.bazel:3:8
+  │ café broke
+✗ //uni:привет  Genrule · exit 3 · uni/BUILD.bazel:2:8
+  │ ошибка: всё сломалось ✗ 中文
+✗ //uni:тест  TestRunner · exit -1 · uni/BUILD.bazel:4:8

@@ -1,0 +1,48 @@
+exit 1
+── Failures (5) ──
+✗ //tb:brk  Genrule · exit 7 · tb/BUILD.bazel:2:8
+  │ brk gen failed
+  log ${OUTPUT_BASE}/execroot/_main/bazel-out/_tmp/actions/stderr-9
+  ○ blocked: //tb:unbuilt
+
+✗ //tb:noc  CppCompile · exit 1 · tb/BUILD.bazel:5:8
+  │ tb/noc.cc:1:13: error: invalid use of 'this' outside of a non-static member function
+  │     1 | int main(){ this does not compile }
+  │       |             ^
+  │ 1 error generated.
+  log ${OUTPUT_BASE}/execroot/_main/bazel-out/_tmp/actions/stderr-49
+
+✗ //tb:bad  test · failed 1 of 1 attempt · 0.7s
+  │ FAIL: inner says fail
+  │ ERROR: inner error line
+  log ${OUTPUT_BASE}/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/tb/bad/test.log
+
+✗ //tb:rpt  test · run 1 of 2 · failed 1 of 1 attempt · 0.9s
+  │ FAIL: inner says fail
+  │ ERROR: inner error line
+  log ${OUTPUT_BASE}/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/tb/rpt/run_1_of_2/test.log
+  run 2 of 2 also failed · log ${OUTPUT_BASE}/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/tb/rpt/run_2_of_2/test.log
+
+✗ //tb:sh  test · shard 2 of 3 · failed 1 of 1 attempt · 1.1s
+  │ shard 1 fails
+  log ${OUTPUT_BASE}/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/tb/sh/shard_2_of_3/test.log
+5 built, 2 failed, 1 blocked · 1 test passed, 5 failed, 1 flaky · Bazel's raw log: ${FIXTURE}/7.7.3.console
+All of it: aspect history show t-replay
+--- Failures tab
+✗ //tb:brk  Genrule · exit 7 · tb/BUILD.bazel:2:8
+  │ brk gen failed
+✗ //tb:noc  CppCompile · exit 1 · tb/BUILD.bazel:5:8
+  │ tb/noc.cc:1:13: error: invalid use of 'this' outside of a non-static member function
+  │     1 | int main(){ this does not compile }
+  │       |             ^
+  │ 1 error generated.
+~ //tb:fl  test · failed 1 of 2 attempts · 0.3s · flaky, passed on a later attempt
+✗ //tb:bad  test · failed 1 of 1 attempt · 0.7s
+  │ FAIL: inner says fail
+  │ ERROR: inner error line
+✗ //tb:rpt  test · run 1 of 2 · failed 1 of 1 attempt · 0.9s
+  │ FAIL: inner says fail
+  │ ERROR: inner error line
+✗ //tb:sh  test · shard 2 of 3 · failed 1 of 1 attempt · 1.1s
+  │ shard 1 fails
+○ //tb:unbuilt  blocked by :brk

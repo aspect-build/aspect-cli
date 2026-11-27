@@ -1,0 +1,433 @@
+[32mComputing main repo mapping:[0m 
+[1A[K[32mLoading:[0m 
+[1A[K[32mLoading:[0m 0 packages loaded
+[1A[K[31m[1mERROR: [0m${WORKSPACE}/kgo/p00/BUILD.bazel:1:8: //kgo/p00:x: no such attribute 'bogus_attr_0' in 'genrule' rule
+[32mLoading:[0m 0 packages loaded
+[1A[K[31m[1mERROR: [0mpackage contains errors: kgo/p00
+[32mLoading:[0m 0 packages loaded
+[1A[K[31m[1mERROR: [0m${WORKSPACE}/kgo/p01/BUILD.bazel:1:8: //kgo/p01:x: no such attribute 'bogus_attr_1' in 'genrule' rule
+[32mLoading:[0m 0 packages loaded
+[1A[K[31m[1mERROR: [0mpackage contains errors: kgo/p01
+[32mLoading:[0m 0 packages loaded
+[1A[K[31m[1mERROR: [0m${WORKSPACE}/kgo/p02/BUILD.bazel:1:8: //kgo/p02:x: no such attribute 'bogus_attr_2' in 'genrule' rule
+[32mLoading:[0m 0 packages loaded
+[1A[K[31m[1mERROR: [0mpackage contains errors: kgo/p02
+[32mLoading:[0m 0 packages loaded
+[1A[K[31m[1mERROR: [0m${WORKSPACE}/kgo/p03/BUILD.bazel:1:8: //kgo/p03:x: no such attribute 'bogus_attr_3' in 'genrule' rule
+[32mLoading:[0m 0 packages loaded
+[1A[K[31m[1mERROR: [0mpackage contains errors: kgo/p03
+[32mLoading:[0m 0 packages loaded
+[1A[K[31m[1mERROR: [0m${WORKSPACE}/kgo/p04/BUILD.bazel:1:8: //kgo/p04:x: no such attribute 'bogus_attr_4' in 'genrule' rule
+[32mLoading:[0m 0 packages loaded
+[1A[K[31m[1mERROR: [0mpackage contains errors: kgo/p04
+[32mLoading:[0m 0 packages loaded
+[1A[K[31m[1mERROR: [0m${WORKSPACE}/kgo/p05/BUILD.bazel:1:8: //kgo/p05:x: no such attribute 'bogus_attr_5' in 'genrule' rule
+[32mLoading:[0m 0 packages loaded
+[1A[K[31m[1mERROR: [0mpackage contains errors: kgo/p05
+[32mLoading:[0m 0 packages loaded
+[1A[K[31m[1mERROR: [0m${WORKSPACE}/kgo/p06/BUILD.bazel:1:8: //kgo/p06:x: no such attribute 'bogus_attr_6' in 'genrule' rule
+[32mLoading:[0m 0 packages loaded
+[1A[K[31m[1mERROR: [0mpackage contains errors: kgo/p06
+[32mLoading:[0m 0 packages loaded
+[1A[K[31m[1mERROR: [0m${WORKSPACE}/kgo/p07/BUILD.bazel:1:8: //kgo/p07:x: no such attribute 'bogus_attr_7' in 'genrule' rule
+[32mLoading:[0m 0 packages loaded
+[1A[K[31m[1mERROR: [0mpackage contains errors: kgo/p07
+[32mLoading:[0m 0 packages loaded
+[1A[K[31m[1mERROR: [0m${WORKSPACE}/kgo/p08/BUILD.bazel:1:8: //kgo/p08:x: no such attribute 'bogus_attr_8' in 'genrule' rule
+[32mLoading:[0m 0 packages loaded
+[1A[K[31m[1mERROR: [0mpackage contains errors: kgo/p08
+[32mLoading:[0m 0 packages loaded
+[1A[K[31m[1mERROR: [0m${WORKSPACE}/kgo/p09/BUILD.bazel:1:8: //kgo/p09:x: no such attribute 'bogus_attr_9' in 'genrule' rule
+[32mLoading:[0m 0 packages loaded
+[1A[K[31m[1mERROR: [0mpackage contains errors: kgo/p09
+[32mLoading:[0m 0 packages loaded
+[1A[K[31m[1mERROR: [0m${WORKSPACE}/kgo/p10/BUILD.bazel:1:8: //kgo/p10:x: no such attribute 'bogus_attr_10' in 'genrule' rule
+[32mLoading:[0m 0 packages loaded
+[1A[K[31m[1mERROR: [0mpackage contains errors: kgo/p10
+[32mLoading:[0m 0 packages loaded
+[1A[K[31m[1mERROR: [0m${WORKSPACE}/kgo/p11/BUILD.bazel:1:8: //kgo/p11:x: no such attribute 'bogus_attr_11' in 'genrule' rule
+[32mLoading:[0m 0 packages loaded
+[1A[K[31m[1mERROR: [0mpackage contains errors: kgo/p11
+[32mLoading:[0m 0 packages loaded
+[1A[K[31m[1mERROR: [0mpackage contains errors: kgo/p00: //kgo/p00:x: no such attribute 'bogus_attr_0' in 'genrule' rule
+[32mLoading:[0m 0 packages loaded
+[1A[K[31m[1mERROR: [0mpackage contains errors: kgo/p01: //kgo/p01:x: no such attribute 'bogus_attr_1' in 'genrule' rule
+[32mLoading:[0m 0 packages loaded
+[1A[K[31m[1mERROR: [0mpackage contains errors: kgo/p02: //kgo/p02:x: no such attribute 'bogus_attr_2' in 'genrule' rule
+[32mLoading:[0m 0 packages loaded
+[1A[K[31m[1mERROR: [0mpackage contains errors: kgo/p03: //kgo/p03:x: no such attribute 'bogus_attr_3' in 'genrule' rule
+[32mLoading:[0m 0 packages loaded
+[1A[K[31m[1mERROR: [0mpackage contains errors: kgo/p04: //kgo/p04:x: no such attribute 'bogus_attr_4' in 'genrule' rule
+[32mLoading:[0m 0 packages loaded
+[1A[K[31m[1mERROR: [0mpackage contains errors: kgo/p05: //kgo/p05:x: no such attribute 'bogus_attr_5' in 'genrule' rule
+[32mLoading:[0m 0 packages loaded
+[1A[K[31m[1mERROR: [0mpackage contains errors: kgo/p06: //kgo/p06:x: no such attribute 'bogus_attr_6' in 'genrule' rule
+[32mLoading:[0m 0 packages loaded
+[1A[K[31m[1mERROR: [0mpackage contains errors: kgo/p07: //kgo/p07:x: no such attribute 'bogus_attr_7' in 'genrule' rule
+[32mLoading:[0m 0 packages loaded
+[1A[K[31m[1mERROR: [0mpackage contains errors: kgo/p08: //kgo/p08:x: no such attribute 'bogus_attr_8' in 'genrule' rule
+[32mLoading:[0m 0 packages loaded
+[1A[K[31m[1mERROR: [0mpackage contains errors: kgo/p09: //kgo/p09:x: no such attribute 'bogus_attr_9' in 'genrule' rule
+[32mLoading:[0m 0 packages loaded
+[1A[K[31m[1mERROR: [0mpackage contains errors: kgo/p10: //kgo/p10:x: no such attribute 'bogus_attr_10' in 'genrule' rule
+[32mLoading:[0m 0 packages loaded
+[1A[K[31m[1mERROR: [0mpackage contains errors: kgo/p11: //kgo/p11:x: no such attribute 'bogus_attr_11' in 'genrule' rule
+[32mLoading:[0m 0 packages loaded
+[1A[K[32mAnalyzing:[0m 37 targets (0 packages loaded, 0 targets configured)
+[1A[K[32mAnalyzing:[0m 37 targets (0 packages loaded, 0 targets configured)
+
+[1A[K[1A[K[32mINFO: [0mAnalyzed 37 targets (0 packages loaded, 0 targets configured).
+[32m[1 / 17][0m 16 actions running
+    Executing genrule //kg:f07; 0s darwin-sandbox
+    Executing genrule //kg:f11; 0s darwin-sandbox
+    Executing genrule //kg:f05; 0s darwin-sandbox
+    Executing genrule //kg:f06; 0s darwin-sandbox
+    Executing genrule //kg:f04; 0s darwin-sandbox
+    Executing genrule //kg:f02; 0s darwin-sandbox
+    Executing genrule //kg:f09; 0s darwin-sandbox
+    Executing genrule //kg:f10; 0s darwin-sandbox ...
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/kg/BUILD.bazel:6:8: Executing genrule //kg:f05 failed: (Exit 6): bash failed: error executing Genrule command (from genrule rule target //kg:f05) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo '\''failure 5 here'\'' >&2; exit 6'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+failure 5 here
+[32m[1 / 17][0m 16 actions running
+    Executing genrule //kg:f07; 0s darwin-sandbox
+    Executing genrule //kg:f11; 0s darwin-sandbox
+    Executing genrule //kg:f05; 0s darwin-sandbox
+    Executing genrule //kg:f06; 0s darwin-sandbox
+    Executing genrule //kg:f04; 0s darwin-sandbox
+    Executing genrule //kg:f02; 0s darwin-sandbox
+    Executing genrule //kg:f09; 0s darwin-sandbox
+    Executing genrule //kg:f10; 0s darwin-sandbox ...
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/kg/BUILD.bazel:13:8: Executing genrule //kg:f12 failed: (Exit 6): bash failed: error executing Genrule command (from genrule rule target //kg:f12) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo '\''failure 12 here'\'' >&2; exit 6'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+failure 12 here
+[32m[2 / 18][0m 16 actions running
+    Executing genrule //kg:f07; 0s darwin-sandbox
+    Executing genrule //kg:f11; 0s darwin-sandbox
+    Executing genrule //kg:f06; 0s darwin-sandbox
+    Executing genrule //kg:f04; 0s darwin-sandbox
+    Executing genrule //kg:f02; 0s darwin-sandbox
+    Executing genrule //kg:f09; 0s darwin-sandbox
+    Executing genrule //kg:f10; 0s darwin-sandbox
+    Executing genrule //kg:f12; 0s darwin-sandbox ...
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/kg/BUILD.bazel:7:8: Executing genrule //kg:f06 failed: (Exit 7): bash failed: error executing Genrule command (from genrule rule target //kg:f06) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo '\''failure 6 here'\'' >&2; exit 7'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+failure 6 here
+[32m[3 / 19][0m 16 actions running
+    Executing genrule //kg:f07; 0s darwin-sandbox
+    Executing genrule //kg:f11; 0s darwin-sandbox
+    Executing genrule //kg:f06; 0s darwin-sandbox
+    Executing genrule //kg:f04; 0s darwin-sandbox
+    Executing genrule //kg:f02; 0s darwin-sandbox
+    Executing genrule //kg:f09; 0s darwin-sandbox
+    Executing genrule //kg:f10; 0s darwin-sandbox
+    Executing genrule //kg:f14; 0s darwin-sandbox ...
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/kg/BUILD.bazel:4:8: Executing genrule //kg:f03 failed: (Exit 4): bash failed: error executing Genrule command (from genrule rule target //kg:f03) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo '\''failure 3 here'\'' >&2; exit 4'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+failure 3 here
+[32m[4 / 20][0m 16 actions running
+    Executing genrule //kg:f07; 0s darwin-sandbox
+    Executing genrule //kg:f11; 0s darwin-sandbox
+    Executing genrule //kg:f04; 0s darwin-sandbox
+    Executing genrule //kg:f02; 0s darwin-sandbox
+    Executing genrule //kg:f09; 0s darwin-sandbox
+    Executing genrule //kg:f10; 0s darwin-sandbox
+    Executing genrule //kg:f14; 0s darwin-sandbox
+    Executing genrule //kg:f24; 0s darwin-sandbox ...
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/kg/BUILD.bazel:12:8: Executing genrule //kg:f11 failed: (Exit 5): bash failed: error executing Genrule command (from genrule rule target //kg:f11) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo '\''failure 11 here'\'' >&2; exit 5'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+failure 11 here
+[32m[5 / 21][0m 16 actions running
+    Executing genrule //kg:f07; 0s darwin-sandbox
+    Executing genrule //kg:f11; 0s darwin-sandbox
+    Executing genrule //kg:f04; 0s darwin-sandbox
+    Executing genrule //kg:f02; 0s darwin-sandbox
+    Executing genrule //kg:f09; 0s darwin-sandbox
+    Executing genrule //kg:f10; 0s darwin-sandbox
+    Executing genrule //kg:f14; 0s darwin-sandbox
+    Executing genrule //kg:f24; 0s darwin-sandbox ...
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/kg/BUILD.bazel:11:8: Executing genrule //kg:f10 failed: (Exit 4): bash failed: error executing Genrule command (from genrule rule target //kg:f10) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo '\''failure 10 here'\'' >&2; exit 4'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+failure 10 here
+[32m[6 / 22][0m 16 actions running
+    Executing genrule //kg:f07; 0s darwin-sandbox
+    Executing genrule //kg:f04; 0s darwin-sandbox
+    Executing genrule //kg:f02; 0s darwin-sandbox
+    Executing genrule //kg:f09; 0s darwin-sandbox
+    Executing genrule //kg:f10; 0s darwin-sandbox
+    Executing genrule //kg:f14; 0s darwin-sandbox
+    Executing genrule //kg:f24; 0s darwin-sandbox
+    Executing genrule //kg:f01; 0s darwin-sandbox ...
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/kg/BUILD.bazel:5:8: Executing genrule //kg:f04 failed: (Exit 5): bash failed: error executing Genrule command (from genrule rule target //kg:f04) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo '\''failure 4 here'\'' >&2; exit 5'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+failure 4 here
+[32m[7 / 23][0m 16 actions running
+    Executing genrule //kg:f07; 0s darwin-sandbox
+    Executing genrule //kg:f04; 0s darwin-sandbox
+    Executing genrule //kg:f02; 0s darwin-sandbox
+    Executing genrule //kg:f09; 0s darwin-sandbox
+    Executing genrule //kg:f14; 0s darwin-sandbox
+    Executing genrule //kg:f24; 0s darwin-sandbox
+    Executing genrule //kg:f01; 0s darwin-sandbox
+    Executing genrule //kg:f00; 0s darwin-sandbox ...
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/kg/BUILD.bazel:9:8: Executing genrule //kg:f08 failed: (Exit 2): bash failed: error executing Genrule command (from genrule rule target //kg:f08) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo '\''failure 8 here'\'' >&2; exit 2'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+failure 8 here
+[32m[8 / 24][0m 16 actions running
+    Executing genrule //kg:f07; 0s darwin-sandbox
+    Executing genrule //kg:f02; 0s darwin-sandbox
+    Executing genrule //kg:f09; 0s darwin-sandbox
+    Executing genrule //kg:f14; 0s darwin-sandbox
+    Executing genrule //kg:f24; 0s darwin-sandbox
+    Executing genrule //kg:f01; 0s darwin-sandbox
+    Executing genrule //kg:f00; 0s darwin-sandbox
+    Executing genrule //kg:f08; 0s darwin-sandbox ...
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/kg/BUILD.bazel:8:8: Executing genrule //kg:f07 failed: (Exit 1): bash failed: error executing Genrule command (from genrule rule target //kg:f07) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo '\''failure 7 here'\'' >&2; exit 1'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+failure 7 here
+[32m[9 / 25][0m 16 actions running
+    Executing genrule //kg:f07; 0s darwin-sandbox
+    Executing genrule //kg:f02; 0s darwin-sandbox
+    Executing genrule //kg:f09; 0s darwin-sandbox
+    Executing genrule //kg:f14; 0s darwin-sandbox
+    Executing genrule //kg:f24; 0s darwin-sandbox
+    Executing genrule //kg:f01; 0s darwin-sandbox
+    Executing genrule //kg:f00; 0s darwin-sandbox
+    Executing genrule //kg:f13; 0s darwin-sandbox ...
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/kg/BUILD.bazel:10:8: Executing genrule //kg:f09 failed: (Exit 3): bash failed: error executing Genrule command (from genrule rule target //kg:f09) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo '\''failure 9 here'\'' >&2; exit 3'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+failure 9 here
+[32m[10 / 26][0m 16 actions running
+    Executing genrule //kg:f02; 0s darwin-sandbox
+    Executing genrule //kg:f09; 0s darwin-sandbox
+    Executing genrule //kg:f14; 0s darwin-sandbox
+    Executing genrule //kg:f24; 0s darwin-sandbox
+    Executing genrule //kg:f01; 0s darwin-sandbox
+    Executing genrule //kg:f00; 0s darwin-sandbox
+    Executing genrule //kg:f13; 0s darwin-sandbox
+    Executing genrule //kg:f16; 0s darwin-sandbox ...
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/kg/BUILD.bazel:3:8: Executing genrule //kg:f02 failed: (Exit 3): bash failed: error executing Genrule command (from genrule rule target //kg:f02) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo '\''failure 2 here'\'' >&2; exit 3'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+failure 2 here
+[32m[11 / 26][0m 15 actions running
+    Executing genrule //kg:f02; 0s darwin-sandbox
+    Executing genrule //kg:f14; 0s darwin-sandbox
+    Executing genrule //kg:f24; 0s darwin-sandbox
+    Executing genrule //kg:f01; 0s darwin-sandbox
+    Executing genrule //kg:f00; 0s darwin-sandbox
+    Executing genrule //kg:f13; 0s darwin-sandbox
+    Executing genrule //kg:f16; 0s darwin-sandbox
+    Executing genrule //kg:f23; 0s darwin-sandbox ...
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/kg/BUILD.bazel:14:8: Executing genrule //kg:f13 failed: (Exit 7): bash failed: error executing Genrule command (from genrule rule target //kg:f13) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo '\''failure 13 here'\'' >&2; exit 7'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+failure 13 here
+[32m[12 / 26][0m 14 actions running
+    Executing genrule //kg:f14; 0s darwin-sandbox
+    Executing genrule //kg:f24; 0s darwin-sandbox
+    Executing genrule //kg:f01; 0s darwin-sandbox
+    Executing genrule //kg:f00; 0s darwin-sandbox
+    Executing genrule //kg:f13; 0s darwin-sandbox
+    Executing genrule //kg:f16; 0s darwin-sandbox
+    Executing genrule //kg:f23; 0s darwin-sandbox
+    Executing genrule //kg:f19; 0s darwin-sandbox ...
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/kg/BUILD.bazel:15:8: Executing genrule //kg:f14 failed: (Exit 1): bash failed: error executing Genrule command (from genrule rule target //kg:f14) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo '\''failure 14 here'\'' >&2; exit 1'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+failure 14 here
+[32m[13 / 26][0m 13 actions running
+    Executing genrule //kg:f14; 0s darwin-sandbox
+    Executing genrule //kg:f24; 0s darwin-sandbox
+    Executing genrule //kg:f01; 0s darwin-sandbox
+    Executing genrule //kg:f00; 0s darwin-sandbox
+    Executing genrule //kg:f16; 0s darwin-sandbox
+    Executing genrule //kg:f23; 0s darwin-sandbox
+    Executing genrule //kg:f19; 0s darwin-sandbox
+    Executing genrule //kg:f22; 0s darwin-sandbox ...
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/kg/BUILD.bazel:25:8: Executing genrule //kg:f24 failed: (Exit 4): bash failed: error executing Genrule command (from genrule rule target //kg:f24) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo '\''failure 24 here'\'' >&2; exit 4'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+failure 24 here
+[32m[14 / 26][0m 12 actions running
+    Executing genrule //kg:f24; 0s darwin-sandbox
+    Executing genrule //kg:f01; 0s darwin-sandbox
+    Executing genrule //kg:f00; 0s darwin-sandbox
+    Executing genrule //kg:f16; 0s darwin-sandbox
+    Executing genrule //kg:f23; 0s darwin-sandbox
+    Executing genrule //kg:f19; 0s darwin-sandbox
+    Executing genrule //kg:f22; 0s darwin-sandbox
+    Executing genrule //kg:f18; 0s darwin-sandbox ...
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/kg/BUILD.bazel:1:8: Executing genrule //kg:f00 failed: (Exit 1): bash failed: error executing Genrule command (from genrule rule target //kg:f00) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo '\''failure 0 here'\'' >&2; exit 1'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+failure 0 here
+[32m[15 / 26][0m 11 actions running
+    Executing genrule //kg:f01; 0s darwin-sandbox
+    Executing genrule //kg:f00; 0s darwin-sandbox
+    Executing genrule //kg:f16; 0s darwin-sandbox
+    Executing genrule //kg:f23; 0s darwin-sandbox
+    Executing genrule //kg:f19; 0s darwin-sandbox
+    Executing genrule //kg:f22; 0s darwin-sandbox
+    Executing genrule //kg:f18; 0s darwin-sandbox
+    Executing genrule //kg:f21; 0s darwin-sandbox ...
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/kg/BUILD.bazel:2:8: Executing genrule //kg:f01 failed: (Exit 2): bash failed: error executing Genrule command (from genrule rule target //kg:f01) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo '\''failure 1 here'\'' >&2; exit 2'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+failure 1 here
+[32m[16 / 26][0m 10 actions running
+    Executing genrule //kg:f01; 0s darwin-sandbox
+    Executing genrule //kg:f16; 0s darwin-sandbox
+    Executing genrule //kg:f23; 0s darwin-sandbox
+    Executing genrule //kg:f19; 0s darwin-sandbox
+    Executing genrule //kg:f22; 0s darwin-sandbox
+    Executing genrule //kg:f18; 0s darwin-sandbox
+    Executing genrule //kg:f21; 0s darwin-sandbox
+    Executing genrule //kg:f20; 0s darwin-sandbox ...
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/kg/BUILD.bazel:17:8: Executing genrule //kg:f16 failed: (Exit 3): bash failed: error executing Genrule command (from genrule rule target //kg:f16) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo '\''failure 16 here'\'' >&2; exit 3'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+failure 16 here
+[32m[17 / 26][0m 9 actions running
+    Executing genrule //kg:f16; 0s darwin-sandbox
+    Executing genrule //kg:f23; 0s darwin-sandbox
+    Executing genrule //kg:f19; 0s darwin-sandbox
+    Executing genrule //kg:f22; 0s darwin-sandbox
+    Executing genrule //kg:f18; 0s darwin-sandbox
+    Executing genrule //kg:f21; 0s darwin-sandbox
+    Executing genrule //kg:f20; 0s darwin-sandbox
+    Executing genrule //kg:f15; 0s darwin-sandbox ...
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/kg/BUILD.bazel:24:8: Executing genrule //kg:f23 failed: (Exit 3): bash failed: error executing Genrule command (from genrule rule target //kg:f23) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo '\''failure 23 here'\'' >&2; exit 3'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+failure 23 here
+[32m[18 / 26][0m 8 actions running
+    Executing genrule //kg:f23; 0s darwin-sandbox
+    Executing genrule //kg:f19; 0s darwin-sandbox
+    Executing genrule //kg:f22; 0s darwin-sandbox
+    Executing genrule //kg:f18; 0s darwin-sandbox
+    Executing genrule //kg:f21; 0s darwin-sandbox
+    Executing genrule //kg:f20; 0s darwin-sandbox
+    Executing genrule //kg:f15; 0s darwin-sandbox
+    Executing genrule //kg:f17; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/kg/BUILD.bazel:20:8: Executing genrule //kg:f19 failed: (Exit 6): bash failed: error executing Genrule command (from genrule rule target //kg:f19) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo '\''failure 19 here'\'' >&2; exit 6'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+failure 19 here
+[32m[19 / 26][0m 7 actions running
+    Executing genrule //kg:f19; 0s darwin-sandbox
+    Executing genrule //kg:f22; 0s darwin-sandbox
+    Executing genrule //kg:f18; 0s darwin-sandbox
+    Executing genrule //kg:f21; 0s darwin-sandbox
+    Executing genrule //kg:f20; 0s darwin-sandbox
+    Executing genrule //kg:f15; 0s darwin-sandbox
+    Executing genrule //kg:f17; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/kg/BUILD.bazel:23:8: Executing genrule //kg:f22 failed: (Exit 2): bash failed: error executing Genrule command (from genrule rule target //kg:f22) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo '\''failure 22 here'\'' >&2; exit 2'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+failure 22 here
+[32m[20 / 26][0m 6 actions running
+    Executing genrule //kg:f22; 0s darwin-sandbox
+    Executing genrule //kg:f18; 0s darwin-sandbox
+    Executing genrule //kg:f21; 0s darwin-sandbox
+    Executing genrule //kg:f20; 0s darwin-sandbox
+    Executing genrule //kg:f15; 0s darwin-sandbox
+    Executing genrule //kg:f17; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/kg/BUILD.bazel:19:8: Executing genrule //kg:f18 failed: (Exit 5): bash failed: error executing Genrule command (from genrule rule target //kg:f18) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo '\''failure 18 here'\'' >&2; exit 5'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+failure 18 here
+[32m[21 / 26][0m 5 actions running
+    Executing genrule //kg:f18; 0s darwin-sandbox
+    Executing genrule //kg:f21; 0s darwin-sandbox
+    Executing genrule //kg:f20; 0s darwin-sandbox
+    Executing genrule //kg:f15; 0s darwin-sandbox
+    Executing genrule //kg:f17; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/kg/BUILD.bazel:22:8: Executing genrule //kg:f21 failed: (Exit 1): bash failed: error executing Genrule command (from genrule rule target //kg:f21) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo '\''failure 21 here'\'' >&2; exit 1'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+failure 21 here
+[32m[22 / 26][0m 4 actions running
+    Executing genrule //kg:f21; 0s darwin-sandbox
+    Executing genrule //kg:f20; 0s darwin-sandbox
+    Executing genrule //kg:f15; 0s darwin-sandbox
+    Executing genrule //kg:f17; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/kg/BUILD.bazel:21:8: Executing genrule //kg:f20 failed: (Exit 7): bash failed: error executing Genrule command (from genrule rule target //kg:f20) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo '\''failure 20 here'\'' >&2; exit 7'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+failure 20 here
+[32m[23 / 26][0m 3 actions running
+    Executing genrule //kg:f20; 0s darwin-sandbox
+    Executing genrule //kg:f15; 0s darwin-sandbox
+    Executing genrule //kg:f17; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/kg/BUILD.bazel:16:8: Executing genrule //kg:f15 failed: (Exit 2): bash failed: error executing Genrule command (from genrule rule target //kg:f15) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo '\''failure 15 here'\'' >&2; exit 2'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+failure 15 here
+[32m[24 / 26][0m 2 actions running
+    Executing genrule //kg:f15; 0s darwin-sandbox
+    Executing genrule //kg:f17; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/kg/BUILD.bazel:18:8: Executing genrule //kg:f17 failed: (Exit 4): bash failed: error executing Genrule command (from genrule rule target //kg:f17) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo '\''failure 17 here'\'' >&2; exit 4'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+failure 17 here
+[32m[25 / 26][0m Executing genrule //kg:f17; 0s darwin-sandbox
+[1A[K[35mWARNING: [0merrors encountered while analyzing target '//kgo/p10:x', it will not be built.
+Analysis failed
+[32m[26 / 26][0m no actions running
+[1A[K[35mWARNING: [0merrors encountered while analyzing target '//kgo/p02:x', it will not be built.
+Analysis failed
+[32m[26 / 26][0m no actions running
+[1A[K[35mWARNING: [0merrors encountered while analyzing target '//kgo/p07:x', it will not be built.
+Analysis failed
+[32m[26 / 26][0m no actions running
+[1A[K[35mWARNING: [0merrors encountered while analyzing target '//kgo/p11:x', it will not be built.
+Analysis failed
+[32m[26 / 26][0m no actions running
+[1A[K[35mWARNING: [0merrors encountered while analyzing target '//kgo/p05:x', it will not be built.
+Analysis failed
+[32m[26 / 26][0m no actions running
+[1A[K[35mWARNING: [0merrors encountered while analyzing target '//kgo/p01:x', it will not be built.
+Analysis failed
+[32m[26 / 26][0m no actions running
+[1A[K[35mWARNING: [0merrors encountered while analyzing target '//kgo/p06:x', it will not be built.
+Analysis failed
+[32m[26 / 26][0m no actions running
+[1A[K[35mWARNING: [0merrors encountered while analyzing target '//kgo/p04:x', it will not be built.
+Analysis failed
+[32m[26 / 26][0m no actions running
+[1A[K[35mWARNING: [0merrors encountered while analyzing target '//kgo/p09:x', it will not be built.
+Analysis failed
+[32m[26 / 26][0m no actions running
+[1A[K[35mWARNING: [0merrors encountered while analyzing target '//kgo/p00:x', it will not be built.
+Analysis failed
+[32m[26 / 26][0m no actions running
+[1A[K[35mWARNING: [0merrors encountered while analyzing target '//kgo/p03:x', it will not be built.
+Analysis failed
+[32m[26 / 26][0m no actions running
+[1A[K[35mWARNING: [0merrors encountered while analyzing target '//kgo/p08:x', it will not be built.
+Analysis failed
+[32m[26 / 26][0m no actions running
+[1A[K[32mINFO: [0mFound 25 targets...
+[32m[26 / 26][0m no actions running
+[1A[KUse --verbose_failures to see the command lines of failed build steps.
+[32m[26 / 26][0m no actions running
+[1A[K[32mINFO: [0mElapsed time: 0.130s, Critical Path: 0.06s
+[32m[26 / 26][0m no actions running
+[1A[K[32mINFO: [0m26 processes: 26 internal.
+[32m[26 / 26][0m no actions running
+[1A[K[31m[1mERROR: [0mBuild did NOT complete successfully
+[31m[1mFAILED:[0m 
+[1A[K[31m[1mFAILED:[0m 
+[1A[K[32mINFO: [0mBuild Event Protocol files produced successfully.
+[0m

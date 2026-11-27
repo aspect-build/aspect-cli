@@ -1,0 +1,4 @@
+load("@rules_cc//cc:defs.bzl", "cc_test")
+genrule(name = "привет", outs = ["p.txt"], cmd = "echo 'ошибка: всё сломалось ✗ 中文' >&2; exit 3")
+genrule(name = "café", outs = ["c.txt"], cmd = "echo 'café broke' >&2; exit 2")
+cc_test(name = "тест", srcs = ["t.cc"])
