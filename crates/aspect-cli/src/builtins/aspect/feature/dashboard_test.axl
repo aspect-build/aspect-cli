@@ -78,7 +78,6 @@ test_progress = dashboard_actions.test_progress
 tests_cached_text = dashboard_actions.tests_cached_text
 tests_text = dashboard_actions.tests_text
 add_lines = dashboard_log.add_lines
-classify = dashboard_log.classify
 console_lines = dashboard_log.console_lines
 new_search = dashboard_log.new_search
 paste_text = dashboard_log.paste_text
@@ -86,7 +85,6 @@ replay_lines = dashboard_log.replay_lines
 report_lines = dashboard_log.report_lines
 say_note = dashboard_log.say_note
 _shows = dashboard_log.shows
-severity = dashboard_log.severity
 shown_lines = dashboard_log.shown_lines
 crumbs = dashboard_view.crumbs
 fit_logs = dashboard_view.fit_logs
@@ -327,9 +325,7 @@ def _impl(ctx: TaskContext) -> int:
     _eq("half shown: half the height", len([r for r in scrollbar(20, 10, 5) if r.find("┃") >= 0]), 5)
     _eq("status counts", progress_counts("[5,619 / 13,381] 15 actions running"), (5619, 13381))
     _eq("no status", progress_counts("Analyzing: 3 targets"), None)
-    _eq("error", severity("ERROR: x failed"), "error")
-    _eq("warning", severity("WARNING: y"), "warning")
-    _eq("plain", severity("INFO: z"), "")
+    _eq("kinds as the feed reads them", bazel.output.line_kinds(["ERROR: x failed", "WARNING: y", "INFO: z"])["kinds"], ["error", "warning", ""])
     _eq("seconds", elapsed(12500), "12s")
     _eq("minutes", elapsed(62000), "1m02s")
     state = {
@@ -365,7 +361,7 @@ def _impl(ctx: TaskContext) -> int:
     if "INFO: one" in render(state, 100, 30) or "errors only" not in render(state, 100, 30):
         fail("render: errors only still shows INFO, or its title is missing")
     for filter, want in [("all", [True, True, True]), ("warnings", [False, True, True]), ("errors", [False, False, True])]:
-        _eq("shown by " + filter, [_shows(filter, severity(l)) for l in ["INFO: x", "WARNING: y", "ERROR: z"]], want)
+        _eq("shown by " + filter, [_shows(filter, k) for k in ["", "warning", "error"]], want)
     aspect_url = "https://app.example.com/i/sink-1"
     bes_url = "https://bes.example.com/invocation/uuid-1"
     state["pages"] = [(ASPECT_PAGE, aspect_url), (BES_PAGE, bes_url)]
@@ -1265,15 +1261,11 @@ def _impl(ctx: TaskContext) -> int:
 
     # Bazel's lines as they come: indented, timestamped, a test summary's,
     # and a tool's under its action's ERROR.
-    _eq("indented", severity("  ERROR: //a:b failed"), "error")
-    _eq("timed out", severity("TIMEOUT: //t:x (Summary)"), "error")
-    _eq("a test summary's timeout", severity("//t:x    TIMEOUT in 4.0s"), "error")
-    _eq("timestamped", severity("(23:04:25) ERROR: //a:b failed"), "error")
+    _eq("indented, timed out, a test summary's timeout, timestamped", bazel.output.line_kinds(["  ERROR: //a:b failed", "TIMEOUT: //t:x (Summary)", "//t:x    TIMEOUT in 4.0s", "(23:04:25) ERROR: //a:b failed"])["kinds"], ["error"] * 4)
     _eq("the timestamp gone", bazel_line("(23:04:25.123) INFO: x"), "INFO: x")
     _eq("not a timestamp", bazel_line("(see a.cc) x"), "(see a.cc) x")
-    kinds, block = classify(["ERROR: a.cc:1: compile failed", "a.cc:1:2: error: no x", "  1 | x", "INFO: From y:", "y said", "WARNING: z", "z more"])
-    _eq("a diagnostic is its ERROR's", (kinds, block), (["error", "error", "error", "", "", "warning", ""], ""))
-    _eq("carried to the next lines", classify(["more"], "error")[0], ["error"])
+    _eq("a diagnostic is its ERROR's", bazel.output.line_kinds(["ERROR: a.cc:1: compile failed", "a.cc:1:2: error: no x", "  1 | x", "INFO: From y:", "y said", "WARNING: z", "z more"])["kinds"], ["error", "error", "error", "", "", "warning", ""])
+    _eq("a tool's INFO: is its own, Bazel's not", bazel.output.line_kinds(["INFO: x", "INFO: y"], colours = ["\x1b[32mINFO: \x1b[0mx", "\x1b[32mINFO:\x1b[0m y"])["bazel"], [True, False])
     _eq("timestamped progress", (progress_counts("(23:04:25) [5 / 10] x"), cache_hits("(23:04:25) INFO: 4 processes: 3 remote cache hit, 1 internal.")), ((5, 10), (3, 3)))
     diag = _screen(ctx, [], filter = "errors")
     add_lines(diag, ["INFO: x", "ERROR: a.cc failed", "a.cc:1: error: no x", "INFO: done"])
@@ -2149,7 +2141,7 @@ def _impl(ctx: TaskContext) -> int:
 
     # A tool's own WARNING: line in its output is its line alone; the lines
     # under an action's ERROR: are errors.
-    kinds, _ = classify(["INFO: From Executing genrule //a:s:", "WARNING: step 0 is slow", "working 1", "ERROR: a/BUILD:1:1: Executing genrule //a:b failed: (Exit 1)", "src/a.cc:3: error: nope", "INFO: Found 1 target..."])
+    kinds = bazel.output.line_kinds(["INFO: From Executing genrule //a:s:", "WARNING: step 0 is slow", "working 1", "ERROR: a/BUILD:1:1: Executing genrule //a:b failed: (Exit 1)", "src/a.cc:3: error: nope", "INFO: Found 1 target..."])["kinds"]
     _eq("kinds", kinds, ["", "warning", "", "error", "error", ""])
 
     # A wrapped link lights whole: every row of it.

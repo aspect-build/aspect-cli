@@ -62,7 +62,6 @@ _FILTER_TITLES = dashboard_log.FILTER_TITLES
 _piece_links = dashboard_log.piece_links
 _search_bar = dashboard_log.search_bar
 folding = dashboard_log.folding
-severity = dashboard_log.severity
 shown_lines = dashboard_log.shown_lines
 _BUILD_TABS = dashboard_view.BUILD_TABS
 _listed_position = dashboard_view.listed_position
@@ -756,7 +755,6 @@ def render(state: dict, cols: int, rows: int) -> str:
             drawn.append((line, (colour_current if start + i == current else colour)(line), start + i == current, links, False))
             drawn_at.append(start + i)
             continue
-        kind = severity(line)
         if start + i == jumped:
             first_row = len(drawn)
         for j, (piece, at) in enumerate(wrap_line(line, body_w)):

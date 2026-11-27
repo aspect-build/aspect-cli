@@ -37,11 +37,6 @@ _BAZEL = struct(
     server_died = "Server terminated abruptly",
 )
 
-# What starts a line of Bazel's own: a line that starts none, a tool's
-# (a compiler's diagnostic under an `ERROR:`), takes the kind of the one
-# it follows (`classify`).
-_HEADERS = ["INFO:", "WARNING:", "ERROR:", "DEBUG:", "FAIL:", "TIMEOUT:", "Target ", "Loading:", "Analyzing:", "Executed ", "Build ", "//", "@", "["]
-
 def _bazel_headers(state: dict, blocks: list, bounds: list, text: str) -> list:
     """Bazel's `ERROR:` lines, in order: the first line of each kept block
     that is one, as the collector read it (`location`, `message`,
@@ -609,6 +604,5 @@ def _other_errors(state: dict, headers: list, claimed: dict, spans: list) -> lis
 failure_ties = namespace(
     BAZEL = _BAZEL,
     console_ties = console_ties,
-    HEADERS = _HEADERS,
     status_word = _status_word,
 )

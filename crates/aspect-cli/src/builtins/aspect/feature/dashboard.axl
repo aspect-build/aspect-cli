@@ -98,7 +98,7 @@ def attempt_state(now_ms: int) -> dict:
         hover = None,
         select = None,
         kinds = [],
-        block = "",
+        own = [],
         closing = [],
         closing_tail = [],
         closing_cut = 0,
@@ -254,8 +254,8 @@ def new_state(**fields) -> dict:
     state.update(fields)
     return state
 
-def _add_lines(state: dict, lines, links = None, colours = None, cli = False):
-    add_lines(state, lines, links, colours, cli)
+def _add_lines(state: dict, lines, links = None, colours = None, kinds = None, own = None, cli = False):
+    add_lines(state, lines, links, colours, kinds, own, cli)
 
 def _keys_and_draw(state: dict, screen):
     """Every key waiting, then one frame: a burst of wheel or drag
@@ -380,7 +380,7 @@ def _frame(state: dict, task_ctx, build):
     screen = state["screen"]
     state["now_ms"] = now
     state["frames"] += 1
-    _add_lines(state, feed["lines"], feed.get("links"), feed.get("colours"))
+    _add_lines(state, feed["lines"], feed.get("links"), feed.get("colours"), feed.get("kinds"), feed.get("bazel"))
     state["dropped"] = state.get("dropped", 0) + (feed.get("dropped", 0) or 0)
 
     # A frame that caught Bazel between drawing its progress area and

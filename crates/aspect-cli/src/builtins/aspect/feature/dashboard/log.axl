@@ -4,7 +4,6 @@
 
 load("@aspect//feature/dashboard/actions.axl", "dashboard_actions")
 load("../../private/lib/failure_records.axl", "failure_records")
-load("../../private/lib/failure_ties.axl", "failure_ties")
 load("../../private/lib/failures.axl", "failures")
 load("../../private/lib/results_pages.axl", "results_pages")
 load("../../private/lib/term_text.axl", "term_text")
@@ -22,7 +21,6 @@ wrap_line = term_text.wrap_line
 _flaky = failure_records.flaky
 _log_path = failure_records.log_path
 bazel_line = failure_records.bazel_line
-_HEADERS = failure_ties.HEADERS
 _MAX_FLAKY_LISTED = failures.MAX_FLAKY_LISTED
 failure_detail = failures.failure_detail
 failure_summary = failures.failure_summary
@@ -222,10 +220,11 @@ def paste_text(key: str) -> str:
 
 def console_lines(state: dict, log: list, kinds = None) -> list:
     """The console's lines `state` shows: by its `e` filter, by `kinds`
-    (`classify`'s, of `log`, worked out when not given), then its search
+    (each line's, as the feed gives them; for lines of no feed, a log's,
+    read as it reads its own, `bazel.output.line_kinds`), then its search
     when that filters (a search that jumps shows every line)."""
     if state["filter"] != "all":
-        kinds = kinds if kinds != None and len(kinds) == len(log) else classify(log)[0]
+        kinds = kinds if kinds != None and len(kinds) == len(log) else bazel.output.line_kinds(log)["kinds"]
         log = [l for l, k in zip(log, kinds) if _shows(state["filter"], k)]
     search = state["search"]
     return search["pattern"].filter(log) if search["pattern"] != None and search["mode"] == "filter" else log
@@ -314,47 +313,6 @@ def _search_bar(search: dict, matches: int, cols: int) -> str:
         (_c("error") + found + _RESET if search["error"] else found) + _c("muted") + hints + _RESET
     )
 
-def severity(line: str) -> str:
-    """`error`, `warning` or `` for a console line by itself: Bazel's
-    `ERROR:`, `FAIL:` and `TIMEOUT:` (indented too, as the console's recap
-    of the errors lists them), a test summary's `FAILED`, `TIMEOUT` and
-    `FAILED TO BUILD`, and its `WARNING:`; with or without the timestamp
-    `--show_timestamps` puts before it."""
-    line = bazel_line(line).lstrip(" ")
-    for head in ("ERROR:", "FAIL:", "TIMEOUT:"):
-        if line.startswith(head):
-            return "error"
-    if " FAILED " in line or line.endswith(" FAILED") or " TIMEOUT " in line or " FAILED TO BUILD" in line:
-        return "error"
-    if line.startswith("WARNING:"):
-        return "warning"
-    return ""
-
-def _starts_block(line: str) -> bool:
-    line = bazel_line(line).lstrip(" ")
-    for head in _HEADERS:
-        if line.startswith(head):
-            return True
-    return False
-
-def classify(lines: list, block = "") -> tuple:
-    """Each of `lines`' kind (`severity`), the lines after an `ERROR:`
-    taking its kind until another line of Bazel's own, so a compiler's
-    diagnostic under its action's `ERROR:` is an error too; a `WARNING:`
-    (Bazel's are one line, a tool's own among its output, `INFO: From`'s)
-    is its line alone; and the kind the last line leaves for the next, from
-    `block`, the one the lines before them left."""
-    kinds = []
-    for line in lines:
-        kind = severity(line)
-        if _starts_block(line):
-            plain = bazel_line(line).lstrip(" ")
-            block = kind if plain.startswith("ERROR:") else ""
-        elif not kind:
-            kind = block
-        kinds.append(kind)
-    return kinds, block
-
 def _shows(filter: str, kind: str) -> bool:
     return filter == "all" or kind == "error" or (kind == "warning" and filter == "warnings")
 
@@ -391,33 +349,15 @@ def _folded_line(state: dict, n: int) -> str:
     how = "click or Ctrl+O shows them" if state.get("mouse") else "Ctrl+O shows them"
     return "  … +%d line%s (%s)" % (n, "" if n == 1 else "s", how)
 
-def _tools_own(coloured) -> bool:
-    """Whether a line as written (`coloured`) is coloured as a tool colours
-    `INFO:` (the colon inside the colour, the space after), not as Bazel
-    colours its own message (`INFO: ` inside): a tool's line, which no
-    block of Bazel's starts with."""
-    if not coloured:
-        return False
-    rest = coloured
-    for _ in range(8):
-        if not rest.startswith("\x1b["):
-            break
-        end = rest.find("m")
-        if end < 0:
-            return False
-        rest = rest[end + 1:]
-    head, colon, after = rest.partition(":")
-    return bool(colon) and head.isalpha() and head.isupper() and after.startswith("\x1b[0m")
-
-def _fold_line(state: dict, line: str):
+def _fold_line(state: dict, line: str, own: bool):
     """Take `line` into the console's folded view (`folded`): the lines
     under an `INFO: From` (a successful action's output) counted on one
-    row after it rather than shown, a tool's line coloured like one of
-    Bazel's (`_tools_own`, from its colours) among them; a block a click
-    opened (`fold_open`, by its `INFO: From` line's number since the
-    console began) shown whole. Each row's block (`fold_head`) is its
-    `INFO: From` line's index in `log` on that line's row and the count's,
-    else -1: what a click on it toggles."""
+    row after it rather than shown, up to the next line of Bazel's own
+    (`own`, as the feed says), a tool's line coloured like one of Bazel's
+    among them; a block a click opened (`fold_open`, by its `INFO: From`
+    line's number since the console began) shown whole. Each row's block
+    (`fold_head`) is its `INFO: From` line's index in `log` on that line's
+    row and the count's, else -1: what a click on it toggles."""
     folded = state.setdefault("folded", [])
     src = state.setdefault("fold_src", [])
     head = state.setdefault("fold_head", [])
@@ -431,7 +371,7 @@ def _fold_line(state: dict, line: str):
         state["fold_at"] = at
         state["fold_shown"] = (state.get("log_base", 0) + at) in state.get("fold_open", {})
         return
-    if state.get("fold_n", -1) >= 0 and (not _starts_block(line) or _tools_own(state.get("colour_of", {}).get(line))):
+    if state.get("fold_n", -1) >= 0 and not own:
         state["fold_n"] += 1
         if state.get("fold_shown"):
             folded.append(line)
@@ -458,8 +398,9 @@ def refold(state: dict):
     state["fold_head"] = []
     state["fold_n"] = -1
     state["fold_seen"] = 0
-    for line in state.get("log", []):
-        _fold_line(state, line)
+    own = state.get("own") or []
+    for i, line in enumerate(state.get("log", [])):
+        _fold_line(state, line, i < len(own) and own[i])
 
 def _rows_of(state: dict, lines: list) -> int:
     """How many screen rows `lines` take in the console, wrapped as drawn."""
@@ -539,11 +480,29 @@ def folding(state: dict) -> bool:
     search = state["search"]
     return state.get("view") == None and state["filter"] == "all" and search["pattern"] == None and not state.get("unfolded")
 
-def add_lines(state: dict, lines: list, links = None, colours = None, cli = False):
+def _kinds_of(lines: list, colours, cli: bool) -> tuple:
+    """`(kinds, own)` of lines no feed gave them for, read as the feed
+    reads its own (`bazel.output.line_kinds`): the CLI's (`cli`) each by
+    itself, never under an error of Bazel's."""
+    written = [colours[i] if colours != None and i < len(colours) and colours[i] else line for i, line in enumerate(lines)]
+    if not cli:
+        got = bazel.output.line_kinds(lines, colours = written)
+        return (got["kinds"], got["bazel"])
+    kinds, own = [], []
+    for line, coloured in zip(lines, written):
+        got = bazel.output.line_kinds([line], colours = [coloured])
+        kinds.append(got["kinds"][0])
+        own.append(got["bazel"][0])
+    return (kinds, own)
+
+def add_lines(state: dict, lines: list, links = None, colours = None, kinds = None, own = None, cli = False):
     """Take the console's new `lines`, and with them their `links` (each
-    line's `[start, end, url]`s, as `output_feed()` gives them): kept (the
-    newest `_MAX_LOG`, with each one's kind, `classify`'s, its errors and
-    warnings past that kept for `e`, the rest counted in `dropped`),
+    line's `[start, end, url]`s, as `output_feed()` gives them), `kinds`
+    and `own` (each line's kind, and whether it is one of Bazel's own, the
+    feed's `kinds` and `bazel`; read as the feed reads them where not
+    given, `_kinds_of`): kept (the newest `_MAX_LOG`, with each one's kind,
+    its errors and warnings past that kept for `e`, the rest counted in
+    `dropped`),
     Bazel's closing block from where it starts (`_CLOSING`), Bazel's cache tally
     read (`cache_hits`). Scrolled up, the console stays on the lines it
     shows, counting the new ones and the errors among them (`unseen`,
@@ -558,15 +517,14 @@ def add_lines(state: dict, lines: list, links = None, colours = None, cli = Fals
     shown_errors = 0
     unsearched = 0
     folded_before = len(state.get("folded", []))
+    if kinds == None or own == None:
+        kinds, own = _kinds_of(lines, colours, cli)
     if cli:
-        kinds = [severity(line) for line in lines]
-        state["block"] = ""
         for line in lines:
             note_phase(state, line)
-    else:
-        kinds, state["block"] = classify(lines, state.get("block", ""))
     colour_of = state.setdefault("colour_of", {})
     state.setdefault("kinds", [])
+    state.setdefault("own", [])
     closing = state.setdefault("closing", [])
     for i, line in enumerate(lines):
         kind = kinds[i]
@@ -576,10 +534,11 @@ def add_lines(state: dict, lines: list, links = None, colours = None, cli = Fals
         state["log_size"] = state.get("log_size", 0) + len(line)
         state["log"].append(line)
         state["kinds"].append(kind)
+        state["own"].append(own[i])
         coloured = colours[i] if colours != None and i < len(colours) else None
         if coloured and coloured != line and len(line) <= _MAX_LINE:
             colour_of[line] = coloured
-        _fold_line(state, line)
+        _fold_line(state, line, own[i])
         if links != None and i < len(links):
             keep_links(state, line, links[i])
         if (closing or _closing(line)) and not cli:
@@ -660,6 +619,7 @@ def add_lines(state: dict, lines: list, links = None, colours = None, cli = Fals
             state["log_size"] = state.get("log_size", 0) - len(line)
         state["log"] = state["log"][over:]
         state["kinds"] = state["kinds"][over:]
+        state["own"] = state["own"][over:]
         kept = state.get("colour_of", {})
         state["colour_of"] = {line: kept[line] for line in state["log"] if line in kept}
         state["dropped"] = state.get("dropped", 0) + over
@@ -741,7 +701,6 @@ def report_lines(state: dict, task_id: str, tty: bool, replayed = False, linked 
 
 dashboard_log = namespace(
     add_lines = add_lines,
-    classify = classify,
     clock = _clock,
     console_lines = console_lines,
     console_row = _console_row,
@@ -760,7 +719,6 @@ dashboard_log = namespace(
     say_note = say_note,
     search_bar = _search_bar,
     search_key = _search_key,
-    severity = severity,
     shows = _shows,
     shown_lines = shown_lines,
     step_match = step_match,

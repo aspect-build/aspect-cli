@@ -825,6 +825,31 @@ pub(crate) fn register_output(globals: &mut GlobalsBuilder) {
         Ok(re.is_match(&bazel::console::ansi::text(line.as_bytes())))
     }
 
+    /// Each of `lines` (escape sequences stripped) read as
+    /// `build.output_feed()` reads its lines, in order from a fresh start,
+    /// for lines that are no build's feed (the CLI's own, a log being
+    /// viewed): `{"kinds": [...], "bazel": [...]}`, each line's kind
+    /// (`error`, `warning` or ``) and whether it is one of Bazel's own,
+    /// `colours` the lines as written, colour kept, where known.
+    fn line_kinds<'v>(
+        #[starlark(require = pos)] lines: UnpackList<String>,
+        #[starlark(require = named, default = NoneOr::None)] colours: NoneOr<UnpackList<String>>,
+        heap: starlark::values::Heap<'v>,
+    ) -> anyhow::Result<starlark::values::Value<'v>> {
+        let colours = colours.into_option().map(|c| c.items).unwrap_or_default();
+        let mut carried = bazel::console::feed::Kinds::default();
+        let mut kinds = Vec::with_capacity(lines.items.len());
+        let mut own = Vec::with_capacity(lines.items.len());
+        for (i, line) in lines.items.iter().enumerate() {
+            kinds.push(carried.kind(line));
+            own.push(bazel::console::feed::Kinds::bazel(
+                line,
+                colours.get(i).map_or(line.as_str(), String::as_str),
+            ));
+        }
+        Ok(heap.alloc(serde_json::json!({"kinds": kinds, "bazel": own})))
+    }
+
     /// Record each line matching a `{id: regex}` pattern as an `(id, line)`
     /// hit in `build.output_matches()`, during or after the build (at most
     /// 1024 hits, though each id's first is always kept; lines cut to 2048
