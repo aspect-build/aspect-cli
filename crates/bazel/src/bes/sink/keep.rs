@@ -689,9 +689,11 @@ fn write_index(path: &Path, value: Value) {
 
 /// The folder a label's logs go in: its repository, package and name, each
 /// a path component that cannot climb out (`//a/b:c` → `a/b/c`,
-/// `@repo//a/b:c` → `external/repo/a/b/c`).
+/// `@repo//a/b:c` → `external/repo/a/b/c`), a non-ASCII name as meant
+/// (`crate::bes::repaired`), not as Bazel's events spell it.
 fn label_dir(label: &str) -> PathBuf {
-    let label = label.trim_start_matches('@');
+    let meant = crate::bes::repaired(label);
+    let label = meant.as_deref().unwrap_or(label).trim_start_matches('@');
     let (repo, rest) = match label.split_once("//") {
         Some((repo, rest)) => (repo, rest),
         None => ("", label),
@@ -1475,6 +1477,9 @@ mod tests {
         assert_ne!(label_dir("@foo//x:t"), label_dir("//foo/x:t"));
         assert_eq!(label_dir("//:../../etc"), PathBuf::from("_/_/etc"));
         assert_eq!(label_dir(""), PathBuf::from("_"));
+        // A non-ASCII label as Bazel's events spell it (UTF-8 as Latin-1).
+        let spelled: String = "//uni:тест".bytes().map(char::from).collect();
+        assert_eq!(label_dir(&spelled), PathBuf::from("uni/тест"));
     }
 
     #[test]

@@ -792,7 +792,7 @@ def failure_of(kind: str, event_id, payload):
     stderr and stdout, or a test attempt that did not pass (`test_result`;
     flaky ones did not) with its `test.log`. Each log is a BES `File.file`: a
     URI, or the contents inline."""
-    label = str(_get(event_id, "label", "") or "")
+    label = repaired(str(_get(event_id, "label", "") or ""))
     if kind == "action_completed":
         if _get(payload, "success", False):
             return None
@@ -924,7 +924,8 @@ def local_test_logs(state: dict, record: dict) -> list:
 
 def log_paths(state: dict, record: dict, uri) -> list:
     """Where a log named by `uri` may be on disk, likeliest first; a
-    `file://` one's path alone before the screen has `std.env`."""
+    `file://` one's path alone before the screen has `std.env`, decoded
+    (`percent_decoded`, then `repaired` too)."""
     if type(uri) != "string" or not uri:
         return []
     paths = []
@@ -934,7 +935,20 @@ def log_paths(state: dict, record: dict, uri) -> list:
         paths.append(file_uri_to_path(state["env"], uri))
     elif uri.startswith("file://"):
         paths.append(uri[len("file://"):])
-    return [p for p in paths if p]
+
+    # A `file://` path is percent-encoded, a non-ASCII name's UTF-8 in it
+    # spelled as Latin-1 (`Ñ%C2%82` for `т`), and the file on disk is named
+    # that way or as meant, by Bazel version: both, as written first.
+    out = []
+    for p in paths:
+        if p and uri.startswith("file://"):
+            decoded = percent_decoded(p)
+            for candidate in (decoded, repaired(decoded)):
+                if candidate not in out:
+                    out.append(candidate)
+        elif p and p not in out:
+            out.append(p)
+    return out
 
 def log_view(state: dict, record: dict) -> dict:
     """The view of a failure's logs: its title, the lines (the end of each
@@ -1194,7 +1208,7 @@ def note_event(state: dict, kind: str, event_id, payload, aborted: bool):
     elif kind == "configuration":
         state["output_dirs"][str(_get(event_id, "id", "") or "")] = str(_get(payload, "mnemonic", "") or "")
     elif kind == "test_summary":
-        key = (str(_get(event_id, "label", "") or ""), str(_get(_get(event_id, "configuration", None), "id", "") or ""))
+        key = (repaired(str(_get(event_id, "label", "") or "")), str(_get(_get(event_id, "configuration", None), "id", "") or ""))
         state["test_counts"][key] = (_get(payload, "run_count", 0) or 0, _get(payload, "shard_count", 0) or 0)
         view = state["view"]
         if view != None and view.get("record") != None and view["record"]["kind"] == "test" and (view["record"]["label"], view["record"]["config"]) == key:
@@ -1203,7 +1217,7 @@ def note_event(state: dict, kind: str, event_id, payload, aborted: bool):
             state["search"]["back"] = -1
     elif kind == "test_result":
         key = (
-            str(_get(event_id, "label", "") or ""),
+            repaired(str(_get(event_id, "label", "") or "")),
             str(_get(_get(event_id, "configuration", None), "id", "") or ""),
             _get(event_id, "run", 1) or 1,
             _get(event_id, "shard", 1) or 1,
@@ -6223,16 +6237,9 @@ def test_group(state: dict, recs: list) -> dict:
 # What an entry says when Bazel's events give a failed target no reason.
 _NO_REASON = "Bazel's events give no reason; its error is in the console"
 
-def repaired(text: str) -> str:
-    """`text` as Bazel meant it. Its build events carry a non-ASCII
-    string's UTF-8 bytes each as a Latin-1 character (`ÐµÐ` for `е`): one
-    whose characters are all such bytes and decode as UTF-8 is given back
-    decoded; any other text as it is."""
-    if not text:
-        return text
-    codes = list(text.codepoints())
-    if max(codes) > 255 or max(codes) < 128:
-        return text
+def _utf8(codes: list):
+    """The text UTF-8 bytes `codes` decode to, or None where they are no
+    UTF-8."""
     out = []
     i = 0
     for _ in range(len(codes)):
@@ -6250,17 +6257,60 @@ def repaired(text: str) -> str:
         elif b >= 0xc2 and b < 0xe0:
             size, cp = 2, b & 0x1f
         else:
-            return text
+            return None
         if i + size > len(codes):
-            return text
+            return None
         for k in range(1, size):
             c = codes[i + k]
             if c < 0x80 or c > 0xbf:
-                return text
+                return None
             cp = (cp << 6) | (c & 0x3f)
         out.append(chr(cp))
         i += size
     return "".join(out)
+
+def _utf8_bytes(cp: int) -> list:
+    """Code point `cp`'s UTF-8 bytes."""
+    if cp < 0x80:
+        return [cp]
+    if cp < 0x800:
+        return [0xc0 | (cp >> 6), 0x80 | (cp & 0x3f)]
+    if cp < 0x10000:
+        return [0xe0 | (cp >> 12), 0x80 | ((cp >> 6) & 0x3f), 0x80 | (cp & 0x3f)]
+    return [0xf0 | (cp >> 18), 0x80 | ((cp >> 12) & 0x3f), 0x80 | ((cp >> 6) & 0x3f), 0x80 | (cp & 0x3f)]
+
+def repaired(text: str) -> str:
+    """`text` as Bazel meant it. Its build events carry a non-ASCII
+    string's UTF-8 bytes each as a Latin-1 character (`ÐµÐ` for `е`): one
+    whose characters are all such bytes and decode as UTF-8 is given back
+    decoded; any other text as it is."""
+    if not text:
+        return text
+    codes = list(text.codepoints())
+    if max(codes) > 255 or max(codes) < 128:
+        return text
+    return _utf8(codes) or text
+
+def percent_decoded(text: str) -> str:
+    """A URI's path with its `%XX` escapes decoded, as UTF-8; as it is
+    where they decode to no UTF-8."""
+    if "%" not in text:
+        return text
+    codes = []
+    chars = [chr(c) for c in text.codepoints()]
+    i = 0
+    hexes = "0123456789abcdefABCDEF"
+    for _ in range(len(chars)):
+        if i >= len(chars):
+            break
+        c = chars[i]
+        if c == "%" and i + 2 < len(chars) and chars[i + 1] in hexes and chars[i + 2] in hexes:
+            codes.append(int(chars[i + 1] + chars[i + 2], 16))
+            i += 3
+            continue
+        codes += _utf8_bytes(ord(c))
+        i += 1
+    return _utf8(codes) or text
 
 def _traceback_lines(lines: list) -> list:
     """A Starlark `Traceback`'s excerpt, as the console's recap makes one:
