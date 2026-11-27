@@ -695,9 +695,24 @@ def _actions_tests(ctx):
         (zero, 60, 1, False, ["╳ 16 failed · ○ 15 blocked · ░ 1 internal"]),
         (big9, 13, 2, True, ["╳ 4 failed", "○ 411 blocked"]),
         (big9, 30, 1, False, ["╳ 4 failed · ○ 411 blocked"]),
-        (big9, 35, 2, False, ["█ 5,705 ran · ▒ 2,836 local", "╳ 4 failed · ○ 411 blocked"]),
+        (big9, 35, 2, False, ["█ 5,705 ran · ╳ 4 failed", "▒ 3,136 hits · ○ 411 blocked"]),
     ]:
         _eq("drop order at %d cells, %d rows" % (room, rows), [_visible(r) for r in action_results(split, room, rows, short = room < 60, stack = stack)], want)
+    # Live, with the build's `memory`: a part gone stays gone while the
+    # pane's size holds, and one kept doesn't go for a digit (r51m_live60:
+    # running and unreported took turns).
+    memory = {"room": 26, "rows": 2, "widest": {}, "dropped": 0, "build": 1}
+    flicker = dict(probe, final = False, running = True, failed_build = False, estimated = True, done = 2000, total = 2420, ran = 150, local = 1840, unreported = 10, running_now = 4)
+    seen = []
+    for unreported, local in [(10, 1840), (8, 1850), (12, 1846), (9, 1851), (11, 1852)]:
+        shown = [_visible(r) for r in action_results(dict(flicker, unreported = unreported, local = local, done = 150 + local + unreported), 26, 2, short = True, memory = memory)]
+        kinds = [w for r in shown for w in ("ran", "hits", "local", "unreported", "running", "pending") if (" " + w) in r]
+        if not seen or seen[-1] != kinds:
+            seen.append(kinds)
+    _eq("no part comes and goes as counts move", len(seen), 1)
+    two_kinds = dict(flicker, local = 1540, disk = 300, disk_on = True)
+    _eq("two hit kinds become one total before any goes", [_visible(r) for r in action_results(two_kinds, 30, 2, short = True)], ["█ 150 ran · ▒ ~1,840 hits", "? 10 unreported · ─ 4 running"])
+
     live_short = dict(probe, final = False, running = True, failed_build = False, done = 2411, total = 2420, ran = 210, local = 2200, failed = 2, running_now = 3, estimated = True)
     _eq("a short terminal keeps failed over a hit", [_visible(r) for r in action_results(live_short, 40, 1)], ["█ 210 ran · ╳ 2 failed · ─ 3 running"])
 
