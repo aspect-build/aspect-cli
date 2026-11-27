@@ -804,7 +804,8 @@ struct Rendered {
 /// package of the BUILD file its location is in (that file's path made
 /// absolute from the task's directory and taken relative to the workspace,
 /// `bases`). Two of them (a cc_library's two failed compiles), a label with
-/// none, or no `bases`: none, rather than another action's log.
+/// none, no `bases`, or an error that says nothing failed (an analysis or
+/// loading root's): none, rather than another action's log.
 fn kept_for(
     header: &str,
     target: Option<&str>,
@@ -862,6 +863,11 @@ fn kept_for(
         Some(t) => t == l,
         None => names(l),
     };
+    // Only an error that says what failed is an action's: an analysis or
+    // loading root's (`no such package`) has no log of its own.
+    if !header.contains(" failed: ") {
+        return None;
+    }
     let found = if target.is_some() || LABEL.is_match(header) || kept.iter().any(|(l, _)| names(l))
     {
         only(&named)?
@@ -1146,6 +1152,25 @@ mod tests {
             super::kept_for(xn_header, Some("//xn:a"), &xn, &mut [false, false], b),
             Some(0),
             "the target, not the label the message names"
+        );
+        // ws/ar (Bazel 9.3.3): an analysis root's error at the package of a
+        // failed action has none of that action's log.
+        let ar = vec![(
+            "//ar:boom".to_string(),
+            vec![(
+                "stderr".to_string(),
+                "/h/ar/boom/Genrule-1.stderr".to_string(),
+            )],
+        )];
+        assert_eq!(
+            super::kept_for(
+                "ERROR: ar/BUILD.bazel:3:8: no such package 'nowhere': BUILD file not found in any of the following directories.",
+                None,
+                &ar,
+                &mut [false],
+                b
+            ),
+            None
         );
         let prefix = "ERROR: /ws/a/BUILD:1:8: Executing genrule //a:generate failed: (Exit 1)";
         let mut fresh = vec![false; kept.len()];

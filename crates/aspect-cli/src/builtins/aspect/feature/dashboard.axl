@@ -1149,8 +1149,9 @@ def note_event(state: dict, kind: str, event_id, payload, aborted: bool):
     the build announced but did not get to (`aborted`, an interrupt) has no
     counts. A test's summary arriving shows its open log anew, now
     findable, from its end. A root cause that failed analysis (an Aborted
-    `configured_label`) is a failure, once, its log the error Bazel gives
-    (`description`)."""
+    `configured_label`) or loading (an Aborted `unconfigured_label`, a
+    package with a syntax error) is a failure, once, its log the error
+    Bazel gives (`description`)."""
     if kind == "progress":
         counts = bep_progress(str(_get(payload, "stderr", "") or ""))
         if counts:
@@ -1158,7 +1159,8 @@ def note_event(state: dict, kind: str, event_id, payload, aborted: bool):
     if aborted:
         reason = str(_get(payload, "reason", "") or "").lower()
         label = str(_get(event_id, "label", "") or "")
-        if kind == "configured_label" and label and reason in _FAILED_ABORTS and not any([r["label"] == label and r["detail"] == "analysis failed" for r in state["fails"]]):
+        root = (kind == "configured_label" and reason in _FAILED_ABORTS) or kind == "unconfigured_label"
+        if root and label and not any([r["label"] == label and r["detail"] == "analysis failed" for r in state["fails"]]):
             _add_failure(state, {
                 "kind": "action",
                 "label": label,
@@ -2097,6 +2099,13 @@ def count_event(counts: dict, kind: str, event_id, payload, aborted = None):
             # failure of its own.
             counts["failed_roots"][label] = True
             count_aborted(counts, label, reason)
+        elif kind == "unconfigured_label" and label and label not in counts["failed_roots"]:
+            # One that failed loading, its package broken: Bazel gives no
+            # reason, but it is a root cause all the same.
+            counts["failed_roots"][label] = True
+            if label not in counts["aborted"]:
+                counts["aborted"][label] = True
+                _fail(counts, label)
         return
     if kind == "target_configured":
         if not _get(event_id, "aspect", ""):
@@ -6693,6 +6702,15 @@ def failure_summary(state: dict, kept, task_id: str, tty: bool, log_path: str = 
         if rec["kind"] == "action" and rec.get("detail") == "analysis failed":
             found = claim(rec["label"])
 
+            # A root that failed loading: the errors at its own package's
+            # BUILD file (its syntax error) are its, said first.
+            mine = []
+            for k, e in enumerate(errors):
+                if not used[k] and _unlabelled_in(e, rec["label"], _workspace(state)):
+                    used[k] = True
+                    mine.append((k, e))
+            found = mine + found
+
             # The error that says what the analysis did (`no such package
             # 'nowhere'`, at the BUILD file that referenced it) is this
             # root cause's, not an entry of its own.
@@ -6709,7 +6727,9 @@ def failure_summary(state: dict, kept, task_id: str, tty: bool, log_path: str = 
             if not lines:
                 text = rec["files"][0][1][0] if rec["files"] else ""
                 lines = [l for l in str(text).split("\n") if l]
-            entries.append(entry(0, found[0][0] if found else late + i, rec["label"], "analysis", details, lines, log))
+
+            # An analysis root ran nothing: no log is its.
+            entries.append(entry(0, found[0][0] if found else late + i, rec["label"], "analysis", details, lines, ""))
     for label in index["unlogged"]:
         if label in index["logged"] or label in blocked:
             continue

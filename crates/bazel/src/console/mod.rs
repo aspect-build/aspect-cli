@@ -1627,6 +1627,46 @@ mod tests {
         }
     }
 
+    /// `build --keep_going //ar2:all` (Bazel 9.3.3): a syntax error in
+    /// le/BUILD.bazel, a redraw, then Bazel's `ERROR: le/BUILD.bazel: no
+    /// such target '//le:x'`, at the file alone, no line: its own error,
+    /// never the syntax error's body.
+    #[test]
+    fn an_error_at_a_build_file_without_a_line_is_kept() {
+        let input: &[u8] = b"\x1b[1;31mERROR: \x1b[0mle/BUILD.bazel:2:1: syntax error at 'newline': expected ,\r\r\n\x1b[90mAnalyzing:\x1b[0m 4 targets (2 packages loaded, 2 targets configured)\r\r\n\r\r\n\r\x1b[1A\x1b[K\r\x1b[1A\x1b[K\x1b[1;31mERROR: \x1b[0mle/BUILD.bazel: no such target '//le:x': target 'x' not declared in package 'le' defined by le/BUILD.bazel\r\r\n\x1b[90mAnalyzing:\x1b[0m 4 targets (2 packages loaded, 2 targets configured)\r\r\n";
+        let mut pipeline =
+            Config::new(Mode::Pty, vec![Stage::ErrorsForSummary], Style::default()).pipeline();
+        let sink = SharedSink::default();
+        let mut forwarder = Forwarder::spawn(
+            Box::new(std::io::Cursor::new(input.to_vec())),
+            Box::new(sink.clone()),
+            std::mem::take(&mut pipeline.chain),
+        )
+        .unwrap();
+        forwarder.join().unwrap();
+        let kept: Vec<(String, Vec<String>)> = pipeline
+            .observations
+            .errors()
+            .expect("kept")
+            .errors
+            .into_iter()
+            .map(|e| (e.header, e.body))
+            .collect();
+        assert_eq!(
+            kept,
+            vec![
+                (
+                    "ERROR: le/BUILD.bazel:2:1: syntax error at 'newline': expected ,".to_string(),
+                    vec![]
+                ),
+                (
+                    "ERROR: le/BUILD.bazel: no such target '//le:x': target 'x' not declared in package 'le' defined by le/BUILD.bazel".to_string(),
+                    vec![]
+                ),
+            ]
+        );
+    }
+
     /// `//tl:inner2` (Bazel 9.3.3): a genrule's last line, written in
     /// Bazel's `ERROR: ` colours with no newline, which Bazel flushes after
     /// its next progress line. It is the tool's, not Bazel's, so it stays in

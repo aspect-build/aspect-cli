@@ -157,12 +157,13 @@ fn is_bare_status(text: &str) -> bool {
         .is_some_and(|(_, rest)| rest.trim().is_empty())
 }
 
-/// An `ERROR:` only bazel writes: at a BUILD or `.bzl` file's location, or
+/// An `ERROR:` only bazel writes: at a BUILD or `.bzl` file's location (its
+/// line and column, or the file alone: `le/BUILD.bazel: no such target`), or
 /// that a package contains errors. A tool's held last line in bazel's
 /// colours (a nested bazel's `ERROR: the build failed`) is not one.
 static OWN_ERROR: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r"^ERROR: (?:(?:\S*/)?(?:BUILD(?:\.bazel)?|[^\s/:]+\.bzl):\d+(?::\d+)?: |package contains errors)",
+        r"^ERROR: (?:(?:\S*/)?(?:BUILD(?:\.bazel)?|[^\s/:]+\.bzl)(?::\d+(?::\d+)?)?: |package contains errors)",
     )
     .unwrap()
 });

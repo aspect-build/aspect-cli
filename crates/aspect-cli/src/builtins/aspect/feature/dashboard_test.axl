@@ -2489,6 +2489,19 @@ def _impl(ctx: TaskContext) -> int:
         ("✗ //sp:gen  Genrule · exit 3 · sp/BUILD.bazel:4:8", ["gen broke"]),
     ])
 
+    # ws/ar2 (Bazel 9.3.3): //ar2:uses depends on //le:x, whose package has
+    # a syntax error; Bazel aborts `//le:x`'s unconfigured label. One entry,
+    # the syntax error's, the dependent blocked under it.
+    le_errs = [
+        {"header": "ERROR: le/BUILD.bazel:2:1: syntax error at 'newline': expected ,", "body": [], "log": None, "label": None, "target": None},
+        {"header": "ERROR: le/BUILD.bazel: no such target '//le:x': target 'x' not declared in package 'le' defined by le/BUILD.bazel", "body": [], "log": None, "label": None, "target": None},
+        {"header": "ERROR: ar2/BUILD.bazel:4:8: no such target '//le:x': target 'x' not declared in package 'le' defined by le/BUILD.bazel and referenced by '//ar2:uses'", "body": [], "log": None, "label": None, "target": None},
+    ]
+    le_state = dict(kinds, counts = dict(new_counts(), failures = ["//le:x", "//ar2:uses"], failed_labels = {"//le:x": True, "//ar2:uses": True}, failed = 2, failed_roots = {"//le:x": True}), root_causes = {"//ar2:uses": ["//le:x"]}, logged_index = None, blocked_cache = None, listed_cache = None, fails = [], kept_errors = {"errors": le_errs, "distinct": 3}, read = None, build = None)
+    note_event(le_state, "unconfigured_label", struct(label = "//le:x"), struct(), True)
+    got = [_visible(l) for l in failure_summary(le_state, {"errors": le_errs, "distinct": 3}, "t-9", False)]
+    _eq("a loading root: one entry, its syntax error first, its dependent blocked", [l for l in got if l.startswith("✗") or "blocked" in l or l.startswith("  │ syntax")], ["✗ //le:x  analysis · le/BUILD.bazel:2:1", "  │ syntax error at 'newline': expected ,", "  ○ blocked: //ar2:uses", "0 built, 1 failed, 1 blocked · 0 tests passed, 0 failed"])
+
     # A signal-killed action (//f:killed, Bazel 9.3.3): `killed` where the
     # exit code goes, and no command line quoted.
     killed = [{"header": "ERROR: f/BUILD.bazel:3:8: Executing genrule //f:killed failed: (Killed)", "body": ["about to die"], "log": None, "label": None, "target": "//f:killed"}]
