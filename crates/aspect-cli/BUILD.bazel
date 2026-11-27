@@ -84,7 +84,10 @@ rust_test(
 # runs in CI, which has no `cargo test` step. Each resolves the binary through
 # `ASPECT_CLI_BIN` (with a `CARGO_BIN_EXE_…` fallback for cargo) via the shared
 # `tests/common/mod.rs`.
-INTEGRATION_TEST_COMMON_SRCS = ["tests/common/mod.rs"]
+INTEGRATION_TEST_COMMON_SRCS = [
+    "tests/common/hang_diag.rs",
+    "tests/common/mod.rs",
+]
 
 rust_test(
     name = "broken_pipe_test",

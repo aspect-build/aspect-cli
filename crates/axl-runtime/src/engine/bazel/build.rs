@@ -5116,17 +5116,28 @@ def _impl(ctx):
 Test = task(implementation = _impl)
 "#,
         );
+        /// `BASIL_ARGV_LOG` as it was, put back when dropped, should the
+        /// task panic too.
+        struct Restore(Option<std::ffi::OsString>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                // SAFETY: as where it was set, under the basil tests' lock.
+                unsafe {
+                    match self.0.take() {
+                        Some(was) => std::env::set_var("BASIL_ARGV_LOG", was),
+                        None => std::env::remove_var("BASIL_ARGV_LOG"),
+                    }
+                }
+            }
+        }
         let exit = with_daemon_stand_in(|| {
+            let _restore = Restore(std::env::var_os("BASIL_ARGV_LOG"));
             // SAFETY: process-wide, but `with_daemon_stand_in` holds the lock that
             // serializes the basil tests for the whole closure.
             unsafe {
                 std::env::set_var("BASIL_ARGV_LOG", &argv_log);
             }
-            let out = crate::test::eval(&script).with_fake_bazel().run_task(0);
-            unsafe {
-                std::env::remove_var("BASIL_ARGV_LOG");
-            }
-            out
+            crate::test::eval(&script).with_fake_bazel().run_task(0)
         });
         assert_eq!(
             exit.expect("run_task"),
