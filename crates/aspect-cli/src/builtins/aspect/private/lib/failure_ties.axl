@@ -12,6 +12,31 @@ _workspace = failure_records.workspace
 log_paths = failure_records.log_paths
 repaired = failure_records.repaired
 
+# Every string of Bazel's console a tie reads, by what it is. The fixtures
+# (crates/aspect-cli/tests/testdata/failures) pin each one per Bazel version:
+# a release that rewords one fails the replay.
+_BAZEL = struct(
+    error = "ERROR: ",
+    failed = " failed: ",
+    status = " failed: (",
+    exit = "failed: (Exit %d)",
+    rule_target = " rule target ",
+    from_target = "(from target ",
+    referenced_by = " and referenced by '",
+    declared_output = "declared output '",
+    not_created_by_genrule = "' was not created by genrule",
+    not_created = "output '%s' was not created",
+    package_errors = "package contains errors: ",
+    analysis_of = "Analysis of target '%s' ",
+    too_big = " exceeds maximum size of ",
+    skipping_bytes = " bytes; skipping",
+    skipping = "Skipping '%s': %s",
+    traceback = "Traceback (most recent call last):",
+    error_in = "Error in ",
+    fatal = "FATAL: ",
+    server_died = "Server terminated abruptly",
+)
+
 # What starts a line of Bazel's own: a line that starts none, a tool's
 # (a compiler's diagnostic under an `ERROR:`), takes the kind of the one
 # it follows (`classify`).
@@ -37,7 +62,7 @@ def _bazel_headers(state: dict, text: str) -> list:
     found = []
     at = 0
     for _ in range(len(text)):
-        p = text.find("ERROR: ", at)
+        p = text.find(_BAZEL.error, at)
         if p < 0:
             break
         start = text.rfind("\n", 0, p) + 1
@@ -46,9 +71,9 @@ def _bazel_headers(state: dict, text: str) -> list:
         at = end + 1
         line = text[start:end]
         plain = (ansi.replace(line, "") if ansi != None else line).rpartition("\r")[2]
-        if not plain.startswith("ERROR: "):
+        if not plain.startswith(_BAZEL.error):
             continue
-        plain = plain[len("ERROR: "):]
+        plain = plain[len(_BAZEL.error):]
         head, sep, rest = plain.partition(": ")
         pieces = head.split(":")
         location = ""
@@ -120,7 +145,7 @@ def _relayed(text: str, at: int, lead: str, pieces: list, tails: dict) -> int:
             end = text.find("\n", pos)
             end = len(text) if end < 0 else end
             line = text[pos:end]
-            if not [p for p in named if line.startswith("%s (%s) " % (name, p))] or " exceeds maximum size of " not in line or not line.endswith(" bytes; skipping"):
+            if not [p for p in named if line.startswith("%s (%s) " % (name, p))] or _BAZEL.too_big not in line or not line.endswith(_BAZEL.skipping_bytes):
                 return -1
             pos = end + 1
         elif not body or body.endswith("\n") or i + 1 < len(pieces):
@@ -358,13 +383,13 @@ def _index_headers(headers: list) -> dict:
     by = {"status": {}, "target": {}, "message": {}, "plain": {}, "reason": {}, "failed": {}, "referrer": {}, "prefix": {}, "declared": {}}
     for k, h in enumerate(headers):
         message = h["message"]
-        what, failed, reason = message.partition(" failed: ")
+        what, failed, reason = message.partition(_BAZEL.failed)
         if failed:
             by["reason"].setdefault(reason, []).append(k)
             by["failed"].setdefault(_failed_label(what), []).append(k)
             if reason.startswith("("):
                 by["status"].setdefault(reason.partition("): ")[2], []).append(k)
-        for marker in (" rule target ", "(from target "):
+        for marker in (_BAZEL.rule_target, _BAZEL.from_target):
             at = message.find(marker)
             if at >= 0:
                 named = message[at + len(marker):].partition(")")[0]
@@ -372,11 +397,11 @@ def _index_headers(headers: list) -> dict:
                 break
         by["message"].setdefault(message, []).append(k)
         by["plain"].setdefault(h["plain"], []).append(k)
-        if message.endswith("'") and " and referenced by '" in message:
-            by["referrer"].setdefault(message.rpartition(" and referenced by '")[2][:-1], []).append(k)
+        if message.endswith("'") and _BAZEL.referenced_by in message:
+            by["referrer"].setdefault(message.rpartition(_BAZEL.referenced_by)[2][:-1], []).append(k)
         by["prefix"].setdefault(message.partition(": ")[0], []).append(k)
-        if message.startswith("declared output '") and "' was not created by genrule" in message:
-            by["declared"].setdefault(message[len("declared output '"):].partition("' was not created by genrule")[0], []).append(k)
+        if message.startswith(_BAZEL.declared_output) and _BAZEL.not_created_by_genrule in message:
+            by["declared"].setdefault(message[len(_BAZEL.declared_output):].partition(_BAZEL.not_created_by_genrule)[0], []).append(k)
     return by
 
 def _tie(found: list):
@@ -432,13 +457,13 @@ def _tie_actions(state: dict, text: str, headers: list, by: dict, claimed: dict,
                 claimed[k] = True
                 spans.append((headers[k]["end"], end))
                 out["location"] = headers[k]["location"]
-                out["status"] = headers[k]["message"].partition(" failed: (")[2].partition("): ")[0]
+                out["status"] = headers[k]["message"].partition(_BAZEL.status)[2].partition("): ")[0]
         if not out["status"] and pieces and [p for p in pieces if p[1] != ""]:
             found = []
             for k in by["target"].get(label, []):
                 h = headers[k]
                 end = _relayed(text, h["end"] + 1, "", pieces, tails)
-                if ("failed: (Exit %d)" % rec.get("exit_code", 0)) in h["message"] and end >= 0:
+                if (_BAZEL.exit % rec.get("exit_code", 0)) in h["message"] and end >= 0:
                     found.append((k, end))
             got = _tie(found)
             if got != None:
@@ -452,7 +477,7 @@ def _tie_actions(state: dict, text: str, headers: list, by: dict, claimed: dict,
         # it; Bazel's line says it as meant.
         made = repaired(rec.get("output", "")).partition("/bin/")[2]
         if made:
-            k = _tie(by["message"].get("output '%s' was not created" % made, []) + by["declared"].get(made, []))
+            k = _tie(by["message"].get(_BAZEL.not_created % made, []) + by["declared"].get(made, []))
             if k != None:
                 claimed[k] = True
                 out["location"] = out["location"] or headers[k]["location"]
@@ -496,7 +521,7 @@ def _tie_targets(state: dict, headers: list, by: dict, claimed: dict) -> dict:
         out = {"location": "", "lines": []}
         first = rec.get("description", "").partition("\n")[0]
         if first and rec["detail"] != "target":
-            found = by["message"].get(first, []) + [k for k in by["plain"].get(first, []) + by["plain"].get("Skipping '%s': %s" % (label, first), []) if headers[k]["message"] != first]
+            found = by["message"].get(first, []) + [k for k in by["plain"].get(first, []) + by["plain"].get(_BAZEL.skipping % (label, first), []) if headers[k]["message"] != first]
             for k in found:
                 claimed[k] = True
             k = _tie([k for k in found if headers[k]["location"]])
@@ -509,7 +534,7 @@ def _tie_targets(state: dict, headers: list, by: dict, claimed: dict) -> dict:
                 out["lines"].append(headers[k]["message"])
         out["location"] = out["location"] or _common(headers, own)
         if rec["detail"] == "target" and first:
-            k = _tie([k for k in by["failed"].get(label, []) if headers[k]["message"].endswith(" failed: " + first)])
+            k = _tie([k for k in by["failed"].get(label, []) if headers[k]["message"].endswith(_BAZEL.failed + first)])
             if k == None:
                 k = _tie(by["reason"].get(first, []))
             if k != None:
@@ -524,7 +549,7 @@ def _tie_targets(state: dict, headers: list, by: dict, claimed: dict) -> dict:
             k = _tie(found)
             if k != None and not out["location"] and not first and not own:
                 out["location"] = headers[k]["location"]
-                out["lines"].append(headers[k]["message"].rpartition(" and referenced by '")[0])
+                out["lines"].append(headers[k]["message"].rpartition(_BAZEL.referenced_by)[0])
         for line in out["lines"]:
             for k in by["message"].get(line, []):
                 claimed[k] = True
@@ -551,8 +576,8 @@ def _claim_restated(state: dict, targets: dict, headers: list, claimed: dict):
         if not rec.get("description") and causes.get(rec["label"]) == [rec["label"]]:
             lines[""] = True
     for k, h in enumerate(headers):
-        if h["message"].startswith("package contains errors: "):
-            pkg, _, rest = h["message"][len("package contains errors: "):].partition(": ")
+        if h["message"].startswith(_BAZEL.package_errors):
+            pkg, _, rest = h["message"][len(_BAZEL.package_errors):].partition(": ")
             if rest in quoted.get(pkg, {}):
                 claimed[k] = True
 
@@ -564,7 +589,7 @@ def _claim_named_failures(state: dict, headers: list, by: dict, claimed: dict):
         for k in by["failed"].get(label, []):
             claimed[k] = True
         for k, h in enumerate(headers):
-            if h["message"].startswith("Analysis of target '%s' " % label) and h["message"].endswith(" failed"):
+            if h["message"].startswith(_BAZEL.analysis_of % label) and h["message"].endswith(" failed"):
                 claimed[k] = True
 
 def _other_errors(state: dict, text: str, headers: list, claimed: dict, spans: list) -> list:
@@ -603,6 +628,7 @@ def _other_errors(state: dict, text: str, headers: list, claimed: dict, spans: l
     return out
 
 failure_ties = namespace(
+    BAZEL = _BAZEL,
     console_ties = console_ties,
     HEADERS = _HEADERS,
     status_word = _status_word,

@@ -24,6 +24,7 @@ _workspace = failure_records.workspace
 blocked_targets = failure_records.blocked_targets
 build_outcome = failure_records.build_outcome
 test_shape = failure_records.test_shape
+_BAZEL = failure_ties.BAZEL
 _status_word = failure_ties.status_word
 console_ties = failure_ties.console_ties
 
@@ -307,8 +308,8 @@ def _traceback_lines(lines: list) -> list:
     counted (`… N more lines`); any other text's lines as they are. The
     line that starts it may say more before it (`package contains errors:
     mf: Traceback …`)."""
-    start = [k for k, l in enumerate(lines) if l.strip().endswith("Traceback (most recent call last):")]
-    errors = [k for k, l in enumerate(lines) if l.strip().startswith("Error in ")]
+    start = [k for k, l in enumerate(lines) if l.strip().endswith(_BAZEL.traceback)]
+    errors = [k for k, l in enumerate(lines) if l.strip().startswith(_BAZEL.error_in)]
     if not start or not errors or errors[-1] < start[0]:
         return lines
     error = errors[-1]
@@ -498,9 +499,9 @@ def _last_words(state: dict) -> list:
     else, a crashed server's `FATAL: …` and `Server terminated abruptly`
     lines, else its last lines but progress, at most `_EXCERPT_LINES`."""
     tail = [l for l in _plain_text(state, _tail_text(state, state.get("log_path", "")) or "").split("\n") if l.strip()]
-    words = [l[len("ERROR: "):] for l in tail if l.startswith("ERROR: ")]
+    words = [l[len(_BAZEL.error):] for l in tail if l.startswith(_BAZEL.error)]
     if not words:
-        words = [l for l in tail if l.startswith(("FATAL: ", "Server terminated abruptly"))]
+        words = [l for l in tail if l.startswith((_BAZEL.fatal, _BAZEL.server_died))]
     if not words:
         words = [l for l in tail if not l.startswith(("[", "INFO: ", "WARNING: ", "Loading", "Analyzing", "Computing", "Starting local Bazel server", "Extracting Bazel installation", "  "))]
     return words[-_EXCERPT_LINES:]
