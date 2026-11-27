@@ -461,6 +461,53 @@ def _test_folded_copies(ctx: TaskContext, root: str):
     _eq("refused once patched", said, ["src/n1.txt and src/n2.txt are one file where the patch is applied"])
     _eq("neither made", _names(fs, tree + "/src"), ["one.txt", "two.txt"])
 
+def _test_write_back(ctx: TaskContext, root: str):
+    """Each result is renamed onto the file its path resolves to: a
+    read-only file is fixed as patch fixes it, keeping its mode, a hard
+    link out of the tree is broken off, a symlink in the tree stays one.
+    One that can't be read refuses its patch, one that can't be written is
+    named, and the run goes on."""
+    fs = ctx.std.fs
+    tree = root + "/back"
+    fs.create_dir_all(tree + "/src/ro")
+    fix = lambda path, old, new: "--- a/%s\n+++ b/%s\n@@ -1 +1 @@\n-%s\n+%s\n" % (path, path, old, new)
+    _sh(ctx, root, """
+printf 'r\\n' > back/src/readonly.txt && chmod 0444 back/src/readonly.txt
+printf 'x\\n' > back/src/tool.sh && chmod 0755 back/src/tool.sh
+printf 'h\\n' > outside-hl.txt && ln outside-hl.txt back/src/hl.txt
+printf 'l\\n' > back/src/target.txt && ln -s target.txt back/src/lnk.txt
+""")
+    fs.write(root + "/back.patch", fix("src/readonly.txt", "r", "R") + fix("src/tool.sh", "x", "X") + fix("src/hl.txt", "h", "H") + fix("src/lnk.txt", "l", "L"))
+    _eq("applies", apply_fix_patch(ctx, root + "/back.patch", cwd = tree), None)
+    ro, tool = fs.metadata(tree + "/src/readonly.txt"), fs.metadata(tree + "/src/tool.sh")
+    _eq("a read-only file fixed, still read-only", (fs.read_to_string(tree + "/src/readonly.txt"), ro.readonly), ("R\n", True))
+    _eq("an executable fixed, still executable", (fs.read_to_string(tree + "/src/tool.sh"), tool.executable), ("X\n", True))
+    _eq("a hard link out of the tree broken off", (fs.read_to_string(tree + "/src/hl.txt"), fs.read_to_string(root + "/outside-hl.txt")), ("H\n", "h\n"))
+    _eq("a symlink in the tree stays one", (fs.read_to_string(tree + "/src/target.txt"), fs.try_metadata(tree + "/src/lnk.txt").is_symlink), ("L\n", True))
+
+    # Permissions a root user ignores are probed, not assumed.
+    fs.write(tree + "/src/secret.txt", "s\n")
+    fs.set_permissions(tree + "/src/secret.txt", 0o000)
+    ctx.defer(fs.set_permissions, tree + "/src/secret.txt", 0o644)
+    unreadable, _ = catch(lambda: fs.open(tree + "/src/secret.txt").read(), types = [std.io.Error])
+    fs.set_permissions(tree + "/src/ro", 0o555)
+    ctx.defer(fs.set_permissions, tree + "/src/ro", 0o755)
+    unwritable, _ = catch(fs.write, tree + "/src/ro/probe", "", types = [std.io.Error])
+    fs.write(tree + "/src/ok.txt", "a\n")
+    said = []
+    if unreadable != None:
+        fs.write(root + "/secret.patch", fix("src/secret.txt", "s", "S"))
+        fs.write(root + "/after.patch", fix("src/ok.txt", "a", "A"))
+        _eq("an unreadable file", apply_fix_patch(ctx, root + "/secret.patch", cwd = tree, say = _noted(said)), None)
+        _eq("refuses its patch", [l.partition(": ")[0] for l in said], ["src/secret.txt can't be read"])
+        _eq("and the run goes on", (apply_fix_patch(ctx, root + "/after.patch", cwd = tree), fs.read_to_string(tree + "/src/ok.txt")), (None, "A\n"))
+    if unwritable != None:
+        said.clear()
+        fs.write(root + "/ro.patch", "--- /dev/null\n+++ b/src/ro/new.txt\n@@ -0,0 +1 @@\n+n\n" + fix("src/ok.txt", "A", "B"))
+        _eq("a file in a directory it can't write", apply_fix_patch(ctx, root + "/ro.patch", cwd = tree, say = lambda label, text: said.append((label, text.partition(": ")[2].partition(": ")[0]))), None)
+        _eq("is named", said, [("WARNING", "src/ro/new.txt was not written")])
+        _eq("the rest is written", (fs.exists(tree + "/src/ro/new.txt"), fs.read_to_string(tree + "/src/ok.txt")), (False, "B\n"))
+
 def _impl(ctx: TaskContext) -> int:
     fs = ctx.std.fs
     root = fs.mkdtemp()
@@ -474,6 +521,7 @@ def _impl(ctx: TaskContext) -> int:
     _test_escapes(ctx, root)
     _test_refused(ctx, root)
     _test_folded_copies(ctx, root)
+    _test_write_back(ctx, root)
     print("fix_patch_test.axl: OK")
     return 0
 

@@ -3,8 +3,9 @@
 `apply_fix_patch` walks the diff with `patch.axl`'s `scan`, copies each file
 it names into a directory of its own, and runs `patch` once per file section,
 on that section's bytes alone, naming the copy to change: patch never takes a
-file name from the diff. Each copy patch changed, made or emptied is then
-written back to the workspace file it stands for.
+file name from the diff. Each copy patch changed or made is then renamed
+onto the workspace file its path resolves to, and one patch emptied for a
+removal is removed there: nothing else reaches the workspace.
 
 A patch is refused whole, every file as it was, with a warning saying why,
 where:
@@ -23,7 +24,8 @@ where:
   the workspace through a symlink, or can't be followed;
 - two paths it names are one file by `dev` and `ino`, or one is another
   with `.rej`, `.orig` or `.~N~` after it;
-- a path it names isn't a regular file, or a removal names a symlink;
+- a path it names isn't a regular file or can't be read, or a removal
+  names a symlink;
 - two of its files are one in the copies' directory, once copied or once
   patched;
 - patch exits with trouble, or leaves a copy that isn't a regular file, or
@@ -239,9 +241,10 @@ def _copy_collision(fs, work: str, keys: dict) -> str | None:
     return None
 
 def _refusal(fs, cwd: str, paths: list, removed: list) -> tuple:
-    """`(why, keys)`: why a patch naming `paths` (removing `removed`) is
-    refused before anything is copied or patched, or None, and then each
-    path's identity in the workspace (`_identity`), else `{}`. Refused: a
+    """`(why, keys, real)`: why a patch naming `paths` (removing `removed`)
+    is refused before anything is copied or patched, or None, and then each
+    path's identity in the workspace (`_identity`) and the absolute path it
+    resolves to, its symlinks followed, else `{}` twice. Refused: a
     path with a `.` or empty component; two paths that are one file, their
     symlinks followed (a type change, two creations, a rename onto a made
     file, a case-only or normalization-only rename where the disk takes the
@@ -252,30 +255,32 @@ def _refusal(fs, cwd: str, paths: list, removed: list) -> tuple:
     `_copy_collision` catches them where the copies' directory folds them."""
     root, why = _resolved(fs, cwd)
     if root == None:
-        return "the workspace %s" % why, {}
+        return "the workspace %s" % why, {}, {}
     seen = {}
+    real = {}
     for path in paths:
         parts = path.split("/")
         shown = ascii_escaped(path)
         if "" in parts or "." in parts:
-            return "%s has a `.` or empty component" % shown, {}
+            return "%s has a `.` or empty component" % shown, {}, {}
         resolved, why = _resolved(fs, cwd + "/" + path)
         if resolved == None:
-            return "%s %s" % (shown, why), {}
+            return "%s %s" % (shown, why), {}, {}
         if resolved[:len(root)] != root or len(resolved) == len(root):
-            return "%s leads out of the workspace" % shown, {}
+            return "%s leads out of the workspace" % shown, {}, {}
         key = _identity(fs, resolved)
         if key in seen:
-            return "%s and %s are one file" % (ascii_escaped(seen[key]), shown), {}
+            return "%s and %s are one file" % (ascii_escaped(seen[key]), shown), {}, {}
         seen[key] = path
-        meta, _ = _look(fs, "/" + "/".join(resolved))
+        real[path] = "/" + "/".join(resolved)
+        meta, _ = _look(fs, real[path])
         if meta != None and not meta.is_file:
-            return "%s isn't a regular file" % shown, {}
+            return "%s isn't a regular file" % shown, {}, {}
         if path in removed:
             named, _ = _look(fs, cwd + "/" + path)
             if named != None and named.is_symlink:
-                return "%s is a symlink: removing it would keep what it names" % shown, {}
-    return None, {path: key for key, path in seen.items()}
+                return "%s is a symlink: removing it would keep what it names" % shown, {}, {}
+    return None, {path: key for key, path in seen.items()}, real
 
 def _named_twice(files: list) -> str | None:
     """The first path `files` name in two headers, or None."""
@@ -292,6 +297,23 @@ def _creates(f: _File) -> bool:
     every hunk adds to nothing (`-0,0`), as patch takes it where the file
     isn't there."""
     return f.old == None or (f.section.hunks and all([h.old_count == 0 for h in f.section.hunks]))
+
+def _move_in(fs, src: str, tmp: str, dst: str) -> None:
+    """Copy `src` to `tmp` and rename that onto `dst`."""
+    fs.copy(src, tmp)
+    fs.rename(tmp, dst)
+
+def _replace(fs, src: str, dst: str) -> None:
+    """Put a copy of `src` at `dst` by renaming it into place from a
+    directory of its own beside `dst`, which goes after, so `dst` is a new
+    file: one shared with a hard link elsewhere is left as it was, and a
+    read-only one is replaced as patch replaces it. Raises `std.io.Error`."""
+    parent, _, name = dst.rpartition("/")
+    tmp = fs.mkdtemp(prefix = ".aspect-fix-", parent = parent)
+    err, _ = catch(_move_in, fs, src, tmp + "/" + name, dst, types = [std.io.Error])
+    fs.remove_dir_all(tmp)
+    if err != None:
+        fail(err)
 
 def _same_bytes(fs, a: str, b: str) -> bool:
     """Whether files `a` and `b` hold the same bytes, whatever their text."""
@@ -360,6 +382,10 @@ def apply_fix_patch(
       written over: the same bytes count as applied, other bytes are a
       reject.
     - A fix to a file that isn't there is named in an INFO line.
+    - A result is renamed into place, so a symlink in the tree stays one, a
+      hard link to a file elsewhere is broken off, and a read-only file is
+      fixed as patch fixes it, its mode kept. One that can't be written or
+      removed is named in a WARNING, and the rest still are.
     - Rejects for hunks that failed are kept in a directory an INFO line
       names. The copies go when the task ends, however it ends.
     - For a test to stand in for them: `program` is the `patch` run, `say`
@@ -417,7 +443,7 @@ def apply_fix_patch(
             if other != path and other.startswith(path) and (tail in (".rej", ".orig") or numbered):
                 return refuse("it names %s and %s, which patch writes its own output to" % (ascii_escaped(path), ascii_escaped(other)))
     removed = [f.old for f in files if f.old and not f.new]
-    refused, keys = _refusal(fs, cwd, paths, removed)
+    refused, keys, real = _refusal(fs, cwd, paths, removed)
     if refused:
         return refuse(refused)
     made = [f.new for f in files if not f.old and f.new]
@@ -431,9 +457,15 @@ def apply_fix_patch(
         parent = path.rpartition("/")[0]
         if parent:
             fs.create_dir_all(work + "/" + parent)
-        if _is_file(fs, cwd + "/" + path) and path not in made:
+        if not _is_file(fs, cwd + "/" + path):
+            continue
+        if path in made:
+            err, _ = catch(lambda: fs.open(cwd + "/" + path).read(), types = [std.io.Error])
+        else:
+            err, _ = catch(fs.copy, cwd + "/" + path, work + "/" + path, types = [std.io.Error])
             had[path] = True
-            fs.copy(cwd + "/" + path, work + "/" + path)
+        if err != None:
+            return refuse("%s can't be read: %s" % (ascii_escaped(path), err))
     collision = _copy_collision(fs, work, keys)
     if collision:
         return refuse(collision)
@@ -481,7 +513,7 @@ def apply_fix_patch(
     rejects = []
     for f, target, section, ignored in runs:
         patched = work + "/" + target
-        mine = cwd + "/" + target
+        mine = real[target]
         if target in made and _is_file(fs, mine) and fs.metadata(mine).size > 0:
             if not (_is_file(fs, patched) and _same_bytes(fs, patched, mine)):
                 fs.copy(section, patched + ".rej")
@@ -491,16 +523,15 @@ def apply_fix_patch(
             rejects.append(target + ".rej")
         if f.new == None:
             if target in had and (not _is_file(fs, patched) or fs.metadata(patched).size == 0):
-                fs.remove_file(mine)
+                err, _ = catch(fs.remove_file, mine, types = [std.io.Error])
+                if err != None:
+                    tell("WARNING", "%s: %s was not removed: %s" % (ascii_escaped(patch), ascii_escaped(target), err))
             continue
-        if not _is_file(fs, patched):
+        if not _is_file(fs, patched) or (target in had and _same_bytes(fs, patched, mine)):
             continue
-        if target in had and _same_bytes(fs, patched, mine):
-            continue
-        parent = target.rpartition("/")[0]
-        if parent:
-            fs.create_dir_all(cwd + "/" + parent)
-        fs.copy(patched, mine)
+        err, _ = catch(_replace, fs, patched, mine, types = [std.io.Error])
+        if err != None:
+            tell("WARNING", "%s: %s was not written: %s" % (ascii_escaped(patch), ascii_escaped(target), err))
     if rejects:
         kept = fs.mkdtemp()
         for rej in rejects:
