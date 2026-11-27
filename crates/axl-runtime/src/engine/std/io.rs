@@ -223,32 +223,12 @@ fn match_template(template: &str, url: &str) -> Option<(String, u32)> {
     pattern.push_str(&regex::escape(rest));
     pattern.push('$');
     let caps = regex::Regex::new(&pattern).ok()?.captures(url)?;
-    let path = percent_decoded(caps.name("path")?.as_str());
+    let path = bazel::bes::percent_decode(caps.name("path")?.as_str());
     let line = caps
         .name("line")
         .and_then(|l| l.as_str().parse().ok())
         .unwrap_or(1);
     Some((path, line))
-}
-
-/// `%XX` escapes decoded, as `encoded_path` writes them.
-fn percent_decoded(text: &str) -> String {
-    let bytes = text.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).ok();
-            if let Some(b) = hex.and_then(|h| u8::from_str_radix(h, 16).ok()) {
-                out.push(b);
-                i += 3;
-                continue;
-            }
-        }
-        out.push(bytes[i]);
-        i += 1;
-    }
-    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// An editor's name for a person, by its format's alias.
@@ -304,13 +284,6 @@ mod editor_tests {
             "no editor's: the console makes no file:// link"
         );
         assert_eq!(target_of("https://x.test/a", &cursor), None);
-    }
-
-    #[test]
-    fn a_percent_before_a_wide_character_is_kept() {
-        assert_eq!(super::percent_decoded("a%a\u{e9}.rs"), "a%a\u{e9}.rs");
-        assert_eq!(super::percent_decoded("%\u{e9}x"), "%\u{e9}x");
-        assert_eq!(super::percent_decoded("a%20b"), "a b");
     }
 
     #[test]

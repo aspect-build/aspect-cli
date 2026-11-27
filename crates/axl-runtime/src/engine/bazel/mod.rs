@@ -1636,6 +1636,26 @@ fn register_build_events(globals: &mut GlobalsBuilder) {
         stored_events::StoredBuildEvents::open(std::path::Path::new(path), kinds)
     }
 
+    /// `text` from a build event (a label, a description, a failure's
+    /// message) as Bazel meant it: Bazel's build events carry a non-ASCII
+    /// string's UTF-8 bytes each as a Latin-1 character (`Ã©` for `é`), and
+    /// text that is all such characters, at least one past ASCII, and
+    /// decodes as UTF-8 comes back decoded; any other text as it is.
+    fn repaired(#[starlark(require = pos)] text: &str) -> anyhow::Result<String> {
+        Ok(bazel::bes::repaired(text).unwrap_or_else(|| text.to_string()))
+    }
+
+    /// The local path a build event's `file://` URI (a `File`'s `uri`) names:
+    /// its `%XX` escapes decoded, and of Bazel's two spellings of a
+    /// non-ASCII name (its UTF-8 bytes each as a Latin-1 character, or as
+    /// meant, by Bazel version) the URI's, unless only the one meant exists
+    /// on disk. None for any other scheme (`bytestream://`).
+    fn local_path(#[starlark(require = pos)] uri: &str) -> anyhow::Result<NoneOr<String>> {
+        Ok(NoneOr::from_option(
+            bazel::bes::local_path(uri).map(|p| p.to_string_lossy().into_owned()),
+        ))
+    }
+
     /// Create a handle iterating this build's BES stream. Pass it in
     /// `build_events=[...]` and then `for event in iter:`. Optional
     /// `kinds=["action_executed", "named_set_of_files", ...]` filters at
@@ -2060,6 +2080,23 @@ mod tests {
             got,
             r#"["--define=API_TOKEN=<REDACTED>", "--jobs=4", "STABLE_KEY=<REDACTED>", "//a:b"]"#
         );
+    }
+
+    /// Bazel's Latin-1 spelling of UTF-8 decoded, other text as it is; a
+    /// `file://` URI's path decoded, none for another scheme.
+    #[test]
+    fn build_events_repaired_and_local_path() {
+        let got = crate::test::eval(
+            r#"(
+    bazel.build_events.repaired("cafÃ©"),
+    bazel.build_events.repaired("café"),
+    bazel.build_events.local_path("file:///nowhere/a%20b.log"),
+    bazel.build_events.local_path("bytestream://cache/blobs/x/1"),
+)"#,
+        )
+        .repr()
+        .unwrap();
+        assert_eq!(got, r#"("caf\xe9", "caf\xe9", "/nowhere/a b.log", None)"#);
     }
 
     #[test]

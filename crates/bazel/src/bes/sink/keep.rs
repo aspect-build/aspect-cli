@@ -561,7 +561,10 @@ fn keep_file(
     how: Placement,
     not_kept: &mut NotKept,
 ) -> Option<String> {
-    let source = match (crate::bes::local_path(file), file.file.as_ref()) {
+    let source = match (
+        crate::bes::uri_of(file).and_then(crate::bes::local_path),
+        file.file.as_ref(),
+    ) {
         (Some(path), _) => Source::Path(path),
         (None, Some(file::File::Contents(bytes))) => Source::Bytes(bytes),
         _ => {
@@ -1527,7 +1530,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            crate::bes::local_path(&f),
+            crate::bes::uri_of(&f).and_then(crate::bes::local_path),
             Some(PathBuf::from("/tmp/a b/c"))
         );
         assert_eq!(rfc3339(0, 5_000_000), "1970-01-01T00:00:00.005Z");

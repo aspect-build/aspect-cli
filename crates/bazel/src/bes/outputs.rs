@@ -225,7 +225,7 @@ impl Outputs {
                 return Some(path);
             }
         }
-        crate::bes::local_path(file)
+        crate::bes::uri_of(file).and_then(crate::bes::local_path)
     }
 
     /// The target `key`, if it is now ready; it stops being pending.

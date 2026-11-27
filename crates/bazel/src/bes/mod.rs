@@ -44,24 +44,27 @@ impl BuildEventEnvelope {
     }
 }
 
-/// The local path a BES `File` names by `file://` URI, `%XX` escapes
-/// decoded; None for a remote or inline one. Bazel spells a non-ASCII
-/// name's UTF-8 bytes in it each as a Latin-1 character, and names the
-/// file on disk that way or as meant, by version: the spelling that is
-/// there, the URI's when neither is.
-pub fn local_path(file: &axl_proto::build_event_stream::File) -> Option<std::path::PathBuf> {
+/// The URI a BES `File` names it by; None for an inline one.
+pub fn uri_of(file: &axl_proto::build_event_stream::File) -> Option<&str> {
     use axl_proto::build_event_stream::file;
     match file.file.as_ref()? {
-        file::File::Uri(uri) => uri.strip_prefix("file://").map(|p| {
-            let as_written = std::path::PathBuf::from(percent_decode(p));
-            match repaired(&as_written.to_string_lossy()) {
-                Some(meant) if !as_written.exists() && std::path::Path::new(&meant).exists() => {
-                    std::path::PathBuf::from(meant)
-                }
-                _ => as_written,
-            }
-        }),
+        file::File::Uri(uri) => Some(uri),
         _ => None,
+    }
+}
+
+/// The local path a `file://` URI names, `%XX` escapes decoded
+/// ([`percent_decode`]); None for any other scheme. Bazel spells a
+/// non-ASCII name's UTF-8 bytes in it each as a Latin-1 character, and
+/// names the file on disk that way or as meant, by version: the URI's
+/// spelling, unless only the one meant ([`repaired`]) exists.
+pub fn local_path(uri: &str) -> Option<std::path::PathBuf> {
+    let as_written = std::path::PathBuf::from(percent_decode(uri.strip_prefix("file://")?));
+    match repaired(&as_written.to_string_lossy()) {
+        Some(meant) if !as_written.exists() && std::path::Path::new(&meant).exists() => {
+            Some(std::path::PathBuf::from(meant))
+        }
+        _ => Some(as_written),
     }
 }
 
@@ -79,8 +82,10 @@ pub fn repaired(text: &str) -> Option<String> {
     String::from_utf8(bytes?).ok()
 }
 
-/// `%XX` escapes decoded, as Bazel writes a file URI's path.
-pub(crate) fn percent_decode(s: &str) -> String {
+/// `%XX` escapes decoded, as Bazel writes a file URI's path and the console
+/// an editor link's: a `%` not followed by two hex digits is kept, and bytes
+/// that decode to no UTF-8 are replaced (U+FFFD).
+pub fn percent_decode(s: &str) -> String {
     let bytes = s.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
@@ -107,6 +112,76 @@ fn hex(b: u8) -> Option<u8> {
 
 #[cfg(test)]
 mod tests {
+    /// A `file://` URI's path, decoded; none for another scheme.
+    #[test]
+    fn local_path_decodes_a_file_uri_only() {
+        use std::path::PathBuf;
+        assert_eq!(
+            super::local_path("file:///tmp/a%20b/c"),
+            Some(PathBuf::from("/tmp/a b/c"))
+        );
+        assert_eq!(super::local_path("bytestream://cache/blobs/x/1"), None);
+        assert_eq!(super::local_path("/tmp/a"), None);
+    }
+
+    /// Of the URI's spelling of a non-ASCII name and the one Bazel meant,
+    /// the one on disk; the URI's when neither or both are.
+    #[test]
+    fn local_path_takes_the_spelling_on_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let meant = "тест";
+        let spelled: String = meant.bytes().map(char::from).collect();
+        let uri = |name: &str| {
+            let encoded: String = name
+                .chars()
+                .map(|c| {
+                    // As Bazel writes it: a C1 character's UTF-8 escaped.
+                    if ('\u{80}'..='\u{9f}').contains(&c) {
+                        c.to_string().bytes().map(|b| format!("%{b:02X}")).collect()
+                    } else {
+                        c.to_string()
+                    }
+                })
+                .collect();
+            format!("file://{}/{encoded}.log", dir.path().display())
+        };
+        let at = |name: &str| dir.path().join(format!("{name}.log"));
+
+        assert_eq!(
+            super::local_path(&uri(&spelled)),
+            Some(at(&spelled)),
+            "neither"
+        );
+        std::fs::write(at(meant), "").unwrap();
+        assert_eq!(
+            super::local_path(&uri(&spelled)),
+            Some(at(meant)),
+            "as meant"
+        );
+        std::fs::write(at(&spelled), "").unwrap();
+        assert_eq!(
+            super::local_path(&uri(&spelled)),
+            Some(at(&spelled)),
+            "both"
+        );
+        std::fs::remove_file(at(meant)).unwrap();
+        assert_eq!(
+            super::local_path(&uri(&spelled)),
+            Some(at(&spelled)),
+            "as written"
+        );
+    }
+
+    /// Escapes decoded; a `%` without two hex digits after it kept.
+    #[test]
+    fn percent_decode_keeps_a_bare_percent() {
+        assert_eq!(super::percent_decode("a%20b"), "a b");
+        assert_eq!(super::percent_decode("a%a\u{e9}.rs"), "a%a\u{e9}.rs");
+        assert_eq!(super::percent_decode("%\u{e9}x"), "%\u{e9}x");
+        assert_eq!(super::percent_decode("100%"), "100%");
+        assert_eq!(super::percent_decode("%D1%82"), "т");
+    }
+
     /// Bazel's Latin-1 spelling of UTF-8 decoded back; other text left be.
     #[test]
     fn repaired_decodes_bazels_spelling_only() {
