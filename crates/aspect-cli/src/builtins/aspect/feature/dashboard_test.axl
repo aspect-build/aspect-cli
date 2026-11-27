@@ -589,6 +589,7 @@ def _impl(ctx: TaskContext) -> int:
     state["search"]["query"] = " "
     state["search"]["pattern"] = ctx.std.re.compile(" ")
     state["log"] = ["a b"]
+    _eq("the query matches the row's own space", state["search"]["pattern"].highlight("a b", "<", ">"), "a< >b")
     if _role("search.match") + " " + theme.reset + _role("search.match") + " " + theme.reset in render(state, 60, 20):
         fail("render: a highlight lit a row's padding")
     _eq("re.highlight", ctx.std.re.compile("b+").highlight("abbcb", "<", ">"), "a<bb>c<b>")
@@ -832,6 +833,7 @@ def _impl(ctx: TaskContext) -> int:
     for c in "FAILED".elems():
         on_key(smart, c, 10)
     _eq("a capital matches case", console_lines(smart, smart["log"]), ["ERROR: a FAILED"])
+    _eq("a capital lights Aa", smart["search"]["matches_case"], True)
     if _role("active") + "Aa" not in render(smart, 100, 30):
         fail("render: the case toggle should be lit while a capital matches case")
 
@@ -2206,6 +2208,8 @@ def _impl(ctx: TaskContext) -> int:
     spans = tabs["tab_spans"]
     _eq("the tabs stay in order", [t for _, _, t in spans], ["console", "failures", "metrics", "invocation", "tips"])
     on_key(tabs, "mouse-move:%d:%d" % (spans[3][0] + 1, tabs["tab_row"]), 10)
+    col, row = tabs["hover"]
+    _eq("the pointer over a tab", [t for a, b, t in spans if a <= col and col < b and row == tabs["tab_row"]], ["invocation"])
     if _role("hover") not in render(tabs, 100, 40):
         fail("render: the tab under the pointer is lit")
     on_key(tabs, "mouse-press:%d:%d" % (spans[3][0] + 1, tabs["tab_row"]), 10)
@@ -2357,6 +2361,7 @@ def _impl(ctx: TaskContext) -> int:
     _eq("the line's own colour drawn", "\x1b[1;90mINFO:\x1b[0m done here" in drawn, True)
     _eq("the CLI's line unmarked", "» " in _visible(drawn), False)
     painted["search"]["pattern"] = ctx.std.re.compile("done")
+    _eq("the line's colour kept, its match found in its text", (painted["colour_of"].get("INFO: done here"), painted["search"]["pattern"].highlight("INFO: done here", "<", ">")), ("\x1b[1;90mINFO:\x1b[0m done here", "INFO: <done> here"))
     _eq("a match over the colour", _role("search.match") + "done" in render(painted, 100, 20), True)
 
     # At the top, the oldest line shows from its first row even when a
@@ -2404,7 +2409,7 @@ def _impl(ctx: TaskContext) -> int:
     early["tab"] = "metrics"
     _eq("a build tab says so", "No build yet" in _visible(render(early, 100, 24)), True)
     early["tab"] = "console"
-    _eq("the build tabs muted", _role("muted") + " Failures " in render(early, 100, 24), True)
+    _eq("the build tabs muted", (built(early), _role("muted") + " Failures " in render(early, 100, 24)), (False, True))
 
     # A build running: its panes in one frame; ended, folded to a row; the
     # next build's panes under it.
