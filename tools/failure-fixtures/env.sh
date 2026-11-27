@@ -30,7 +30,8 @@ fi
 
 # The environment Bazel runs in for Bazel version $1, as `env` arguments.
 bazel_env() {
-    BAZEL_ENV=(env -i "HOME=$FAKEHOME" "USER=$USER" "LOGNAME=$USER" "TERM=xterm-256color"
+    local user=${USER:-$(id -un)}
+    BAZEL_ENV=(env -i "HOME=$FAKEHOME" "USER=$user" "LOGNAME=$user" "TERM=xterm-256color"
         "PATH=$(dirname "$BAZELISK"):/usr/bin:/bin:/usr/sbin:/sbin"
         "BAZELISK_HOME=$BAZELISK_HOME" "USE_BAZEL_VERSION=$1")
 }

@@ -8,7 +8,7 @@ stdout,exit} and copies every action stderr/stdout and test.log/test.xml the BEP
 events the failure summary never reads (`DROPPED`): progress chunks, the command lines, the
 build tool logs; an Aborted one of those stays.
 """
-import json, os, re, shutil, socket, sys, getpass
+import json, os, re, shutil, socket, sys, getpass, urllib.parse
 fx, prefix, raw, ob, ib, ws, fakehome = sys.argv[1:8]
 home = os.path.expanduser("~")
 def spellings(p):  # macOS reports /private/var and /private/tmp paths both ways
@@ -25,7 +25,9 @@ host = socket.gethostname(); user = getpass.getuser()
 def scrub(s):
     for a, b in subs:
         if a: s = s.replace(a, b)
-    s = s.replace(host.split(".")[0] if host else "\0", "${HOST}")
+    # The host as a whole word only: a short name like `build` is in `build_event` too.
+    if host:
+        s = re.sub(r"(?<![\w.-])" + re.escape(host.split(".")[0]) + r"(?![\w-])", "${HOST}", s)
     s = re.sub(r"/var/folders/[^/]+/[^/]+/", "${DARWIN_USER_DIR}/", s)
     for k in ("USER", "LOGNAME"):
         s = s.replace(k + "=" + user, k + "=${USER}")
@@ -39,10 +41,18 @@ def scrub_status(e):
     return e
 def copy(uri):
     if not uri.startswith("file://" + ob + "/"): return
-    rel = uri[len("file://" + ob + "/"):]
+    # A URI's path is percent-encoded, and Bazel spells a non-ASCII name's UTF-8 bytes as
+    # Latin-1 characters in it (`Ñ%C2%82` for `т`); the file on disk has one spelling or
+    # the other (Bazel 9 names it as the URI does, Bazel 8 as meant). Kept as found.
+    rel = urllib.parse.unquote(uri[len("file://" + ob + "/"):])
+    if not os.path.exists(os.path.join(ob, rel)):
+        try:
+            rel = rel.encode("latin-1").decode("utf-8")
+        except (UnicodeEncodeError, UnicodeDecodeError):
+            pass
     dst = os.path.join(fx, prefix + ".files", rel)
     try:
-        os.makedirs(os.path.dirname(dst), exist_ok=True); shutil.copyfile(uri[7:], dst)
+        os.makedirs(os.path.dirname(dst), exist_ok=True); shutil.copyfile(os.path.join(ob, rel), dst)
     except OSError as x:
         print("fxpost: cannot copy", rel, x, file=sys.stderr)
 # Event kinds the failure summary never reads; they are most of a fixture's bytes.

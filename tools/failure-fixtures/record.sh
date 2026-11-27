@@ -10,6 +10,7 @@
 # (default ${TMPDIR:-/tmp}/aspect-failure-fixtures).
 # Variants listed in fixtures/<case>/variants: noall (rerun without
 # --build_event_publish_all_actions), nocolor (rerun with --color=no --curses=no),
+# merged (rerun with Bazel's stdout on the pty too, as a terminal shares it with stderr),
 # console_only (no BEP; 90s cap, then the server is killed - for the OOM case).
 # The server is left running for the next case; `refresh_all.sh` shuts it down per version.
 set -u
@@ -37,8 +38,10 @@ console_only=0
 case " $variants " in *" console_only "*) console_only=1 ;; esac
 OB=$("${BAZEL_ENV[@]}" "$BAZELISK" $STARTUP info output_base 2>/dev/null)
 IB=$("${BAZEL_ENV[@]}" "$BAZELISK" $STARTUP info install_base 2>/dev/null)
-one() { # <prefix> <extra flags> <strip publish_all: 0|1>
-    local prefix=$1 flags=$2 strip=$3 args cap=300 bep
+one() { # <prefix> <extra flags> <strip publish_all: 0|1> [merged]
+    local prefix=$1 flags=$2 strip=$3 merged=${4:-} args cap=300 bep tostdout
+    tostdout='>"$out/stdout"'
+    [ -n "$merged" ] && tostdout=
     args=$(cat "$FX/cmd")
     [ "$strip" = 1 ] && args=${args//--build_event_publish_all_actions/}
     rm -rf "$RAW" "$FX/$prefix".{bep.json,console,stdout,exit,files}
@@ -53,9 +56,10 @@ one() { # <prefix> <extra flags> <strip publish_all: 0|1>
         # shellcheck disable=SC2086
         perl -e 'alarm 300; exec @ARGV' "${BAZEL_ENV[@]}" "$BAZELISK" $STARTUP $args --disk_cache= --lockfile_mode=off --nobuild >/dev/null 2>&1 </dev/null
     fi
-    # Bazel's stdout and exit code to their own files, its stderr on the pty.
+    # Bazel's stdout and exit code to their own files (merged: its stdout on
+    # the pty with its stderr), its stderr on the pty.
     # shellcheck disable=SC2086
-    on_pty "$RAW/console" perl -e "alarm $cap; exec @ARGV" "${BAZEL_ENV[@]}" sh -c 'out=$1; shift; "$@" >"$out/stdout"; echo $? >"$out/exit"' \
+    on_pty "$RAW/console" perl -e "alarm $cap; exec @ARGV" "${BAZEL_ENV[@]}" sh -c 'out=$1; shift; "$@" '"$tostdout"'; echo $? >"$out/exit"' \
         sh "$RAW" "$BAZELISK" $STARTUP $args --disk_cache= --lockfile_mode=off $flags $bep </dev/null >/dev/null 2>&1
     if [ $console_only = 1 ]; then
         kill -9 "$(cat "$OB/server/server.pid.txt" 2>/dev/null)" 2>/dev/null
@@ -67,4 +71,5 @@ one() { # <prefix> <extra flags> <strip publish_all: 0|1>
 one "$ver" "--color=yes --curses=yes" 0
 case " $variants " in *" noall "*) one "$ver.noall" "--color=yes --curses=yes" 1 ;; esac
 case " $variants " in *" nocolor "*) one "$ver.nocolor" "--color=no --curses=no" 0 ;; esac
+case " $variants " in *" merged "*) one "$ver.merged" "--color=yes --curses=yes" 0 merged ;; esac
 rm -rf "$RAW"
