@@ -210,7 +210,7 @@ def _commas(n):
     return out
 
 def _split_of(split):
-    return {k: split[k] for k in ("done", "total", "ran", "local", "disk", "remote", "internal", "other", "failed", "not_run", "unreported") if split[k] or k in ("done", "total")}
+    return {k: split[k] for k in ("done", "total", "ran", "local", "disk", "remote", "internal", "other", "failed", "skipped", "unreported") if split[k] or k in ("done", "total")}
 
 def _actions_tests(ctx):
     """The build's actions in one unit: the bar, Results and Metrics."""
@@ -285,7 +285,7 @@ def _actions_tests(ctx):
     # Final: BuildMetrics' exact split, as real builds gave it. A large one:
     # 2,000 genrules failed (Failures lists each), 611 action cache hits.
     big = _screen(ctx, ["x"], building = False, ended = True, fails = _failed_records(2000), counts = _failed_counts(new_counts(), 2000), done_total = (9301, 9301, False), inv = {"build_finished": _FAILURE, "build_metrics": _BIG})
-    _eq("a real failed build's split", _split_of(action_split(big)), dict(done = 9301, total = 9301, ran = 2600, local = 611, internal = 2390, failed = 2000, not_run = 1700))
+    _eq("a real failed build's split", _split_of(action_split(big)), dict(done = 9301, total = 9301, ran = 2600, local = 611, internal = 2390, failed = 2000, skipped = 1700))
 
     # Real Bazel 9.3.3 builds (`_REAL`): the local action cache is the
     # action cache's hits; failed are the actions the event stream says
@@ -296,16 +296,16 @@ def _actions_tests(ctx):
     for name, want in [
         ("failing test", dict(done = 13, total = 13, ran = 2, internal = 11)),
         ("keep_going", dict(done = 45, total = 45, ran = 41, internal = 1, failed = 3)),
-        ("nokeep_going incremental", dict(done = 45, total = 45, internal = 2, failed = 2, not_run = 41)),
+        ("nokeep_going incremental", dict(done = 45, total = 45, internal = 2, failed = 2, skipped = 41)),
         ("nokeep_going big", dict(done = 1831, total = 2001, local = 1827, internal = 1, failed = 3)),
-        ("analysis failure", dict(done = 3, total = 3, internal = 1, not_run = 2)),
+        ("analysis failure", dict(done = 3, total = 3, internal = 1, skipped = 2)),
         ("loading failure, no count", dict(done = 1, total = 1, internal = 1)),
         ("tests and genrules, a disk hit", dict(done = 52, total = 52, local = 47, disk = 1, internal = 1, failed = 3)),
         ("success", dict(done = 14, total = 14, ran = 13, internal = 1)),
-        ("cc failure", dict(done = 17, total = 17, ran = 4, internal = 11, failed = 1, not_run = 1)),
-        ("cold cc failure", dict(done = 17, total = 17, ran = 4, internal = 11, failed = 1, not_run = 1)),
+        ("cc failure", dict(done = 17, total = 17, ran = 4, internal = 11, failed = 1, skipped = 1)),
+        ("cold cc failure", dict(done = 17, total = 17, ran = 4, internal = 11, failed = 1, skipped = 1)),
         ("disk cache, one failing", dict(done = 8, total = 8, disk = 6, internal = 1, failed = 1)),
-        ("undeclared inclusion", dict(done = 7, total = 7, ran = 3, internal = 2, failed = 1, not_run = 1)),
+        ("undeclared inclusion", dict(done = 7, total = 7, ran = 3, internal = 2, failed = 1, skipped = 1)),
     ]:
         _eq("real: " + name, _split_of(action_split(_real(ctx, name))), want)
 
@@ -315,7 +315,7 @@ def _actions_tests(ctx):
         st = _real(ctx, name)
         split = action_split(st)
         _eq("╳ is the stream's failed actions: " + name, split["failed"], len(_REAL[name][8]))
-        _eq("the parts sum to the done count: " + name, split["ran"] + split["local"] + split["disk"] + split["remote"] + split["internal"] + split["failed"] + split["not_run"] + split["other"] + split["unreported"], split["done"])
+        _eq("the parts sum to the done count: " + name, split["ran"] + split["local"] + split["disk"] + split["remote"] + split["internal"] + split["failed"] + split["skipped"] + split["other"] + split["unreported"], split["done"])
         label = actions_text(split)[0]
         hits = hit_count(split)
         _eq("the label's count and %: " + name, label, "%s · %s cache hits%s" % (_commas(split["done"]) + (" action" if split["done"] == 1 else " actions"), _commas(hits), " (%d%%)" % hit_percent(split) if split["done"] else ""))
@@ -335,7 +335,7 @@ def _actions_tests(ctx):
     for text in ["\x1b[32m[1 / 2]\x1b[0m 1 action running\n", "\r\x1b[1A\x1b[K\x1b[32m[2 / 2]\x1b[0m no actions running\n", "(10:00:00) \x1b[32m[5 / 7]\x1b[0m 2 actions running\n\r\x1b[1A\x1b[K\x1b[32m[13 / 13]\x1b[0m no actions running\n"]:
         _progress_event(late, text)
     _eq("the stream's last count", build_progress(late), (13, 13, False))
-    _eq("its split", _split_of(action_split(late)), dict(done = 13, total = 13, ran = 1, internal = 9, failed = 1, not_run = 2))
+    _eq("its split", _split_of(action_split(late)), dict(done = 13, total = 13, ran = 1, internal = 9, failed = 1, skipped = 2))
     _eq("a frame's while the build runs", build_progress(dict(late, building = True, progress = ["[3 / 9] 1 action running"])), (3, 9, False))
 
     # Ended, the newest count is the larger, whichever wrote it: the last
@@ -397,7 +397,7 @@ def _actions_tests(ctx):
         if row.startswith("[20"):
             fresh = action_split(half)
             _eq("a fresh gap is done but unreported", [fresh[k] for k in ("ran", "disk", "internal", "failed", "local", "unreported", "done", "total")], [0, 10, 1, 0, 0, 9, 20, 30])
-            _eq("the parts: unreported, Bazel's running, the rest truly pending", [(p[2], p[1]) for p in action_parts(fresh) if p[1]], [("disk", 10), ("internal", 1), ("unreported", 9), ("running", 3), ("pending", 7)])
+            _eq("the parts: unreported, Bazel's running, the rest truly pending", [(p.words, p.count) for p in action_parts(fresh) if p.count], [("disk", 10), ("internal", 1), ("unreported", 9), ("running", 3), ("pending", 7)])
             _eq("dimmed, after the hits, before running", [_visible(r) for r in action_results(fresh, 90, 2)], ["▓ 10 disk cache hits · ░ 1 internal · ? 9 unreported · ─ 3 running · 7 pending"])
             _eq("on the bar, done", [_visible(action_bar(fresh, 30)).count(g) for g in ("┈", "─")], [9, 10])
     told = action_split(half)
@@ -407,7 +407,7 @@ def _actions_tests(ctx):
     _eq("a hit-less live cache hidden", "remote" in _visible(" ".join(action_results(told, 90))), False)
     total = 0
     for p in action_parts(told):
-        total += p[1]
+        total += p.count
     _eq("the parts sum to the total", total, 30)
     _eq("an event for a settled one takes it back", action_split(dict(half, counts = dict(half["counts"], actions_seen = half["counts"]["actions_seen"] + 2)))["local"], 8)
 
@@ -499,7 +499,7 @@ def _actions_tests(ctx):
     _eq("logged actions never more than executed", logged["ran"] + logged["disk"] + logged["remote"] + logged["internal"] <= 10, True)
     _eq("an action cache hit runner without the statistics", _runners(9, [("action cache hit", 7), ("linux-sandbox", 9)], stats = False)["local"], 7)
     kg = _screen(ctx, ["x"], building = False, fails = _failed_records(1), counts = _failed_counts(new_counts(), 1), done_total = (11, 11, False), inv = {"build_finished": _FAILURE, "build_metrics": _KG})
-    _eq("a real small one", _split_of(action_split(kg)), dict(done = 11, total = 11, ran = 1, local = 4, internal = 4, failed = 1, not_run = 1))
+    _eq("a real small one", _split_of(action_split(kg)), dict(done = 11, total = 11, ran = 1, local = 4, internal = 4, failed = 1, skipped = 1))
     ok = _screen(ctx, ["x"], building = False, done_total = (2, 2, False), inv = {"build_finished": _SUCCESS, "build_metrics": _OK})
     _eq("a real successful one", _split_of(action_split(ok)), dict(done = 2, total = 2, ran = 1, internal = 1))
 
@@ -517,9 +517,9 @@ def _actions_tests(ctx):
         count_spawn(mix["counts"], struct(cache_hit = False, runner = "darwin-sandbox", outputs = [struct(type = 100 + i)]))
     _fail_event(mix, "Genrule:spawn", 0)
     count_spawn(mix["counts"], struct(cache_hit = False, runner = "darwin-sandbox", outputs = [struct(type = "bazel-out/f0")]))
-    _eq("a failed action's logged spawn is failed, not ran too", _split_of(action_split(mix)), dict(done = 14, total = 14, ran = 9, local = 2, internal = 1, failed = 1, not_run = 1))
+    _eq("a failed action's logged spawn is failed, not ran too", _split_of(action_split(mix)), dict(done = 14, total = 14, ran = 9, local = 2, internal = 1, failed = 1, skipped = 1))
     mix["all_actions"] = False
-    _eq("with only failures published too", _split_of(action_split(mix)), dict(done = 14, total = 14, ran = 9, local = 2, internal = 1, failed = 1, not_run = 1))
+    _eq("with only failures published too", _split_of(action_split(mix)), dict(done = 14, total = 14, ran = 9, local = 2, internal = 1, failed = 1, skipped = 1))
 
     # Two targets' identical actions (Bazel 9.3.3, //mix:sa1 //mix:sa2):
     # `[3 / 3]`, one ran, the other's outputs shared, and nothing else says
@@ -529,7 +529,7 @@ def _actions_tests(ctx):
         runner_count = [struct(name = "total", count = 2), struct(name = "internal", count = 1), struct(name = "darwin-sandbox", count = 1)],
         action_cache_statistics = struct(hits = 0, misses = 1),
     ), build_graph_metrics = struct(built_values = [struct(skyfunction_name = "ACTION_EXECUTION", count = 3)]))})
-    _eq("a shared action is skipped", _split_of(action_split(shared)), dict(done = 3, total = 3, ran = 1, internal = 1, not_run = 1))
+    _eq("a shared action is skipped", _split_of(action_split(shared)), dict(done = 3, total = 3, ran = 1, internal = 1, skipped = 1))
     _eq("parts past Bazel's count are shown as counted, the count Bazel's", _split_of(action_split(dict(ok, done_total = (1, 3, True)))), dict(done = 1, total = 1, ran = 1, internal = 1))
     cached = _screen(ctx, ["x"], building = False, ended = True, done_total = (8563, 8563, False), inv = {"build_finished": _SUCCESS, "build_metrics": _REUSED, "options_parsed": struct(cmd_line = ["--disk_cache=/c", "--remote_cache=grpc://c"], explicit_cmd_line = [])})
     final = action_split(cached)
@@ -573,7 +573,7 @@ def _actions_tests(ctx):
     own_inv = {"options_parsed": struct(cmd_line = ["--execution_log_binary_file=/tmp/x.binlog"], explicit_cmd_line = [])}
     blind = _screen(ctx, ["x"], progress = ["[3,830 / 8,563] 16 actions running"], inv = own_inv)
     blind["counts"].update(spawns = 0)
-    _eq("no log: the done count alone, what runs and what is pending", action_parts(action_split(blind)), [("━", 3830, "done", "", ""), ("─", 16, "running", "border", ""), ("", 4717, "pending", "", "")])
+    _eq("no log: the done count alone, what runs and what is pending", [(p.glyph, p.count, p.words, p.role, p.how) for p in action_parts(action_split(blind))], [("━", 3830, "done", "", ""), ("─", 16, "running", "border", ""), ("", 4717, "pending", "", "")])
 
     # While it runs, the parts sum to the bar's total: what is not done
     # yet too, the actions running now (the Running pane's count) under
@@ -582,7 +582,7 @@ def _actions_tests(ctx):
         sp = action_split(dict(st, building = True))
         total = 0
         for p in action_parts(sp):
-            total += p[1]
+            total += p.count
         return (total, sp["total"])
 
     for st in (mid, blind, meld):
@@ -590,18 +590,18 @@ def _actions_tests(ctx):
         _eq("the parts sum to the bar's total", got, want)
     over = dict(mid, progress = ["[8,560 / 8,590] 200 actions running"])
     _eq("more running than not done: clamped, still the total", _sums(over)[0], _sums(over)[1])
-    _eq("all of it running", [p[1:3] for p in action_parts(action_split(dict(over, building = True))) if p[2] in ("running", "pending")], [(30, "running"), (0, "pending")])
+    _eq("all of it running", [(p.count, p.key) for p in action_parts(action_split(dict(over, building = True))) if p.key in ("running", "pending")], [(30, "running"), (0, "pending")])
     lag = dict(mid, progress = ["[8,560 / 8,590] no actions running"])
-    _eq("none running: all pending, under the bar's glyph", [p for p in action_parts(action_split(dict(lag, building = True))) if p[2] in ("running", "pending")], [("─", 0, "running", "border", ""), ("─", 30, "pending", "border", "")])
+    _eq("none running: all pending, under the bar's glyph", [(p.glyph, p.count, p.key, p.role, p.how) for p in action_parts(action_split(dict(lag, building = True))) if p.key in ("running", "pending")], [("─", 0, "running", "border", ""), ("─", 30, "pending", "border", "")])
     _eq("its sum", _sums(lag)[0], _sums(lag)[1])
     drawn = _visible(render(dict(mid, building = True), 140, 30))
     _eq("drawn, running and pending on one row", "─ 16 running · 4,717 pending" in drawn, True)
-    _eq("none at the end", [p for p in action_parts(action_split(cached)) if p[2] in ("running", "pending")], [])
+    _eq("none at the end", [p for p in action_parts(action_split(cached)) if p.key in ("running", "pending")], [])
     _eq("the ? key names it", any(["─ not done: running or pending" in r for r in help_rows(mid, 100)]), True)
     shown = _visible(render(blind, 140, 30))
     _eq("no log: drawn as done", ("Actions  ━ 3,830 done" in shown, "━" * 10 in shown), (True, True))
     blind.update(building = False, ended = True, inv = dict(own_inv, build_finished = _SUCCESS, build_metrics = _REUSED), done_total = (8563, 8563, False))
-    _eq("no log, at the end: BuildMetrics' split, unconfigured caches hidden", [p[2] for p in action_parts(action_split(blind))], ["ok", "local action cache", "disk", "remote", "internal"])
+    _eq("no log, at the end: BuildMetrics' split, unconfigured caches hidden", [p.key for p in action_parts(action_split(blind))], ["ran", "local", "disk", "remote", "internal"])
 
     # The Actions rows: ran, the cache hits as one group with their total
     # and `▓` once, then failed and internal; `local` under 100 columns;
@@ -621,13 +621,13 @@ def _actions_tests(ctx):
     # goes first, then a cache with no hits, then counts in thousands, then
     # whole parts; ran, failed, skipped, the hits' total and what is not
     # done stay, and nothing is cut in half.
-    jammed = dict(measured, ran = 30, local = 0, disk = 0, remote = 0, failed = 5, not_run = 10, internal = 1, done = 46, total = 46)
+    jammed = dict(measured, ran = 30, local = 0, disk = 0, remote = 0, failed = 5, skipped = 10, internal = 1, done = 46, total = 46)
     got = [_visible(r) for r in action_results(jammed, 17, 5, short = True)]
 
     # Short terminals: the drop order, failed last.
-    probe = dict(done = 0, total = 0, more = False, counted = True, known = True, final = True, estimated = False, ran = 0, local = 0, disk = 0, remote = 0, internal = 0, other = 0, failed = 0, not_run = 0, unreported = 0, failed_build = True, running = False, running_now = 0, disk_on = True, remote_on = False, published = True)
-    zero = dict(probe, done = 32, total = 32, failed = 16, not_run = 15, internal = 1)
-    big9 = dict(probe, done = 9301, total = 9301, ran = 5705, local = 2836, disk = 300, failed = 4, not_run = 411, internal = 33)
+    probe = dict(done = 0, total = 0, more = False, counted = True, known = True, final = True, estimated = False, ran = 0, local = 0, disk = 0, remote = 0, internal = 0, other = 0, failed = 0, skipped = 0, unreported = 0, failed_build = True, running = False, running_now = 0, disk_on = True, remote_on = False, published = True)
+    zero = dict(probe, done = 32, total = 32, failed = 16, skipped = 15, internal = 1)
+    big9 = dict(probe, done = 9301, total = 9301, ran = 5705, local = 2836, disk = 300, failed = 4, skipped = 411, internal = 33)
     for split, room, rows, want in [
         (zero, 13, 2, ["╳ 16 failed", "○ 15 skipped"]),
         (zero, 30, 1, ["╳ 16 failed · ○ 15 skipped"]),
@@ -664,7 +664,7 @@ def _actions_tests(ctx):
     _eq("a lone hit's meaning in fewer words where narrow", [_visible(r) for r in action_results(dict(jammed, local = 1234), 12, 6, short = True)], ["ran 35:", "  █ 30 ok", "  ╳ 5 failed", "▒ 1.2k local", "○ 10 skipped"])
     _eq("no label with no hit left", any(["hits" in _visible(r) for r in action_results(dict(jammed, final = False, local = 0, estimated = True), 17, 5, short = True)]), False)
     _eq("never cut in half", [("…" in r, text_width(r) <= 17) for r in got], [(False, True)] * len(got))
-    live_jam = dict(jammed, final = False, running = True, running_now = 4, total = 62, internal = 1, unreported = 2, local = 0, estimated = True, not_run = 0, disk_on = False, remote_on = False)
+    live_jam = dict(jammed, final = False, running = True, running_now = 4, total = 62, internal = 1, unreported = 2, local = 0, estimated = True, skipped = 0, disk_on = False, remote_on = False)
     got = [_visible(r) for r in action_results(live_jam, 17, 5, short = True)]
     _eq("live: running and unreported stay, pending goes first", ["─ 4 running" in " ".join(got), "12 pending" in " ".join(got), "? 2 unreported" in " ".join(got), any(["…" in r or text_width(r) > 17 for r in got])], [True, False, True, False])
 
@@ -675,7 +675,7 @@ def _actions_tests(ctx):
     _eq("other only where there is some", "other" in _visible(" ".join(action_results(measured, 89, 2))), False)
     _eq("the glyph alone coloured", (_role("accent") + "█" + theme.reset + " 5,705 ok") in action_results(measured, 89, 2)[0], True)
     _eq("a group's header says its total", _visible(action_results(measured, 89, 2)[0]).startswith("ran 5,709: "), True)
-    _eq("the groups and the rest add up to the actions", measured["ran"] + measured["failed"] + measured["local"] + measured["disk"] + measured["remote"] + measured["internal"], measured["done"] - measured["not_run"] - measured["other"])
+    _eq("the groups and the rest add up to the actions", measured["ran"] + measured["failed"] + measured["local"] + measured["disk"] + measured["remote"] + measured["internal"], measured["done"] - measured["skipped"] - measured["other"])
     _eq("k", [short_count(n) for n in (526, 1999, 48123, 1250000)], ["526", "1.9k", "48k", "1.2M"])
     greg_screen = dict(cached, fails = _failed_records(4), counts = _failed_counts(cached["counts"], 4), done_total = (8483, 8483, False), inv = {"build_finished": _FAILURE, "build_metrics": struct(action_summary = struct(
         actions_executed = 5649,

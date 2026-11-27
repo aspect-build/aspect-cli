@@ -535,15 +535,15 @@ def action_split(state: dict) -> dict:
     `action_failures`), `local` (Bazel's action cache said its outputs were
     still valid), `disk` and `remote` (a cache served every spawn of it),
     `internal` (no spawn), `other` (what of Bazel's counts fits no kind,
-    rare), `not_run` (`NOT_RUN_WORD`: counted done without being run or
-    checked against a cache, `_NOT_RUN_KINDS`) and `unreported` (done, its
+    rare), `skipped` (counted done without being run or checked against a
+    cache, `_SKIPPED_KINDS`) and `unreported` (done, its
     kind not said yet); `disk_on` and `remote_on` say which caches the
     build was given.
 
     Once the build has ended with its `BuildMetrics` (`final`), the split
     is exact: the executed actions by the execution log's actions where it
     was read (`log_kinds`), else by `runner_count`, each failed one taken
-    out of where Bazel counted it, and `not_run` the rest of the done
+    out of where Bazel counted it, and `skipped` the rest of the done
     count; parts past it are a counting error, shown as counted, never cut
     to fit. While it runs, the split is the events' and the execution
     log's (`_published_split`, `estimated`), or with only the log its kinds
@@ -556,7 +556,7 @@ def action_split(state: dict) -> dict:
     summary = bes_get(inv.get("build_metrics"), "action_summary")
     executed = bes_get(summary, "actions_executed")
     caches = cache_kinds(inv)
-    split = dict(done = max(0, done), total = max(0, total, done), more = more, counted = done >= 0, known = False, final = False, estimated = False, ran = 0, local = 0, disk = 0, remote = 0, internal = 0, other = 0, failed = 0, not_run = 0, unreported = 0, failed_build = False, running = bool(state.get("building")), running_now = running_count(state), disk_on = caches[0], remote_on = caches[1])
+    split = dict(done = max(0, done), total = max(0, total, done), more = more, counted = done >= 0, known = False, final = False, estimated = False, ran = 0, local = 0, disk = 0, remote = 0, internal = 0, other = 0, failed = 0, skipped = 0, unreported = 0, failed_build = False, running = bool(state.get("building")), running_now = running_count(state), disk_on = caches[0], remote_on = caches[1])
     kinds = c.get("log_kinds") or {}
     logged = state.get("exec_log_read") and not own_execution_log(inv) and (kinds.get("ran", 0) + kinds.get("disk", 0) + kinds.get("remote", 0)) > 0
     if not state.get("building") and type(executed) == "int":
@@ -614,8 +614,7 @@ def action_split(state: dict) -> dict:
             other = max(0, spawned - from_internal - (in_total - from_internal - left) - ran - disk - remote)
         whole = ran + local + disk + remote + internal + failed + other
         succeeded = build_succeeded(inv)
-        not_run = max(0, done - whole)
-        split.update(counted = True, known = True, final = True, ran = ran, local = local, disk = disk, remote = remote, internal = internal, failed = failed, not_run = not_run, other = other, more = False, failed_build = not succeeded)
+        split.update(counted = True, known = True, final = True, ran = ran, local = local, disk = disk, remote = remote, internal = internal, failed = failed, skipped = max(0, done - whole), other = other, more = False, failed_build = not succeeded)
         split["done"] = done if done >= 0 else whole
         created = bes_get(summary, "actions_created", 0) or 0
         if succeeded:
@@ -748,14 +747,27 @@ def actions_text(split: dict) -> list:
     share = " (%d%%)" % pct if pct != None else ""
     return ["%s · %s cache hits%s" % (actions, hits, share), "%s · %s hits%s" % (n, hits, share), actions, n]
 
-# The word of the actions Bazel counted done without running them or
-# checking a cache (`action_split`'s `not_run`), here alone, and what those
-# can be, read in Bazel's source (`ExecutionProgressReceiver` counts done
-# every action key its graph evaluates, one whose inputs are unchanged too,
-# which no metric counts).
-NOT_RUN_WORD = "skipped"
+# What the actions Bazel counted done without running them or checking a
+# cache (`action_split`'s `skipped`) can be, read in Bazel's source:
+# `ExecutionProgressReceiver` counts done every action key its graph
+# evaluates, one whose inputs are unchanged too, which no metric counts.
+_SKIPPED_KINDS = "already up to date in Bazel's memory (a warm server found nothing they depend on changed), made by an identical action of another target, or an input failed; on Bazel 7 and 8 also internal actions, which their runner counts leave out where spawns outnumber actions"
 
-_NOT_RUN_KINDS = "already up to date in Bazel's memory (a warm server found nothing they depend on changed), made by an identical action of another target, or an input failed; on Bazel 7 and 8 also internal actions, which their runner counts leave out where spawns outnumber actions"
+# One part of the Actions rows: what it counts (`key`, a kind's key in
+# `action_split`, else `done`, `running`, `pending` or `hits`, the cache
+# hits' total), its glyph, count, words and role, and how it is drawn
+# (`how`: "", `dim` a configured cache with no hits, `estimate` the local
+# action cache while a build runs, `muted`, or `held` a live part kept at
+# 0); `alone` where it stands for its group (`_ALONE`).
+ActionPart = record(
+    key = field(str),
+    glyph = field(str),
+    count = field(int),
+    words = field(str),
+    role = field(str),
+    how = field(str, default = ""),
+    alone = field(bool, default = False),
+)
 
 # Each kind of action the bar and the Actions rows tell apart: its key in
 # `action_split`, its glyph (each its own shape, apart without colour), its
@@ -766,23 +778,23 @@ _ACTION_KINDS = [
     ("local", "▒", "muted", "local action cache"),
     ("disk", "▓", "success", "disk"),
     ("remote", "▓", "success", "remote"),
-    ("not_run", "○", "muted", NOT_RUN_WORD),
+    ("skipped", "○", "muted", "skipped"),
     ("internal", "░", "subtle", "internal"),
     ("other", "▌", "muted", "other"),
 ]
 
 _KIND = {key: (glyph, role, words) for key, glyph, role, words in _ACTION_KINDS}
 
-def _part(key: str, n: int, how = "", glyph = None) -> tuple:
+def _part(key: str, n: int, how: str = "", glyph: str | None = None) -> ActionPart:
     """An Actions row part of kind `key` (`_ACTION_KINDS`) counting `n`;
     `glyph` where it shares its kind's with the part before it ("")."""
     kind_glyph, role, words = _KIND[key]
-    return (kind_glyph if glyph == None else glyph, n, words, role, how)
+    return ActionPart(key = key, glyph = kind_glyph if glyph == None else glyph, count = n, words = words, role = role, how = how)
 
 # The bar's segments, in order: glyph, role, and the keys in
 # `action_split` they sum; `unreported` the done count no event or log says
 # the kind of yet.
-_SEGMENTS = [(_KIND[keys[0]][0], _KIND[keys[0]][1], keys) for keys in (["ran"], ["disk", "remote"], ["local"], ["other"], ["internal"], ["failed"], ["not_run"])] + [("┈", "border", ["unreported"])]
+_SEGMENTS = [(_KIND[keys[0]][0], _KIND[keys[0]][1], keys) for keys in (["ran"], ["disk", "remote"], ["local"], ["other"], ["internal"], ["failed"], ["skipped"])] + [("┈", "border", ["unreported"])]
 
 # A done count nothing tells apart: no execution log to read.
 _DONE = ("━", "")
@@ -867,10 +879,8 @@ def bar_row(state: dict, cols: int) -> str:
     return " " + action_bar(split, width) + " " + label + " " * max(0, cols - 2 - width - text_width(label))
 
 def action_parts(split: dict) -> list:
-    """The Actions rows' parts, each `(glyph, count, words, role, how)`,
-    the bar's glyphs their legend, `how` "" or `dim` (a configured cache
-    with no hits, at the end) or `estimate` (the local action cache while
-    a build runs, `~`) or `muted` (`unreported`). Two groups, which with
+    """The Actions rows' parts (`ActionPart`), the bar's glyphs their
+    legend. Two groups, which with
     the rest add up to the actions: what ran (`ok`, `failed`) and the
     cache hits (the local action cache, always at the end; disk and remote
     where the build was given that cache, or hit it, live only once they
@@ -887,9 +897,12 @@ def action_parts(split: dict) -> list:
     undone = split["total"] - split["done"]
     if split.get("running") and undone > 0:
         now = min(split.get("running_now", 0), undone)
-        remaining = [(_UNDONE[0], now, "running", _UNDONE[1], ""), ("" if now else _UNDONE[0], undone - now, "pending", "" if now else _UNDONE[1], "")]
+        remaining = [
+            ActionPart(key = "running", glyph = _UNDONE[0], count = now, words = "running", role = _UNDONE[1]),
+            ActionPart(key = "pending", glyph = "" if now else _UNDONE[0], count = undone - now, words = "pending", role = "" if now else _UNDONE[1]),
+        ]
     if not split["known"]:
-        return [(_DONE[0], split["done"], "done", _DONE[1], "")] + remaining
+        return [ActionPart(key = "done", glyph = _DONE[0], count = split["done"], words = "done", role = _DONE[1])] + remaining
     final = split["final"]
     parts = [_part("ran", split["ran"])]
     if split["failed"]:
@@ -901,45 +914,47 @@ def action_parts(split: dict) -> list:
         if split[key] or (final and on):
             parts.append(_part(key, split[key], "" if split[key] else "dim", glyph))
             glyph = ""
-    parts.append(_part("not_run", split.get("not_run", 0)))
+    parts.append(_part("skipped", split.get("skipped", 0)))
     parts.append(_part("internal", split["internal"]))
     parts.append(_part("other", split["other"]))
-    parts.append(("?", split["unreported"], "unreported", "", "muted"))
-    return [p for p in parts if p[1] or p[4] == "dim" or (p[2] == "local action cache" and final)] + remaining
+    parts.append(ActionPart(key = "unreported", glyph = "?", count = split["unreported"], words = "unreported", role = "", how = "muted"))
+    return [p for p in parts if p.count or p.how == "dim" or (p.key == "local" and final)] + remaining
 
 # The two groups of parts, each with its subtotal on its header: what ran,
 # and the cache hits.
-_RAN = ["ok", "failed"]
+_RAN = ["ran", "failed"]
 
-_HITS = ["local action cache", "disk", "remote"]
+_HITS = ["local", "disk", "remote"]
 
 # A group's one part, its header dropped, says the group's meaning.
-_ALONE = {"ok": "ran", "local action cache": "local action cache hits", "disk": "disk cache hits", "remote": "remote cache hits"}
+_ALONE = {"ran": "ran", "local": "local action cache hits", "disk": "disk cache hits", "remote": "remote cache hits"}
 
-def _part_text(part: tuple, level: int) -> tuple:
+def _part_text(part: ActionPart, level: int) -> tuple:
     """`(plain, drawn)` of one part at `level` (0 whole, 1 `local`, 2
     `short_count` as well, 3 a lone cache hit part as its cache's name
     alone): its glyph coloured, a dimmed or estimated one muted, `~`
     before an estimate."""
-    glyph, n, words, role, how = part
-    if level >= 1 and words == "local action cache":
-        words = "local"
-    elif level >= 1 and words == "cache hits":
+    words = part.words
+    if level >= 1 and part.key == "hits":
         words = "hits"
-    elif level >= 1 and words.endswith(" cache hits") and words != "cache hits":
+    elif level >= 1 and part.alone and part.key in _HITS:
         # A group's one part, its meaning in fewer words where they're
         # short, and at last its cache's alone.
         words = words.partition(" ")[0] + (" cache hits" if level < 2 else " hits" if level < 3 else "")
-    count = ("~" if how == "estimate" else "") + (_thousands(n) if level < 2 else short_count(n))
+    elif level >= 1 and part.key == "local":
+        words = "local"
+    count = ("~" if part.how == "estimate" else "") + (_thousands(part.count) if level < 2 else short_count(part.count))
+    glyph = part.glyph
     plain = (glyph + " " if glyph else "") + count + " " + words
-    if how:
+    if part.how:
         return (plain, _c("muted") + plain + _RESET)
-    return (plain, ((_c(role) + glyph + _RESET) if role and glyph else glyph) + plain[len(glyph):])
+    return (plain, ((_c(part.role) + glyph + _RESET) if part.role and glyph else glyph) + plain[len(glyph):])
 
-# The Actions rows' parts in their order, by their words.
-_PART_ORDER = ["done", "ok", "failed", "local action cache", "disk", "remote", NOT_RUN_WORD, "internal", "other", "unreported", "running", "pending"]
+# The Actions rows' parts in their order, by their keys.
+_PART_ORDER = ["done", "ran", "failed", "local", "disk", "remote", "skipped", "internal", "other", "unreported", "running", "pending"]
 
-# The live parts that keep their place at 0 once shown: glyph and role.
+# The live parts that keep their place at 0 once shown, by key: glyph and
+# role.
 _HELD = {"unreported": ("?", ""), "running": ("─", "border"), "pending": ("", ""), "internal": _KIND["internal"][:2]}
 
 # What goes first where the Actions rows have no room for every part: what
@@ -947,29 +962,30 @@ _HELD = {"unreported": ("?", ""), "running": ("─", "border"), "pending": ("", 
 # then internal, other, pending; then the hits become their total alone,
 # which goes next; then running, unreported, what ran ok, what was skipped;
 # failed never.
-_DROP_ORDER = ["zero", "internal", "other", "pending", "collapse", "cache hits", "running", "unreported", "ok", NOT_RUN_WORD]
+_DROP_ORDER = ["zero", "internal", "other", "pending", "collapse", "hits", "running", "unreported", "ran", "skipped"]
 
 def _drop(parts: list, k: int) -> list:
-    """`parts` with `_DROP_ORDER`'s first `k` applied: each drops what it
-    names, `zero` the parts that count nothing and the caches with no
-    hits, `collapse` turns the hits into their total alone (`2,869 cache
-    hits`), `cache hits` drops that."""
+    """`parts` with `_DROP_ORDER`'s first `k` applied: each drops the parts
+    of the key it names, `zero` the parts that count nothing and the
+    caches with no hits, `collapse` turns the hits into their total alone
+    (`2,869 cache hits`, key `hits`), `hits` drops that and them."""
     out = list(parts)
     for what in _DROP_ORDER[:k]:
         if what == "zero":
-            out = [p for p in out if (p[1] or p[4] == "held") and p[4] != "dim"]
+            out = [p for p in out if (p.count or p.how == "held") and p.how != "dim"]
         elif what == "collapse":
-            hits = [p for p in out if p[2] in _HITS]
+            hits = [p for p in out if p.key in _HITS]
             if len(hits) > 1:
                 total = 0
                 for p in hits:
-                    total += p[1]
-                at = [i for i, p in enumerate(out) if p[2] in _HITS][0]
-                out = [p for p in out[:at] if p[2] not in _HITS] + [("▒", total, "cache hits", "muted", "estimate" if [p for p in hits if p[4] == "estimate"] else "")] + [p for p in out[at:] if p[2] not in _HITS]
-        elif what == "cache hits":
-            out = [p for p in out if p[2] != "cache hits" and p[2] not in _HITS]
+                    total += p.count
+                at = [i for i, p in enumerate(out) if p.key in _HITS][0]
+                collapsed = ActionPart(key = "hits", glyph = "▒", count = total, words = "cache hits", role = "muted", how = "estimate" if [p for p in hits if p.how == "estimate"] else "")
+                out = [p for p in out[:at] if p.key not in _HITS] + [collapsed] + [p for p in out[at:] if p.key not in _HITS]
+        elif what == "hits":
+            out = [p for p in out if p.key != "hits" and p.key not in _HITS]
         else:
-            out = [p for p in out if p[2] != what]
+            out = [p for p in out if p.key != what]
     return out
 
 def action_results(split: dict, room: int, rows = 3, short = False, memory = None) -> list:
@@ -1006,12 +1022,12 @@ def action_results(split: dict, room: int, rows = 3, short = False, memory = Non
     # A live part shown this build keeps its place at 0, dimmed, so the
     # parts don't come and go as Bazel's counts move (`? 0 unreported`).
     if memory != None:
-        named = [p[2] for p in parts]
+        named = [p.key for p in parts]
         for name in memory.get("shown", []):
             if name not in named and name in _HELD:
                 glyph, role = _HELD[name]
-                parts.append((glyph, 0, name, role, "held"))
-        parts = sorted(parts, key = lambda p: _PART_ORDER.index(p[2]) if p[2] in _PART_ORDER else len(_PART_ORDER))
+                parts.append(ActionPart(key = name, glyph = glyph, count = 0, words = name, role = role, how = "held"))
+        parts = sorted(parts, key = lambda p: _PART_ORDER.index(p.key) if p.key in _PART_ORDER else len(_PART_ORDER))
 
     # The hits' header: `cache hits N:`, else `hits N:`.
     form = [0]
@@ -1019,7 +1035,7 @@ def action_results(split: dict, room: int, rows = 3, short = False, memory = Non
     def total_of(members):
         n = 0
         for p in members:
-            n += p[1]
+            n += p.count
         return n
 
     def header(name, members, level):
@@ -1027,7 +1043,7 @@ def action_results(split: dict, room: int, rows = 3, short = False, memory = Non
         count = _thousands(n) if level < 2 else short_count(n)
         if name == "ran":
             return "ran " + count
-        approx = "~" if [p for p in members if p[4] == "estimate"] else ""
+        approx = "~" if [p for p in members if p.how == "estimate"] else ""
         return ("cache hits " if form[0] == 0 else "hits ") + approx + count
 
     def part_width(p, level):
@@ -1035,7 +1051,7 @@ def action_results(split: dict, room: int, rows = 3, short = False, memory = Non
         # doesn't go for a digit, and a part gone doesn't come and go.
         width = text_width(_part_text(p, level)[0])
         if memory != None:
-            width = max(width, memory["widest"].get(p[2], 0))
+            width = max(width, memory["widest"].get(p.key, 0))
         return width
 
     def joined_width(members, level):
@@ -1049,19 +1065,19 @@ def action_results(split: dict, room: int, rows = 3, short = False, memory = Non
         # saying the group's meaning) and the rest (`(None, [part])`), the
         # running and pending together where they fit.
         out = []
-        for name, words in (("ran", _RAN), ("hits", _HITS)):
-            members = [p for p in kept if p[2] in words]
+        for name, keys in (("ran", _RAN), ("hits", _HITS)):
+            members = [p for p in kept if p.key in keys]
             if len(members) == 1:
                 p = members[0]
-                out.append((None, [(p[0], p[1], _ALONE.get(p[2], p[2]), p[3], p[4])]))
+                out.append((None, [ActionPart(key = p.key, glyph = p.glyph, count = p.count, words = _ALONE.get(p.key, p.words), role = p.role, how = p.how, alone = True)]))
             elif members:
                 out.append((name, members))
         for p in kept:
-            if p[2] == "cache hits":
+            if p.key == "hits":
                 out.append((None, [p]))
-        rest = [p for p in kept if p[2] not in _RAN and p[2] not in _HITS and p[2] != "cache hits" and p[2] not in ("running", "pending")]
+        rest = [p for p in kept if p.key not in _RAN and p.key not in _HITS and p.key not in ("hits", "running", "pending")]
         out += [(None, [p]) for p in rest]
-        undone = [p for p in kept if p[2] in ("running", "pending") and (p[1] or p[4] == "held")]
+        undone = [p for p in kept if p.key in ("running", "pending") and (p.count or p.how == "held")]
         if undone:
             out.append((None, undone))
         return out
@@ -1118,9 +1134,9 @@ def action_results(split: dict, room: int, rows = 3, short = False, memory = Non
     # then without what counts nothing, then without internal too, then in
     # thousands; the fewest rows that fit, the wholest words and the
     # longest header among them.
-    no_dim = [p for p in parts if p[4] != "dim"]
-    no_zero = [p for p in no_dim if p[1] or p[4] == "held"]
-    no_internal = [p for p in no_zero if p[2] != "internal"]
+    no_dim = [p for p in parts if p.how != "dim"]
+    no_zero = [p for p in no_dim if p.count or p.how == "held"]
+    no_internal = [p for p in no_zero if p.key != "internal"]
     stages = [(parts, [0, 1]), (no_dim, [0, 1]), (no_zero, [0, 1]), (no_internal, [0, 1, 2])]
     best = None
     for kept, levels in stages:
@@ -1146,7 +1162,7 @@ def action_results(split: dict, room: int, rows = 3, short = False, memory = Non
         for loose in (False, True):
             # Every row fitting, else one part alone wider than its row.
             for k in range(start, len(_DROP_ORDER) + 1):
-                kept = _drop(parts, k) or [p for p in parts if p[2] == "failed"][:1]
+                kept = _drop(parts, k) or [p for p in parts if p.key == "failed"][:1]
                 for level in ([1] if k < 3 else [1, 2, 3]):
                     for f in range(2):
                         form[0] = f
@@ -1171,9 +1187,9 @@ def action_results(split: dict, room: int, rows = 3, short = False, memory = Non
         for _, units in packed:
             for _, members, _ in units:
                 for p in members:
-                    memory["widest"][p[2]] = max(memory["widest"].get(p[2], 0), text_width(_part_text(p, level)[0]))
-                    if p[2] not in memory.setdefault("shown", []):
-                        memory["shown"].append(p[2])
+                    memory["widest"][p.key] = max(memory["widest"].get(p.key, 0), text_width(_part_text(p, level)[0]))
+                    if p.key not in memory.setdefault("shown", []):
+                        memory["shown"].append(p.key)
     out = []
     for row in packed:
         indent, units = row
@@ -1280,7 +1296,7 @@ def action_lines(state: dict) -> list:
             kinds[mnemonic] = bes_get(data, "actions_executed", 0) or 0
     spawns = lambda n: _counts("%d spawn" + ("" if n == 1 else "s"), n)
     under = {
-        "ok": [(name, spawns(n)) for name, n in _by_count({k: n for k, n in runners.items() if not _cache_runner(k)})],
+        "ran": [(name, spawns(n)) for name, n in _by_count({k: n for k, n in runners.items() if not _cache_runner(k)})],
         "disk": [(name, spawns(n)) for name, n in _by_count({k: n for k, n in runners.items() if k == "disk cache hit"})],
         "remote": [(name, spawns(n)) for name, n in _by_count({k: n for k, n in runners.items() if _cache_runner(k) and k != "disk cache hit"})],
         "local": [("", "Bazel's local action cache said the outputs on disk were still valid" + ("; estimated while it runs" if split.get("estimated") else ""))],
@@ -1297,12 +1313,12 @@ def action_lines(state: dict) -> list:
 
     # Names and counts in columns, however long a mnemonic; a kind there is
     # none of left out, as in Results.
-    parts = [p for p in action_parts(split) if p[1]]
-    names = [len(words) + 2 for _, _, words, _, _ in parts] + [len(name) + 2 for _, n, words, _, _ in parts for name, _ in under.get(words.partition(" ")[0], []) if name]
+    parts = [p for p in action_parts(split) if p.count]
+    names = [len(p.words) + 2 for p in parts] + [len(name) + 2 for p in parts for name, _ in under.get(p.key, []) if name]
     column = max([_COUNT_COLUMN] + [w + 1 for w in names])
-    for glyph, n, words, role, how in parts:
-        out.append("  " + ((_c(role) + glyph + _RESET) if role and glyph else (glyph or " ")) + " " + words + " " * (column - len(words)) + ("~" if how == "estimate" else "") + _thousands(n))
-        for name, value in under.get(words.partition(" ")[0], []):
+    for p in parts:
+        out.append("  " + ((_c(p.role) + p.glyph + _RESET) if p.role and p.glyph else (p.glyph or " ")) + " " + p.words + " " * (column - len(p.words)) + ("~" if p.how == "estimate" else "") + _thousands(p.count))
+        for name, value in under.get(p.key, []):
             out.append(("    " + name + " " * (column - len(name)) + value) if name else "      " + _c("muted") + value + _RESET)
 
     # Bazel's own action cache, and why it missed.
@@ -1333,8 +1349,7 @@ def action_lines(state: dict) -> list:
     return out
 
 dashboard_actions = namespace(
-    NOT_RUN_KINDS = _NOT_RUN_KINDS,
-    NOT_RUN_WORD = NOT_RUN_WORD,
+    SKIPPED_KINDS = _SKIPPED_KINDS,
     action_bar = action_bar,
     action_counts = action_counts,
     action_lines = action_lines,
