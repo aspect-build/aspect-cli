@@ -4,18 +4,18 @@ features.
 These pieces are shared so both features stay byte-identical and a
 single test covers them:
 
-  * Marker build/parse — the hidden HTML comment that uniquely
+  * Marker build/parse: the hidden HTML comment that uniquely
     identifies an Aspect lint comment so later runs dedupe + clean up.
-  * Suggestion-block rendering — GitHub uses a bare ```suggestion fence
+  * Suggestion-block rendering: GitHub uses a bare ```suggestion fence
     (replaces the commented-on line); GitLab uses ```suggestion:-X+Y
     (replaces `current-X` through `current+Y`).
-  * Diff-window lookup (`DiffWindow`) — whether a review comment's
+  * Diff-window lookup (`DiffWindow`): whether a review comment's
     anchor range falls where the host can display it.
-  * Patch suggestions (`patch_suggestions`) — the edits a fix patch
+  * Patch suggestions (`patch_suggestions`): the edits a fix patch
     suggests that are safe to commit as they are.
 
 The orchestration (discovery, dedup state machine, API calls) stays in
-each feature file — it's API-coupled and not shareable as-is.
+each feature file: it's API-coupled and not shareable as-is.
 """
 
 load("./patch.axl", "PATCH_CAP", "hunk_edit_blocks", "parse")
@@ -188,7 +188,7 @@ def can_attempt_comment(window: DiffWindow, path: str, line: int, start_line = N
 
 def patch_suggestions(fs, path: str) -> list:
     """Each edit the fix patch at `path` suggests, as `(file, block)` with
-    `block` from `hunk_edit_blocks`. None for a patch larger than
+    `block` from `hunk_edit_blocks`. Empty for a patch larger than
     `PATCH_CAP` (its last hunk would be cut short) or one that can't be
     read, and no block that changes nothing or whose replacement holds
     U+FFFD: the patch's bytes there aren't UTF-8, and committing the

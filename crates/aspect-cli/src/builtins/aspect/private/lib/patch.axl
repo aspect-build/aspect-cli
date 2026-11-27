@@ -19,7 +19,7 @@ fuzz/offset handling.
 A patch represents one or more *file changes*; each file change has
 one or more *hunks*; each hunk has a sequence of *ops* (context, add,
 remove). A single hunk can carry multiple non-adjacent edits when the
-unified-diff context window groups them — `hunk_edit_blocks(hunk)`
+unified-diff context window groups them: `hunk_edit_blocks(hunk)`
 splits each contiguous run of `+`/`-` ops into its own block, so each
 distinct edit gets its own focused review-comment suggestion rather
 than one big one that swallows the surrounding context lines.
