@@ -2131,6 +2131,54 @@ def _impl(ctx: TaskContext) -> int:
                 src = "a" if "a.cc:" in e[1] else "b"
                 _eq(name + ": " + src + "'s own log", e[0:3] + [e[3] if e[3].startswith("  log") else e[2]], [e[0], e[1], e[2], "  log /h/cc/lib/CppCompile-%d.stderr" % (1 if src == "a" else 2)])
 
+    # Coloured stderr (r46, Bazel 9.3.3): //pair:ansi's two Gen actions write
+    # `\033[31merror:\033[0m …`, and clang colours its own, d.cc and sub/d.cc
+    # in one cc_library (rules_cc numbers their objects 0/d.o and 1/d.o).
+    # The error quotes the text without escapes; each still finds its own
+    # kept log. A CRLF one alike.
+    def _paired(name, records, errs, logs, kept_of):
+        st = dict(kinds, counts = dict(kinds["counts"], failures = [records[0]["label"]], failed_labels = {}, failed = 1), root_causes = {}, logged_index = None, fails = records, read = lambda p, n: (logs[p], 0) if p in logs else None, build = struct(kept_action_log = lambda output: kept_of.get(output, {})), excerpts = {}, listed_cache = None, action_errors_cache = None, ansi = ctx.std.re.compile(ANSI))
+        got = [_visible(l) for l in failure_summary(st, {"errors": errs, "distinct": len(errs)}, "t-9", False)]
+        entries = []
+        for k, l in enumerate(got):
+            if l.startswith("✗"):
+                rest = got[k + 1:]
+                end = rest.index("") if "" in rest else len(rest)
+                entries.append((got[k + 1], [r for r in rest[:end] if r.startswith("  log ")]))
+        return entries
+
+    def _gen(out):
+        return {"kind": "action", "label": "//pair:ansi", "detail": "Gen", "files": [("stderr", "file:///gone")], "output": out, "success": False}
+
+    for text, quoted in [("\x1b[31merror:\x1b[0m ansi %s broke\n", "error: ansi %s broke"), ("crlf %s broke\r\n", "crlf %s broke")]:
+        logs = {"/h/pair/ansi/Gen-1.stderr": text % "two", "/h/pair/ansi/Gen-2.stderr": text % "one"}
+        errs = [
+            {"header": "ERROR: pair/BUILD.bazel:3:5: Making two for //pair:ansi failed: (Exit 3)", "body": [quoted % "two"], "log": None, "label": None, "target": None},
+            {"header": "ERROR: pair/BUILD.bazel:3:5: Making one for //pair:ansi failed: (Exit 2)", "body": [quoted % "one"], "log": None, "label": None, "target": None},
+        ]
+        for flip in [False, True]:
+            records = [_gen("bazel-out/pair/ansi.one"), _gen("bazel-out/pair/ansi.two")]
+            got = _paired("ansi", records[::-1] if flip else records, errs, logs, {"bazel-out/pair/ansi.one": {"stderr": "/h/pair/ansi/Gen-2.stderr"}, "bazel-out/pair/ansi.two": {"stderr": "/h/pair/ansi/Gen-1.stderr"}})
+            _eq("%r flipped %s: each its own log" % (quoted, flip), sorted(got), [("  │ " + quoted % "one", ["  log /h/pair/ansi/Gen-2.stderr"]), ("  │ " + quoted % "two", ["  log /h/pair/ansi/Gen-1.stderr"])])
+
+    clang = "\x1b[1mcc2/%s:1:19: \x1b[0m\x1b[0;1;31merror: \x1b[0m\x1b[1muse of undeclared identifier '%s'\x1b[0m\n    1 | \x1b[0;34mint\x1b[0m d() { \x1b[0;34mreturn\x1b[0m %s; }\x1b[0m\n1 error generated.\n"
+    cc2_logs = {"/h/cc2/stems/CppCompile-1.stderr": clang % ("sub/d.cc", "r", "r"), "/h/cc2/stems/CppCompile-2.stderr": clang % ("d.cc", "q", "q")}
+    cc2_errs = [
+        {"header": "ERROR: cc2/BUILD.bazel:2:11: Compiling cc2/d.cc failed: (Exit 1)", "body": ["cc2/d.cc:1:19: error: use of undeclared identifier 'q'", "    1 | int d() { return q; }"], "log": None, "label": None, "target": "//cc2:stems"},
+        {"header": "ERROR: cc2/BUILD.bazel:2:11: Compiling cc2/sub/d.cc failed: (Exit 1)", "body": ["cc2/sub/d.cc:1:19: error: use of undeclared identifier 'r'", "    1 | int d() { return r; }"], "log": None, "label": None, "target": "//cc2:stems"},
+    ]
+    for flip in [False, True]:
+        records = [
+            {"kind": "action", "label": "//cc2:stems", "detail": "CppCompile", "files": [("stderr", "file:///gone")], "output": "bazel-out/darwin_arm64-fastbuild/bin/cc2/_objs/stems/0/d.o", "success": False},
+            {"kind": "action", "label": "//cc2:stems", "detail": "CppCompile", "files": [("stderr", "file:///gone")], "output": "bazel-out/darwin_arm64-fastbuild/bin/cc2/_objs/stems/1/d.o", "success": False},
+        ]
+        kept_of = {records[0]["output"]: {"stderr": "/h/cc2/stems/CppCompile-2.stderr"}, records[1]["output"]: {"stderr": "/h/cc2/stems/CppCompile-1.stderr"}}
+        got = _paired("cc2", records[::-1] if flip else records, cc2_errs, cc2_logs, kept_of)
+        _eq("d.cc and sub/d.cc flipped %s: each its own log" % flip, sorted(got), [
+            ("  │ cc2/d.cc:1:19: error: use of undeclared identifier 'q'", ["  log /h/cc2/stems/CppCompile-2.stderr"]),
+            ("  │ cc2/sub/d.cc:1:19: error: use of undeclared identifier 'r'", ["  log /h/cc2/stems/CppCompile-1.stderr"]),
+        ])
+
     # //two:three (r45): Step exits 5 with no output, Step exits 6 with
     # stderr, Pack exits 7. The silent Step gets no log, never its
     # sibling's.

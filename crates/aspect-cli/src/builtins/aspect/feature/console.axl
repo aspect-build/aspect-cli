@@ -224,7 +224,7 @@ task starts.
 
 load("@aspect//bazel/console.axl", "PROFILES", "RECAP_MAX", "STAGE_NAMES", "console_tip_rules", "default_stages", "emit_tips", "tip_stages")
 load("@aspect//bazel.axl", "BazelTrait")
-load("@aspect//feature/dashboard.axl", "count_event", "failure_summary", "note_blocked", "note_event", "summary_state")
+load("@aspect//feature/dashboard.axl", "ANSI", "count_event", "failure_summary", "note_blocked", "note_event", "summary_state")
 load("@aspect//tips.axl", "TipsTrait")
 load("../private/lib/agent.axl", "under_agent")
 load("../private/lib/environment.axl", "warn")
@@ -283,7 +283,7 @@ def _console_impl(ctx: FeatureContext):
     def _collect(task_ctx, event):
         kind = event.kind
         if kind == "build_started":
-            summary[0] = summary_state(task_ctx.std.fs.try_read_tail, task_ctx.std.env)
+            summary[0] = summary_state(task_ctx.std.fs.try_read_tail, task_ctx.std.env, task_ctx.std.re.compile(ANSI))
         state = summary[0]
         if state["read"] == None:
             state["read"] = task_ctx.std.fs.try_read_tail
@@ -305,7 +305,7 @@ def _console_impl(ctx: FeatureContext):
         size = task_ctx.std.term.size() if err.is_tty else None
         for line in failure_summary(state, build.output_errors(), task_ctx.task.id, err.is_tty, build.output_log or "", task_ctx.std.io.linked, task_ctx.std.excerpt, size[0] if size else 100):
             err.write(line + "\n")
-        summary[0] = summary_state(task_ctx.std.fs.try_read_tail, task_ctx.std.env)
+        summary[0] = summary_state(task_ctx.std.fs.try_read_tail, task_ctx.std.env, task_ctx.std.re.compile(ANSI))
 
     trait.build_event.append(_collect)
 

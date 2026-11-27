@@ -5647,13 +5647,14 @@ def report_lines(state: dict, task_id: str, tty: bool, replayed = False, linked 
         out.append("%s: %s" % (label, link(url, url) if tty else url))
     return out + failure_summary(state, state.get("kept_errors"), task_id, tty, state.get("log_path", ""), linked, excerpt, state.get("cols") or 100)
 
-def summary_state(read, env = None) -> dict:
+def summary_state(read, env = None, ansi = None) -> dict:
     """A fresh state for `failure_summary` to read, collected by the build
     event hooks the screen uses (`count_event`, `note_event`,
     `note_blocked`) without a screen: the plain console's. `read` reads a
-    file's tail (`std.fs.try_read_tail`) and `env` is `std.env`, for finding
-    a test's log."""
-    state = dict(attempt_state(0), read = read, env = env, build = None, exec_root = "", output_dirs = {}, search = new_search(), list = "failures", ended = False, cancelling = False, log_path = "", task = "", root_causes = {}, blocked_cache = None, building = True)
+    file's tail (`std.fs.try_read_tail`), `env` is `std.env`, for finding
+    a test's log, and `ansi` the compiled `ANSI` pattern, to read a kept
+    log's text as an error quotes it."""
+    state = dict(attempt_state(0), read = read, env = env, ansi = ansi, build = None, exec_root = "", output_dirs = {}, search = new_search(), list = "failures", ended = False, cancelling = False, log_path = "", task = "", root_causes = {}, blocked_cache = None, building = True)
     return state
 
 # The most root causes the failure summary lists, the rest counted.
@@ -5881,14 +5882,39 @@ def _unlabelled_in(e: dict, label: str) -> bool:
     return directory == package or directory.endswith("/" + package) if package else "/" not in build
 
 def _compiled(e: dict) -> str:
-    """The source an error's action compiled, by its name's stem
-    (`Compiling cc/a.cc failed` gives `a`), else ""."""
+    """The source an error's action compiled (`Compiling cc/sub/d.cc
+    failed` gives `cc/sub/d.cc`), else ""."""
     header = e.get("header", "")
     at = header.find("Compiling ")
     if at < 0:
         return ""
-    source = header[at + len("Compiling "):].partition(" ")[0]
-    return source.rpartition("/")[2].partition(".")[0]
+    return header[at + len("Compiling "):].partition(" ")[0]
+
+def _compiles(rec: dict, e: dict) -> bool:
+    """Whether the failed record's output is the object of the source the
+    error's action compiled: its path in the package under `_objs/<target>/`
+    (`sub/d.cc` to `_objs/lib/sub/d.o`), else, where rules_cc numbers two
+    sources of one name (`_objs/lib/0/d.o`), the name alone, which then
+    tells neither apart."""
+    source = _compiled(e)
+    if not source:
+        return False
+    output = rec.get("output", "")
+    package = rec["label"].partition("//")[2].partition(":")[0]
+    local = source[len(package) + 1:] if package and source.startswith(package + "/") else source
+    stem = local.rpartition(".")[0] or local
+    objects = output.partition("/_objs/")[2].partition("/")[2]
+    if objects.partition(".")[0] == stem:
+        return True
+    return output.rpartition("/")[2].partition(".")[0] == stem.rpartition("/")[2]
+
+def _plain_text(state: dict, text: str) -> str:
+    """`text` without its escape sequences (`state["ansi"]`, the compiled
+    `ANSI` pattern) and with each CRLF or lone CR a newline, as an error's
+    quoted body reads."""
+    if state.get("ansi") != None:
+        text = state["ansi"].replace(text, "")
+    return text.replace("\r\n", "\n").replace("\r", "\n")
 
 def action_errors(state: dict) -> dict:
     """Each failed action's own kept error, by its index in `state["fails"]`
@@ -5896,12 +5922,15 @@ def action_errors(state: dict) -> dict:
     has ended and every kept log is known: an error is a candidate for a
     record when it is about the record's label (`_error_names`) or names no
     target and is at its package's BUILD file; a record and a candidate
-    pair when the error's body is in the record's own kept log and in no
-    other's, else when the source it compiled is the record's output's,
+    pair when the error's body is in the record's own kept log (its escape
+    sequences and CRs left out, `_plain_text`) and in no other's, else
+    when the source it compiled is the record's output's (`_compiles`),
     else when the console matched it to that very log, else when each is
-    the other's only one left. Two compiles of one cc_library, in either
-    order, each get their own. One left that no rule tells apart still
-    pairs, in order, but `ambiguous`. A second error about the same action
+    the other's only one left. Two compiles of one cc_library each get
+    their own, in either order, where either's log was kept and says what
+    its error does, or their objects tell their sources apart. One left
+    that no rule tells apart still pairs, in order, but `ambiguous`, and
+    shows no log. A second error about the same action
     (Bazel's `1 input file(s) do not exist` after `missing input file`)
     goes with it."""
     kept = state.get("kept_errors")
@@ -5923,7 +5952,7 @@ def action_errors(state: dict) -> dict:
             got = build.kept_action_log(rec.get("output", "")) or {}
             path = got.get("stderr") or got.get("stdout") or ""
         own[i] = path
-        text[i] = _tail_text(state, path) or ""
+        text[i] = _plain_text(state, _tail_text(state, path) or "")
 
     def candidates(i):
         label = state["fails"][i]["label"]
@@ -5931,8 +5960,9 @@ def action_errors(state: dict) -> dict:
 
     def said(e):
         for line in e.get("body") or []:
-            if line.strip() and not _is_gap(line):
-                return line.strip()
+            line = _plain_text(state, line).strip()
+            if line and not _is_gap(line):
+                return line
         return ""
 
     def pair(i, j, ambiguous = False):
@@ -5961,7 +5991,7 @@ def action_errors(state: dict) -> dict:
                 return
 
     by(lambda i, e: bool(said(e)) and bool(text[i]) and said(e) in text[i])
-    by(lambda i, e: bool(_compiled(e)) and state["fails"][i].get("output", "").rpartition("/")[2].partition(".")[0] == _compiled(e))
+    by(lambda i, e: _compiles(state["fails"][i], e))
     by(lambda i, e: bool(own[i]) and e.get("log") == own[i])
     by(lambda i, e: True)
     for i in records:
@@ -6034,7 +6064,8 @@ def failure_summary(state: dict, kept, task_id: str, tty: bool, log_path: str = 
 
     - a failed action: its own error's body (`action_errors`: one per
       action, a target with two failed actions two entries), what else its
-      `ERROR:` line says failed first; its log the one the history kept;
+      `ERROR:` line says failed first; its log the one the history kept of
+      it (none for a pairing no rule settles, `ambiguous`);
     - a failed test (`test_group`): `excerpt` (`std.excerpt`, the recap's
       choice) over the last attempt of its first failed shard or run,
       Bazel's preamble left out, two lines of a timed-out one, each other
