@@ -324,11 +324,11 @@ def publish_all_actions_unless_sent_out(bazel_trait, published: dict) -> None:
     stream right after the configuration, where with failed actions alone it
     stops at the closing tool logs. Decided per build once the rc is resolved,
     through the injected-flag filters as any injected flag; `published["all_actions"]`
-    says whether the build got every action, from this or another feature's
-    `publish_all_actions`."""
+    says whether the build got every action, from this, another feature's
+    `publish_all_actions`, or the user's own flags or rc."""
 
     def _publish(_ctx, rc, command):
-        if _PUBLISH_ALL_ACTIONS_FOR_CLI in bazel_trait.extra_flags:
+        if _PUBLISH_ALL_ACTIONS_FOR_CLI in bazel_trait.extra_flags or rc.bool_flag("--build_event_publish_all_actions", command = command):
             published["all_actions"] = True
             return []
         flags = [] if bazel_sends_events_out(rc, command) else [_PUBLISH_ALL_ACTIONS_FOR_CLI]

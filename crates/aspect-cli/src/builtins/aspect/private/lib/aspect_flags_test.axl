@@ -295,6 +295,15 @@ def _test_publish_all_actions_unless_sent_out(_ctx):
     t.injected_flag_filters.append(lambda flags: omit_flags(flags, ["--build_event_publish_all_actions"]))
     _eq("omitted", _asks([]), False)
 
+    # The user's own ask, with a remote cache: Bazel sends every action, so
+    # the build has them, and nothing is added.
+    user = _fake_trait()
+    publish_all_actions_unless_sent_out(user, published)
+    _eq("the user's own, nothing more", user.rc_flags[0](_ctx, _ctx.bazel.new_rc(flags = ["--remote_cache=grpc://c", "--build_event_publish_all_actions"]), "build"), [])
+    _eq("every action", published["all_actions"], True)
+    _eq("turned off again", user.rc_flags[0](_ctx, _ctx.bazel.new_rc(flags = ["--remote_cache=grpc://c", "--build_event_publish_all_actions", "--nobuild_event_publish_all_actions"]), "build"), [])
+    _eq("failed ones only", published["all_actions"], False)
+
     # Another feature's unconditional ask stands, and this one adds nothing.
     both = _fake_trait()
     publish_all_actions(both)
