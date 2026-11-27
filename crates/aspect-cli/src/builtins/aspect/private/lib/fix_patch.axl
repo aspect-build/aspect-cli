@@ -17,8 +17,7 @@ where:
   with no header of its own;
 - it has a binary patch, a git mode, rename or copy line, or a file mode
   other than a regular file's;
-- a header's name is quoted, empty, not UTF-8, or has whitespace and no tab
-  after it;
+- a header's name is quoted, empty, or not UTF-8;
 - a path it names, its first component dropped as `patch -p1` does, starts
   with `/`, goes through `..`, has a `.` or empty component, leads out of
   the workspace through a symlink, or can't be followed;
@@ -76,26 +75,22 @@ def _is_epoch(stamp: str) -> bool:
     return seconds - offset == 0
 
 def _header_name(raw: str) -> tuple:
-    """`(path, why)` for the text after a `--- ` or `+++ `: the path as
-    `patch -p1` would open it (None for `/dev/null` or an epoch timestamp),
-    and why it can't be known, or None. A name ends at a tab, else at
-    whitespace, so one with whitespace and no tab after it names another
-    file to patch; only GNU patch unquotes a git-quoted one; and one that
-    isn't UTF-8 reads here with its bytes replaced, a name the copy-back
-    can't open."""
+    """`(path, why)` for the text after a `--- ` or `+++ `: the path with
+    its first component dropped, as `patch -p1` would open it (None for
+    `/dev/null` or an epoch timestamp), and why it can't be known, or None.
+    The name ends at a tab, else runs to the end of the line, spaces and
+    all, as rules_lint's `--label` headers write it. A git-quoted name is
+    refused, as this doesn't unquote one, and so is one that isn't UTF-8:
+    it reads here with its bytes replaced, a name the copy-back can't
+    open."""
     rest = raw.removesuffix("\r").lstrip(" \t\f\v")
     if not rest:
         return None, "a header with no name"
     if rest.startswith("\""):
-        return None, "a quoted (git) name, which BSD and GNU patch read apart"
-    if "\t" in rest:
-        name, _, stamp = rest.partition("\t")
-        if _is_epoch(stamp):
-            return None, None
-    else:
-        name = rest.rstrip(" ")
-        if any([c in name for c in (" ", "\f", "\v")]):
-            return None, "a name with a space and no tab after it, which patch ends at the space"
+        return None, "a quoted (git) name, which this doesn't unquote"
+    name, _, stamp = rest.partition("\t")
+    if stamp and _is_epoch(stamp):
+        return None, None
     if "\ufffd" in name:
         return None, "a name that isn't UTF-8, which the copy-back can't name"
     if name == "/dev/null":

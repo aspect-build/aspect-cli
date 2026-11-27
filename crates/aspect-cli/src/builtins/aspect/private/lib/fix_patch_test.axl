@@ -54,6 +54,7 @@ def _test_scan():
     _eq("a hunk range that isn't numbers", _sides("--- a/x\n+++ b/x\n@@ -1,y +1 @@\n")[1], "a hunk's line range isn't numbers")
     _eq("a name that isn't UTF-8", _sides("--- a/caf\ufffd\n+++ b/caf\ufffd\n@@ -1 +1 @@\n-a\n+b\n")[1], "a name that isn't UTF-8, which the copy-back can't name")
     _eq("a header with no name", _sides("--- a/x\n+++ \t\n@@ -1 +1 @@\n-a\n+b\n")[1], "a header with no name")
+    _eq("a name with spaces and no tab runs to the end of the line", _sides("--- a/src/my file.txt\n+++ b/src/my file.txt\n@@ -1 +1 @@\n-a\n+b\n"), ([("src/my file.txt", "src/my file.txt")], None))
 
     # The header shapes BSD patch takes a file name from that a narrower
     # reading missed: a name after a tab is read, the rest refused.
@@ -199,6 +200,13 @@ printf 'caf\\352\\n' > tree/src/l1.txt
     fs.write(root + "/epoch.patch", "--- a/src/del.txt\t2026-01-01 00:00:00.000000000 +0000\n+++ b/src/del.txt\t1970-01-01 00:00:00.000000000 +0000\n@@ -1 +0,0 @@\n-bye\n")
     _eq("an epoch deletion", apply_fix_patch(ctx, root + "/epoch.patch", cwd = tree), None)
     _eq("removes the file", fs.exists(tree + "/src/del.txt"), False)
+
+    # rules_lint's patcher writes `--label` headers: a name with spaces and
+    # no tab after it.
+    fs.write(tree + "/src/my file.txt", "a\n")
+    fs.write(root + "/label.patch", "--- a/src/my file.txt\n+++ b/src/my file.txt\n@@ -1 +1 @@\n-a\n+b\n")
+    _eq("a `--label` name with spaces", apply_fix_patch(ctx, root + "/label.patch", cwd = tree), None)
+    _eq("applies", fs.read_to_string(tree + "/src/my file.txt"), "b\n")
 
 def _test_one_file_per_run(ctx: TaskContext, root: str):
     """patch is run once per file section with hunks, naming the one copy
@@ -358,7 +366,6 @@ printf 'a\\n' > 'src/my file'
         ("an empty component", first + make("src//n.txt")),
         ("a hard link to a file named beside it", first + "--- a/src/hard\n+++ b/src/hard\n@@ -1 +1 @@\n-a\n+H\n"),
         ("removing a symlink, not what it names", first + "--- a/src/lf\n+++ /dev/null\n@@ -1 +0,0 @@\n-f\n"),
-        ("a name with a space and no tab", first + "--- a/src/my file\n+++ b/src/my file\n@@ -1 +1 @@\n-a\n+b\n"),
         ("a git-quoted name", first + "--- \"a/src/f\"\n+++ \"b/src/f\"\n@@ -1 +1 @@\n-f\n+g\n"),
         ("a symlink by git's mode", first + "diff --git a/src/n b/src/n\nnew file mode 120000\n" + make("src/n")),
         ("a git mode change", first + "diff --git a/src/f b/src/f\nold mode 100644\nnew mode 100755\n--- a/src/f\n+++ b/src/f\n@@ -1 +1 @@\n-f\n+g\n"),
