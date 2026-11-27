@@ -57,8 +57,9 @@ It takes the screen when the task starts and shows:
     one's with Ctrl+O), then the targets a failed dependency blocked, then,
     once the build has ended, Bazel's other errors (`console_ties`);
     Enter opens one's log in the tab (its stderr and
-    stdout, a test's `test.log`, found where Bazel left it, a remote cache's
-    `bytestream://` one in the output tree); `a` lists the actions that
+    stdout, a test's `test.log`, found where Bazel left it, its URI's path
+    decoded and a non-ASCII name either way Bazel spells it on disk, a remote
+    cache's `bytestream://` one in the output tree); `a` lists the actions that
     succeeded and wrote output instead (`--dashboard:actions=all`, the
     default);
   - Metrics: the actions, each kind with what makes it up (the runners'
@@ -6995,11 +6996,14 @@ def failure_summary(state: dict, task_id: str, tty: bool, log_path: str = "", li
     apart. A flaky test has no entry. Then, under `── Other errors from
     Bazel ──`, each of Bazel's `ERROR:` blocks no entry claimed
     (`console_ties`: a BUILD file's syntax error, a macro's `Traceback`,
-    `package contains errors`), as Bazel wrote it, a `Traceback` cut as
-    an entry's is, capped as the entries are; `Failures (N)` counts the
+    `package contains errors`): its line and the lines Bazel wrote with it,
+    escapes and the workspace's path left out, every row of its line shown,
+    a `Traceback` cut as an entry's is, capped as the entries are, and what
+    the console stage's caps left out counted; `Failures (N)` counts the
     entries alone. With neither though Bazel exited non-zero
-    (`bazel_exit`): `✗ Bazel exited N`, the raw log's last `ERROR:` lines,
-    else, a crashed server's, its last lines but progress.
+    (`bazel_exit`), the one entry is `✗ Bazel exited N` (`failure_entries`),
+    quoting the raw log's last `ERROR:` lines, else, a crashed server's,
+    its last lines but progress.
 
     Past `_SUMMARY_MAX` entries `… and N more failures · aspect history
     show <id>`; then the counts, Bazel's raw log (`log_path`), and where

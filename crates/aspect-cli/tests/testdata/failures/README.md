@@ -37,14 +37,18 @@ folder with `src/` (Bazel files suffixed `.in`), `cmd` and `variants`; record it
                             the `.in` suffix its Bazel files carry (so this repository's Bazel
                             and formatters leave them alone) is dropped, as record.sh does
   cmd                       the bazel arguments, exactly (startup options first, as for `bazel`)
-  variants                  extra recordings: noall, nocolor, console_only
+  variants                  extra recordings: noall, nocolor, merged, console_only
   <ver>.bep.json            --build_event_json_file output (cmd includes --build_event_publish_all_actions)
   <ver>.console             Bazel's stderr, written to a pty, --color=yes --curses=yes
-  <ver>.stdout              Bazel's stdout, only when non-empty (action stdout is relayed here)
+  <ver>.stdout              Bazel's stdout, a file of its own, only when non-empty: Bazel relays an
+                            action's stdout here, so it is not in the console (as in CI, where the
+                            CLI's stdout is not its stderr)
   <ver>.exit                Bazel's exit code ("timeout" if the 90s console_only cap hit)
   <ver>.files/<path>        copies of the action stderr/stdout and test.log/test.xml files the BEP names
   <ver>.noall.*             same command without --build_event_publish_all_actions
   <ver>.nocolor.*           same command with --color=no --curses=no
+  <ver>.merged.*            same command with Bazel's stdout on the pty too, as a terminal shares it
+                            with stderr: an action's stdout is in the console, after its stderr
   <ver>[.<variant>].golden  the replay test's expected output for that recording
 ```
 
@@ -52,8 +56,9 @@ The recorder drops the BEP events the summary never reads, which were most of th
 `progress` (Bazel's console chunks), `structuredCommandLine`, `unstructuredCommandLine` and
 `buildToolLogs`. An Aborted one of those is kept (a bad flag's `unstructuredCommandLine`).
 
-The recorder adds these flags after `cmd`: `--nosystem_rc` (startup), `--disk_cache=`,
-`--lockfile_mode=off`, the colour flags and `--build_event_json_file`. Bazel runs under
+The recorder puts `--nosystem_rc` before `cmd`, with the startup options a `cmd` starts with
+(`oom`'s `--host_jvm_args`), and adds these after it: `--disk_cache=`, `--lockfile_mode=off`,
+the colour flags and `--build_event_json_file`. Bazel runs under
 `env -i` with an empty HOME, so no user rc file or environment variable reaches the recording.
 Each case is preceded by an unrecorded `--nobuild` run of the same command so module
 resolution and repository fetches do not show in whichever case happens to run first; the
