@@ -884,58 +884,6 @@ def tab_top(state: dict, status: str, cols: int, row: int) -> str:
     lead = rest - text_width(info) - (1 if info else 0)
     return text + _c("border") + "─" * max(0, lead) + _RESET + (_c("muted") + info + _RESET + _c("border") + "─" if info else _c("border")) + "┐" + _RESET
 
-_SECRET_WORDS = ("header", "token", "password", "passwd", "pwd", "secret", "credential", "auth", "key", "cookie", "session")
-
-def _secret_name(name: str) -> bool:
-    """Whether a flag's or setting's `name` names what may be a secret."""
-    lower = name.lower()
-    return any([word in lower for word in _SECRET_WORDS])
-
-def _redacted(flag: str) -> str:
-    """`flag` with what may be a secret's value hidden: a header's, a
-    token's, a password's or a key's, an env var's value, a URL's
-    user and password. A value that is itself a setting named so
-    (`--define=API_TOKEN=x`, `--test_arg=--password=x`, `--copt=-DKEY=x`)
-    has its own value hidden, as is what follows one with a space
-    (`--test_arg=--token x`)."""
-    name, eq, value = flag.partition("=")
-    if not eq:
-        return flag
-    lower = name.lower()
-    if _secret_name(name):
-        return name + "=<REDACTED>"
-    if lower.endswith("_env") or lower in ("--client_env", "--action_env", "--repo_env", "--test_env", "--host_action_env"):
-        return name + "=" + value.partition("=")[0] + ("=<REDACTED>" if "=" in value else "")
-    inner, inner_eq, _ = value.partition("=")
-    if inner_eq and "://" not in inner and _secret_name(inner):
-        return name + "=" + inner + "=<REDACTED>"
-    head, space, _ = value.partition(" ")
-    if space and "://" not in head and _secret_name(head):
-        return name + "=" + head + " <REDACTED>"
-    scheme, sep, rest = value.partition("://")
-    if sep and "@" in rest.partition("/")[0]:
-        value = scheme + "://<REDACTED>@" + rest.partition("@")[2]
-    return name + "=" + value
-
-def _redacted_args(flags: list) -> list:
-    """`flags` each `_redacted`, and the one after a secret-named flag
-    passed in another's value that left its own value to the next argument
-    (`--test_arg=--password` then `--test_arg=hunter2`) hidden too, where
-    it is that same flag again. A bare flag is never taken to own the next
-    argument: a boolean one (`--google_default_credentials`) takes none."""
-    out = []
-    owner = None
-    for flag in flags:
-        name, eq, value = flag.partition("=")
-        if owner != None and eq and name == owner:
-            out.append(name + "=<REDACTED>")
-            owner = None
-            continue
-        out.append(_redacted(flag))
-        secret = eq and "=" not in value and " " not in value and value.startswith("-") and _secret_name(value)
-        owner = name if secret else None
-    return out
-
 def metrics_lines(state: dict) -> list:
     """The Metrics tab: the build's actions (`action_lines`), tests (what
     a cache served from their results), targets, timing and memory."""
@@ -991,20 +939,21 @@ def invocation_lines(state: dict) -> list:
     for label, url in state.get("pages", []):
         out.append(_row_of(label, url))
     options = inv.get("options_parsed")
-    explicit = _redacted_args([str(f) for f in (bes_get(options, "explicit_cmd_line") or [])])
+    explicit = bazel.redact_flags([str(f) for f in (bes_get(options, "explicit_cmd_line") or [])])
     if explicit:
         out += ["", _c("heading") + "Flags given" + _RESET] + ["  " + f for f in explicit]
-    startup = _redacted_args([str(f) for f in (bes_get(options, "explicit_startup_options") or [])])
+    startup = bazel.redact_flags([str(f) for f in (bes_get(options, "explicit_startup_options") or [])])
     if startup:
         out += ["", _c("heading") + "Startup options given" + _RESET] + ["  " + f for f in startup]
     status = bes_get(inv.get("workspace_status"), "item") or []
     if status:
         out += ["", _c("heading") + "Workspace status" + _RESET]
-        out += [_row_of(str(bes_get(i, "key", "")), _redacted(str(bes_get(i, "key", "")) + "=" + str(bes_get(i, "value", ""))).partition("=")[2]) for i in status]
+        out += [_row_of(str(bes_get(i, "key", "")), v.partition("=")[2]) for i, v in zip(status, bazel.redact_flags([str(bes_get(i, "key", "")) + "=" + str(bes_get(i, "value", "")) for i in status]))]
     metadata = bes_get(inv.get("build_metadata"), "metadata")
     if metadata:
         out += ["", _c("heading") + "Build metadata" + _RESET]
-        out += [_row_of(str(k), _redacted(str(k) + "=" + str(metadata[k])).partition("=")[2]) for k in sorted(metadata)]
+        keys = sorted(metadata)
+        out += [_row_of(k, v.partition("=")[2]) for k, v in zip(keys, bazel.redact_flags([str(k) + "=" + str(metadata[k]) for k in keys]))]
     return out
 
 def _tab_pane(state: dict, out: list, cols: int, rows: int) -> list:
