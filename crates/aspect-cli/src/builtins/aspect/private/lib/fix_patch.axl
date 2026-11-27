@@ -384,7 +384,9 @@ def apply_fix_patch(
       environment that can't change its backups, file lookups, quoting or
       language. A hunk that looks applied already is skipped, not reversed.
     - A file is removed only where its header's new side doesn't exist and
-      patch removed or emptied its copy; one a fix merely empties stays.
+      patch removed or emptied its copy; one a fix merely empties stays, and
+      one such a patch leaves holding something else is written back, as
+      GNU patch keeps it.
     - A file the patch makes that is there already, not empty, is never
       written over: the same bytes count as applied, other bytes are a
       reject.
@@ -532,11 +534,10 @@ def apply_fix_patch(
             continue
         if _is_file(fs, patched + ".rej") and not ignored:
             rejects.append(target + ".rej")
-        if f.new == None:
-            if target in had and (not _is_file(fs, patched) or fs.metadata(patched).size == 0):
-                err, _ = catch(fs.remove_file, mine, types = [std.io.Error])
-                if err != None:
-                    tell("WARNING", "%s: %s was not removed: %s" % (ascii_escaped(patch), ascii_escaped(target), err.message))
+        if f.new == None and target in had and (not _is_file(fs, patched) or fs.metadata(patched).size == 0):
+            err, _ = catch(fs.remove_file, mine, types = [std.io.Error])
+            if err != None:
+                tell("WARNING", "%s: %s was not removed: %s" % (ascii_escaped(patch), ascii_escaped(target), err.message))
             continue
         if not _is_file(fs, patched) or (target in had and _same_bytes(fs, patched, mine)):
             continue

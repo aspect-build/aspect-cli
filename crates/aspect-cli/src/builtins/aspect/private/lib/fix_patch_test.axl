@@ -201,6 +201,13 @@ printf 'caf\\352\\n' > tree/src/l1.txt
     _eq("an epoch deletion", apply_fix_patch(ctx, root + "/epoch.patch", cwd = tree), None)
     _eq("removes the file", fs.exists(tree + "/src/del.txt"), False)
 
+    # Such a patch that leaves the file holding something is a change, as
+    # GNU patch keeps it: written back, not dropped.
+    fs.write(tree + "/src/kept.txt", "a\nb\n")
+    fs.write(root + "/epoch-change.patch", "--- a/src/kept.txt\t2026-01-01 00:00:00.000000000 +0000\n+++ b/src/kept.txt\t1970-01-01 00:00:00.000000000 +0000\n@@ -1,2 +1 @@\n-a\n b\n")
+    _eq("an epoch side that keeps a line", apply_fix_patch(ctx, root + "/epoch-change.patch", cwd = tree), None)
+    _eq("is written back", fs.read_to_string(tree + "/src/kept.txt"), "b\n")
+
     # rules_lint's patcher writes `--label` headers: a name with spaces and
     # no tab after it.
     fs.write(tree + "/src/my file.txt", "a\n")
