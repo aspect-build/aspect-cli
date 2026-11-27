@@ -6595,12 +6595,14 @@ def _bazel_headers(state: dict, text: str) -> list:
         found = [h for h in found if h["coloured"]]
     return found
 
-def _relay_pieces(state: dict, rec: dict, stdout: bool):
+def _relay_pieces(state: dict, rec: dict, stdout: bool, plain: bool):
     """An action's output as Bazel relays it to the console, from its logs
     as they read now: its stderr, then, where the console carried Bazel's
     stdout too (`stdout`), its stdout, each `(stream, text, paths)`, `text`
     None for one past Bazel's cap (cut as read) and `paths` what Bazel
-    names it by (its event's URI, decoded); None where one is gone."""
+    names it by (its event's URI, decoded); None where one is gone. In a
+    console Bazel wrote without colour (`plain`, `--color=no`) Bazel strips
+    the escapes from what it relays, and so does this."""
     paths = dict(_action_logs(state, rec))
     out = []
     for name in (("stderr", "stdout") if stdout else ("stderr",)):
@@ -6613,7 +6615,11 @@ def _relay_pieces(state: dict, rec: dict, stdout: bool):
         for stream, value in rec["files"]:
             if stream == name and type(value) == "string":
                 named += [p for p in log_paths(state, rec, value) if p not in named]
-        out.append((name, got[0] if got[1] == 0 else None, named))
+        body = got[0] if got[1] == 0 else None
+        ansi = state.get("ansi")
+        if body and plain and ansi != None:
+            body = ansi.replace(body, "")
+        out.append((name, body, named))
     return out
 
 def _past_redraw(text: str, at: int) -> int:
@@ -6662,36 +6668,52 @@ def _relayed(text: str, at: int, lead: str, pieces: list, tails: dict) -> int:
             pos += len(rest)
     return pos
 
-def _absorb_tails(state: dict, text: str, froms: list, tails: dict, spans: list, stdout: bool):
-    """Extend `spans` over each line Bazel wrote after an action's `INFO:
-    From` output (`froms`: where each header ends, its body's length and
-    last line, and where the block after it starts when that is a tail,
-    `tails`) that is the output's own held last line: when the body and
-    that line are, exactly, the output (with a newline added, where it has
-    no final one) of a successful action that wrote some (`outputs`, which
-    Bazel reports with `--build_event_publish_all_actions`) and whose label
-    the header names; one such action is enough, two that wrote alike
-    too. Only those actions' logs are read."""
+def _absorb_tails(state: dict, text: str, blocks: list, froms: list, spans: list, stdout: bool, plain: bool):
+    """Extend `spans` over the blocks after an action's `INFO: From` output
+    (`froms`: each one's index in `blocks`, `(start, end)` in `text`, its
+    header, its body's length and last line) that are the rest of that
+    output: Bazel's line holding an output's last line, which it writes
+    after its next redraw, or, without colour, a tool's own `ERROR:` lines.
+    They are when the body and those blocks are, exactly, the output (with
+    a newline added, where it has no final one) of a successful action
+    that wrote some (`outputs`, which Bazel reports with
+    `--build_event_publish_all_actions`) and whose label the header names;
+    one such action is enough, two that wrote alike too. Only those
+    actions' logs are read."""
     ansi = state.get("ansi")
-    for header, body_len, last, after in froms:
-        if after not in tails:
+    for i, header, body_len, last in froms:
+        if i + 1 >= len(blocks):
             continue
-        plain = (ansi.replace(header, "") if ansi != None else header).rpartition("\r")[2].rstrip("\n")
-        start = _past_redraw(text, after)
-        end = text.find("\n", start)
-        end = len(text) if end < 0 else end + 1
-        line = text[start:end]
+        said = (ansi.replace(header, "") if ansi != None else header).rpartition("\r")[2].rstrip("\n")
         for rec in state.get("outputs") or []:
             label = rec["label"]
-            if (" %s:" % label) not in plain and not plain.endswith(" " + label) and (" %s " % label) not in plain:
+            if (" %s:" % label) not in said and not said.endswith(" " + label) and (" %s " % label) not in said:
                 continue
-            pieces = _relay_pieces(state, rec, stdout)
+            pieces = _relay_pieces(state, rec, stdout, plain)
             if not pieces or [p for p in pieces if p[1] == None]:
                 continue
             out = "".join([p[1] for p in pieces])
             out = out if out.endswith("\n") else out + "\n"
-            if len(out) == body_len + len(line) and out.endswith(line) and out[:body_len].endswith(last):
-                spans.append((after, end))
+            if len(out) <= body_len or not out[:body_len].endswith(last):
+                continue
+            rest = out[body_len:]
+            pos = 0
+            got = []
+            for start, end in blocks[i + 1:]:
+                at = _past_redraw(text, start)
+                seg = text[at:end]
+                if rest.startswith(seg, pos):
+                    got.append((start, end))
+                    pos += len(seg)
+                elif seg.startswith(rest[pos:]):
+                    got.append((start, at + len(rest) - pos))
+                    pos = len(rest)
+                else:
+                    break
+                if pos == len(rest):
+                    break
+            if pos == len(rest):
+                spans.extend(got)
                 break
 
 def _status_word(status: str) -> str:
@@ -6763,17 +6785,23 @@ def console_ties(state: dict) -> dict:
     parts = []
     spans = []
     froms = []
+    bounds = []
     tails = {}
     at = 0
     for k, b in enumerate(blocks):
         parts.append(b["text"])
         if b["kind"] == "tail":
             tails[at] = True
+        bounds.append((at, at + len(b["text"])))
         at += len(b["text"])
         if b["kind"] == "from":
-            froms.append((b["text"], b.get("body_len", 0) or 0, b.get("last_line", "") or "", at))
+            froms.append((k, b["text"], b.get("body_len", 0) or 0, b.get("last_line", "") or ""))
     text = "".join(parts)
-    _absorb_tails(state, text, froms, tails, spans, stdout)
+
+    # Bazel colours its own lines unless `--color=no`, where it strips the
+    # escapes from what it relays too.
+    plain = "\x1b[31m" not in text and "\x1b[32m" not in text and "\x1b[35m" not in text
+    _absorb_tails(state, text, bounds, froms, spans, stdout, plain)
     headers = [h for h in _bazel_headers(state, text) if not [sp for sp in spans if sp[0] <= h["start"] and h["start"] < sp[1]]]
     claimed = {}
 
@@ -6814,7 +6842,7 @@ def console_ties(state: dict) -> dict:
             continue
         out = {"location": "", "status": "", "lines": []}
         label = rec["label"]
-        pieces = _relay_pieces(state, rec, stdout)
+        pieces = _relay_pieces(state, rec, stdout, plain)
         message = rec.get("failure", "")
         first = message.partition("\n")[0]
         if message and pieces != None:
