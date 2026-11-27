@@ -1,0 +1,25 @@
+Computing main repo mapping: 
+Loading: 
+Loading: 0 packages loaded
+Analyzing: 4 targets (0 packages loaded, 0 targets configured)
+Analyzing: 4 targets (0 packages loaded, 0 targets configured)
+
+INFO: Analyzed 4 targets (0 packages loaded, 0 targets configured).
+INFO: From Working on //lp:двое and //lp:nolabel:
+two out
+ERROR: held twolabels
+INFO: From Doing some work:
+nolabel out
+ERROR: held nolabel
+INFO: From Work lp/deflt.out:
+default out
+ERROR: held default
+INFO: From Working on //lp:withlabel:
+label out
+ERROR: held withlabel
+INFO: Found 4 targets...
+INFO: Elapsed time: 0.075s, Critical Path: 0.03s
+INFO: 5 processes: 1 internal, 4 darwin-sandbox.
+INFO: Build completed successfully, 5 total actions
+INFO: 
+INFO: Build Event Protocol files produced successfully.

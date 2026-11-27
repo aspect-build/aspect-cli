@@ -10,7 +10,8 @@ event stream, the console as a pty got it and the logs the events name.
 Every event goes through `collect_event` as the build event hooks see it,
 then `failure_summary` reads the console and the logs as it reads the
 history's copies, and `failure_rows` draws the Failures tab with every
-row's excerpt. Placeholders stand for the recording's paths: `${FIXTURE}`
+row's excerpt; the summary, the tab and the counts must agree on the
+failures and on Bazel's other errors, a passing build's too. Placeholders stand for the recording's paths: `${FIXTURE}`
 for the case's folder and `${OUTPUT_BASE}` for the files the events name,
 so the goldens hold no path of this machine. `--update` rewrites the
 goldens; review the diff.
@@ -136,6 +137,18 @@ def _replay(ctx: TaskContext, case: str, prefix: str) -> str:
     counted = len([e for e in failure_entries(dict(tab, bazel_exit = code))["entries"] if not e["flaky"]])
     if not (said == tabbed and tabbed == counted):
         fail("%s/%s: the summary says %d, the tab has %d rows, the counts %d" % (case, prefix, said, tabbed, counted))
+
+    # One list of Bazel's other errors, on a passing build too: the
+    # summary's, under its own heading alone, and the tab's `!` rows.
+    at = summary.index("── Other errors from Bazel ──") if "── Other errors from Bazel ──" in summary else len(summary)
+    others = len([l for l in summary[at:] if l.startswith("ERROR: ")])
+    more = [l for l in summary[at:] if l.startswith("… and ") and " more · " in l]
+    others += int(more[0][len("… and "):].partition(" ")[0].replace(",", "")) if more else 0
+    flagged = len([r for r in rows if r.startswith("! ")])
+    if others != flagged:
+        fail("%s/%s: the summary lists %d of Bazel's other errors, the tab %d" % (case, prefix, others, flagged))
+    if code == 0 and (title or tabbed):
+        fail("%s/%s: a passing build has failures" % (case, prefix))
     return "\n".join(out) + "\n"
 
 def _prefixes(names: list) -> list:

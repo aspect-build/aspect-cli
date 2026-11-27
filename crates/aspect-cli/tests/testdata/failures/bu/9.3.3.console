@@ -1,0 +1,32 @@
+[32mComputing main repo mapping:[0m 
+[1A[K[32mLoading:[0m 
+[1A[K[32mLoading:[0m 0 packages loaded
+[1A[K[32mAnalyzing:[0m target //bu:ok (0 packages loaded, 0 targets configured)
+[1A[K[32mAnalyzing:[0m target //bu:ok (0 packages loaded, 0 targets configured)
+
+[1A[K[1A[K[32mINFO: [0mAnalyzed target //bu:ok (0 packages loaded, 0 targets configured).
+
+[1A[K[32mINFO: [0mFound 1 target...
+[32m[2 / 2][0m no actions running
+[1A[KTarget //bu:ok up-to-date:
+[32m[2 / 2][0m no actions running
+[1A[K  bazel-bin/bu/ok.txt
+[32m[2 / 2][0m no actions running
+[1A[K[32mINFO: [0mElapsed time: 0.071s, Critical Path: 0.02s
+[32m[2 / 2][0m no actions running
+[1A[K[32mINFO: [0m2 processes: 1 internal, 1 darwin-sandbox.
+[32m[2 / 2][0m no actions running
+[1A[K[32mINFO: [0mBuild completed successfully, 2 total actions
+[32mINFO:[0m 
+[1A[K[32mINFO:[0m 
+[1A[K[32mINFO:[0m 
+[1A[K[32mINFO:[0m 
+Waiting for build events upload: Build Event Service 1s
+[1A[K[1A[K[32mINFO:[0m 
+Waiting for build events upload: Build Event Service 2s
+[1A[K[1A[K[32mINFO:[0m 
+Waiting for build events upload: Build Event Service 3s
+[1A[K[1A[K[32mINFO:[0m 
+Waiting for build events upload: Build Event Service 4s
+[1A[K[1A[K[31m[1mERROR: [0mThe Build Event Protocol upload timed out. com.google.common.util.concurrent.TimeoutFuture$TimeoutFutureException: Timed out: NonCancellationPropagatingFuture@3ab916af[status=PENDING, info=[delegate=[SettableFuture@347eff88[status=PENDING]]]]
+[0m

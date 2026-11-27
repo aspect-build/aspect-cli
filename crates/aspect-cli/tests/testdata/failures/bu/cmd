@@ -1,0 +1,1 @@
+build --bes_backend=grpc://127.0.0.1:1 --bes_timeout=5s //bu:all
