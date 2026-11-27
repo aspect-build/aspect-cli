@@ -6,11 +6,13 @@
 //! these tests pin (stated in `docs/design.md`, "When a file does not load",
 //! and carried out by `Unloadable` in `main.rs`): `version` and `help` run
 //! anyway and report the failure as a warning, while anything that dispatches
-//! a task still fails on it. Both halves matter. A silently swallowed syntax
-//! error would be worse than the hard failure it replaced, so every degraded
-//! run is checked for the diagnostic as well as the exit code — and a command
-//! that *does* fail is checked for the files it did not raise, since dropping
-//! those would make what the user hears about depend on `read_dir` order.
+//! a task still fails on it. The one exception, the built-in `aspect worktree`
+//! tasks, is pinned in `worktree_broken_config.rs`. Both halves matter. A
+//! silently swallowed syntax error would be worse than the hard failure it
+//! replaced, so every degraded run is checked for the diagnostic as well as
+//! the exit code — and a command that *does* fail is checked for the files it
+//! did not raise, since dropping those would make what the user hears about
+//! depend on `read_dir` order.
 //!
 //! Also pinned here: each warning names what that particular file's absence
 //! costs, a `use_feature` file defining no tasks; one file named twice is

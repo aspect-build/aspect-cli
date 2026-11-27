@@ -27,6 +27,10 @@ onto the private `_WorktreePoolSettings` trait the worktree tasks read through
 `worktree_pool`. Only the feature writes that trait, so config has one place
 to set them. The range checks run in `add`, which refuses with structured
 output; the feature only carries the options to the tasks.
+
+When the workspace's own AXL does not load, `aspect worktree` still runs and
+these may be at their defaults. Its warning names them from `DEGRADED_GROUPS`
+in `crates/aspect-cli/src/cmd.rs`, so a setting added here belongs there too.
 """
 
 # The `score_slot` hook's limits: how long its calls for one `add` may take in

@@ -8,8 +8,10 @@
 //!   does not declare reach its `args.passthrough()` buckets instead of failing
 //!   the parse. `feature_flag_conflict()`, which `main` calls before
 //!   dispatching, fails a command line whose `--<name>` and `--<name>:enabled`
-//!   disagree with a clap usage error (exit 2). `dispatch()` turns parsed
-//!   [`ArgMatches`] into a [`Dispatch`].
+//!   disagree with a clap usage error (exit 2). `degraded_group()` tells
+//!   `main` whether the selected task is one of the built-ins that run
+//!   against a workspace that did not fully load ([`DEGRADED_GROUPS`]).
+//!   `dispatch()` turns parsed [`ArgMatches`] into a [`Dispatch`].
 //!   `print_feature_help()` renders `aspect feature [<name>]`, the discovery
 //!   surface for feature flags (which are hidden from each task's `--help`)
 //!   and for the feature args only `.aspect/config.axl` can set. A feature's
@@ -66,6 +68,37 @@ pub const HELP_COMMAND: &str = "help";
 /// them below and the arms `main` routes them through both read this list, so
 /// the three cannot drift apart.
 pub const IDENTITY_COMMANDS: &[&str] = &[VERSION_COMMAND, HELP_COMMAND];
+
+/// A group of built-in tasks that run against a workspace that did not fully
+/// load, as the [`IDENTITY_COMMANDS`] do, and the config-driven settings such
+/// a run may be missing. See [`DEGRADED_GROUPS`].
+pub struct DegradedGroup {
+    /// The top-level group: `worktree` for `aspect worktree <task>`.
+    pub group: &'static str,
+    /// The settings a config applies to these tasks, as the degraded run's
+    /// warning lists them.
+    pub config_settings: &'static str,
+}
+
+/// The built-in task groups that still run when the workspace's own AXL
+/// failed to load, warning instead of failing (see `Unloadable` in
+/// `main.rs`).
+///
+/// A group belongs here when it is a way out of a broken workspace and config
+/// only tunes it, so running without the config cannot lose work or do what a
+/// repository's config is there to prevent. `aspect worktree` hands out the
+/// clean checkout to fix the config in. What config sets for it picks which
+/// slot is reused, how many slots the pool keeps and how long a stopped
+/// session's slot is held, and none of its tasks removes a checkout holding
+/// work unless `--force` says to. Only tasks the built-in module defines
+/// qualify: a repository's own task in one of these groups may depend on what
+/// failed.
+pub const DEGRADED_GROUPS: &[DegradedGroup] = &[DegradedGroup {
+    group: "worktree",
+    config_settings: "the `WorktreePool` options (`max_slots`, `abandoned_grace_hours`), the \
+                      `Worktrees` `score_slot` hooks, and any of its flags a config sets",
+}];
+
 /// Top-level command names `main` intercepts before task parsing; a top-level
 /// task of any of these kinds would be unreachable, so it is rejected at build
 /// time (see `Tree::insert`). Reachable when nested under a group.
@@ -354,6 +387,25 @@ impl<'a, 'v> Cmd<'a, 'v> {
             }
         }
         Ok(())
+    }
+
+    /// The [`DEGRADED_GROUPS`] entry the task `matches` selected belongs to,
+    /// if it is a built-in task of one of those groups. `None` for every other
+    /// command, a repository's own task in such a group included.
+    pub fn degraded_group(&self, matches: &ArgMatches) -> Option<&'static DegradedGroup> {
+        let leaf = deepest_subcommand(matches)?;
+        let task = self
+            .tasks
+            .get(*leaf.try_get_one::<usize>(TASK_ID_KEY).ok()??)?;
+        let builtin = self.modules.iter().any(|r#mod| {
+            r#mod.name == crate::builtins::MODULE_NAME && task.path().starts_with(&r#mod.root)
+        });
+        if !builtin {
+            return None;
+        }
+        DEGRADED_GROUPS
+            .iter()
+            .find(|entry| task.group().iter().map(String::as_str).eq([entry.group]))
     }
 
     pub fn dispatch(&self, matches: ArgMatches) -> Result<Dispatch, CmdError> {
@@ -3763,6 +3815,41 @@ mod tests {
         let dispatch = cmd.dispatch(matches).expect("dispatch ok");
         assert_eq!(dispatch.task_kind, "mcp");
         assert_eq!(dispatch.task_name, "renamed");
+    }
+
+    /// Only a built-in task of a listed group runs degraded: a repository's
+    /// own task in that group, a built-in in another group and a command that
+    /// is not a task do not.
+    #[test]
+    fn degraded_group_takes_only_built_in_tasks_of_a_listed_group() {
+        let builtins = Mod::new(
+            PathBuf::from("/cache"),
+            crate::builtins::MODULE_NAME.to_owned(),
+            PathBuf::from("/cache/aspect"),
+        );
+        let in_builtins = |mut t: StubTask| {
+            t.path = PathBuf::from("/cache/aspect/tasks.axl");
+            t
+        };
+        let builtin_inspect = in_builtins(stub_task("inspect", &["worktree"], SmallMap::new()));
+        let builtin_list = in_builtins(stub_task("list", &["history"], SmallMap::new()));
+        let own = stub_task("mine", &["worktree"], SmallMap::new());
+        let cmd = Cmd {
+            tasks: vec![&builtin_inspect, &builtin_list, &own],
+            features: vec![],
+            aspect_root: Path::new("/repo"),
+            modules: std::slice::from_ref(&builtins),
+        };
+        let root = cmd.build("0.0.0").expect("build ok");
+        let group = |argv: &[&str]| {
+            let matches = root.clone().try_get_matches_from(argv).expect("parse ok");
+            cmd.degraded_group(&matches).map(|g| g.group)
+        };
+        assert_eq!(group(&["aspect", "worktree", "inspect"]), Some("worktree"));
+        assert_eq!(group(&["aspect", "worktree", "mine"]), None);
+        assert_eq!(group(&["aspect", "history", "list"]), None);
+        assert_eq!(group(&["aspect", DESCRIBE_COMMAND]), None);
+        assert_eq!(group(&["aspect", VERSION_COMMAND]), None);
     }
 
     #[test]

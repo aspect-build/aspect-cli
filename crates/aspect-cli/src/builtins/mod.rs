@@ -28,6 +28,9 @@ use include_dir::{Dir, DirEntry, include_dir};
 #[cfg(any(not(debug_assertions), feature = "bazel"))]
 static ASPECT_DIR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/src/builtins/aspect");
 
+/// The module the built-in tree is loaded as: `@aspect//build.axl`.
+pub const MODULE_NAME: &str = "aspect";
+
 #[cfg(all(debug_assertions, not(feature = "bazel")))]
 pub fn expand_builtins(
     _root_dir: PathBuf,
@@ -35,7 +38,7 @@ pub fn expand_builtins(
 ) -> std::io::Result<Vec<(String, PathBuf)>> {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     Ok(vec![(
-        "aspect".to_string(),
+        MODULE_NAME.to_string(),
         manifest_dir.join("src/builtins/aspect"),
     )])
 }
@@ -54,7 +57,7 @@ pub fn expand_builtins(
         })
         .collect();
     let aspect_dir = extract_aspect_builtins(&broot, &content_hash(&files), &files)?;
-    Ok(vec![("aspect".to_string(), aspect_dir)])
+    Ok(vec![(MODULE_NAME.to_string(), aspect_dir)])
 }
 
 /// A name for the tree `files` that changes whenever a path or its contents

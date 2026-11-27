@@ -67,7 +67,9 @@ use std::time::Duration;
 use aspect_telemetry::{
     cargo_pkg_display_version, cargo_pkg_short_version, do_not_track, send_telemetry,
 };
-use axl_runtime::eval::{AxlFileFailure, AxlFileRole, Loader, ModuleEnv, MultiPhaseEval};
+use axl_runtime::eval::{
+    AxlFileFailure, AxlFileRole, EvalError, Loader, ModuleEnv, MultiPhaseEval,
+};
 use axl_runtime::module::{AXL_ROOT_MODULE_NAME, Mod};
 use axl_runtime::module::{DiskStore, ModEvaluator};
 use axl_runtime::{SignalKind, SignalOrigin, Signals};
@@ -291,6 +293,8 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
             if !unloadable.is_empty() {
                 if runs_without_tasks(matches.subcommand_name()) {
                     unloadable.warn();
+                } else if let Some(group) = cmd.degraded_group(&matches) {
+                    unloadable.warn_degraded(group);
                 } else if let Some(err) = unloadable.into_error() {
                     return Err(err);
                 }
@@ -498,14 +502,17 @@ impl std::fmt::Display for ConfigError {
 /// [`MultiPhaseEval::execute_configs`]) and hand what failed to this type.
 ///
 /// `docs/design.md`, "When a file does not load", states the policy: which
-/// commands run degraded, what each failure is reported as, and the four
-/// things settled outside the tolerant phases that still fail everything.
+/// commands run degraded (`version` and `help`, and the built-in task groups
+/// in [`cmd::DEGRADED_GROUPS`]), what each failure is reported as, and the
+/// four things settled outside the tolerant phases that still fail everything.
 /// This type is the mechanism, and holds two invariants the policy depends on:
 ///
 /// * Nothing recorded is ever dropped silently. Both ways out of here report
 ///   first — [`Self::reporting`] for an error of its own, [`Self::into_error`]
 ///   for one of the recorded failures raised as the run's error — so a typo
-///   does not vanish behind whatever ended the run.
+///   does not vanish behind whatever ended the run. A run that carries on
+///   names every failed file too: [`Self::warn`] in full, and
+///   [`Self::warn_degraded`] one line each.
 /// * Scripts come before configs, and a config that failed alongside a script
 ///   is summarised as derived from it rather than given a warning of its own.
 #[derive(Default)]
@@ -592,6 +599,36 @@ impl Unloadable {
             paths.join(", "),
         );
         for failure in &self.configs {
+            TaskExit::debug_traceback(&format_args!(
+                "{}",
+                strip_error_prefix(&failure.error.to_string())
+            ));
+        }
+    }
+
+    /// Report the failures for a built-in task of `group` that runs without
+    /// them: a single `warning:` naming the command, then a line per file with
+    /// the first line of its own error, scripts first, then the settings the
+    /// run may be missing. Each line is that file's own message, so no config
+    /// is blamed on a script here.
+    ///
+    /// The full diagnostics are left to `aspect version`, which prints them
+    /// all, and to `ASPECT_DEBUG`: pages of source excerpts would bury the
+    /// answer the user ran the command for.
+    fn warn_degraded(&self, group: &cmd::DegradedGroup) {
+        errln!(
+            "warning: `aspect {}` is running without AXL that failed to load:",
+            group.group
+        );
+        for failure in self.scripts.iter().chain(&self.configs) {
+            errln!("  {}: {}", failure.path.display(), headline(&failure.error));
+        }
+        errln!(
+            "  Settings these files would have applied to it may be at their defaults: {}. \
+             `aspect version` prints each error in full.",
+            group.config_settings
+        );
+        for failure in self.scripts.iter().chain(&self.configs) {
             TaskExit::debug_traceback(&format_args!(
                 "{}",
                 strip_error_prefix(&failure.error.to_string())
@@ -688,6 +725,20 @@ fn is_display_only(err: &clap::Error) -> bool {
 /// once would leave the doubled form this exists to fix.
 fn strip_error_prefix(message: &str) -> &str {
     message.trim_start_matches("error: ")
+}
+
+/// The first line of `error`'s message, without the `error: ` prefix, source
+/// excerpt or call stack its full rendering carries.
+fn headline(error: &EvalError) -> String {
+    let message = match error {
+        EvalError::StarlarkError(e) => e.without_diagnostic().to_string(),
+        other => other.to_string(),
+    };
+    let first = message
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or_default();
+    strip_error_prefix(first.trim()).to_owned()
 }
 
 /// Whether `args` ask for `--output=json` (or `--output json`) ahead of any
@@ -1067,7 +1118,7 @@ mod config_error_tests {
 
 #[cfg(test)]
 mod degrade_policy_tests {
-    use super::{is_display_only, runs_without_tasks, strip_error_prefix};
+    use super::{EvalError, headline, is_display_only, runs_without_tasks, strip_error_prefix};
     use clap::error::ErrorKind;
 
     /// Starlark's own `error: ` title is dropped so the caller supplies the
@@ -1091,6 +1142,26 @@ mod degrade_policy_tests {
             strip_error_prefix("Traceback:\n  error: inner"),
             "Traceback:\n  error: inner"
         );
+    }
+
+    /// A degraded run's line per file carries the error's first line, with no
+    /// source excerpt and no `error: ` of its own.
+    #[test]
+    fn a_headline_is_the_first_line_of_the_message() {
+        let parse = starlark::syntax::AstModule::parse(
+            "config.axl",
+            "def config(ctx)\n    pass\n".to_owned(),
+            &starlark::syntax::Dialect::Standard,
+        )
+        .expect_err("a syntax error");
+        let rendered = parse.to_string();
+        assert!(rendered.contains("-->"), "{rendered}");
+        let line = headline(&EvalError::from(parse));
+        assert!(line.starts_with("Parse error: "), "{line}");
+        assert!(!line.contains('\n'), "{line}");
+
+        let other = EvalError::UnknownError(anyhow::anyhow!("error: boom\n  at somewhere"));
+        assert_eq!(headline(&other), "boom");
     }
 
     /// The commands that report the CLI's own identity, and nothing else.
