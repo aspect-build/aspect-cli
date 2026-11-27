@@ -479,18 +479,19 @@ def _tail_text(state: dict, path: str) -> str | None:
 
 def bazel_line(line: str) -> str:
     """`line` without the `(23:04:25) ` (or `(23:04:25.123) `) Bazel puts
-    before it under `--show_timestamps`."""
-    if not line.startswith("("):
-        return line
+    before it under `--show_timestamps`: the prefix the console stages
+    strip (`TIMESTAMP_RE` in crates/bazel/src/console/line.rs,
+    `\\(\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?\\) `), which no builtin strips for
+    AXL."""
     close = line.find(") ")
-    if close < 2 or close > 14:
+    if close < 9 or line[0] != "(" or line[3] != ":" or line[6] != ":" or not (line[1:3] + line[4:6] + line[7:9]).isdigit():
         return line
-    for c in line[1:close].elems():
-        if c not in "0123456789:.":
-            return line
+    fraction = line[9:close]
+    if fraction and not (fraction.startswith(".") and fraction[1:].isdigit()):
+        return line
     return line[close + 2:]
 
-def new_state(read = None, bb_root = None, ansi = None) -> dict:
+def new_state(read = None, bb_root: str | None = None, ansi = None) -> dict:
     """A fresh state for the build event hooks to collect into
     (`collect_event`) and the failure summary to read. `read` reads a file's
     tail (`std.fs.try_read_tail`), `bb_root` is the runner's bb_clientd mount

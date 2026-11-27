@@ -1266,6 +1266,7 @@ def _impl(ctx: TaskContext) -> int:
     _eq("indented, timed out, a test summary's timeout, timestamped", bazel.output.line_kinds(["  ERROR: //a:b failed", "TIMEOUT: //t:x (Summary)", "//t:x    TIMEOUT in 4.0s", "(23:04:25) ERROR: //a:b failed"])["kinds"], ["error"] * 4)
     _eq("the timestamp gone", bazel_line("(23:04:25.123) INFO: x"), "INFO: x")
     _eq("not a timestamp", bazel_line("(see a.cc) x"), "(see a.cc) x")
+    _eq("Bazel's rule exactly", [bazel_line(l) for l in ["(23:04:25) a", "(1:04:25) b", "(23:04:25.) c", "(23:04:25.5x) d", "(23:4:255) e", "(23:04:25)f"]], ["a", "(1:04:25) b", "(23:04:25.) c", "(23:04:25.5x) d", "(23:4:255) e", "(23:04:25)f"])
     _eq("a diagnostic is its ERROR's", bazel.output.line_kinds(["ERROR: a.cc:1: compile failed", "a.cc:1:2: error: no x", "  1 | x", "INFO: From y:", "y said", "WARNING: z", "z more"])["kinds"], ["error", "error", "error", "", "", "warning", ""])
     _eq("a tool's INFO: is its own, Bazel's not", bazel.output.line_kinds(["INFO: x", "INFO: y"], colours = ["\x1b[32mINFO: \x1b[0mx", "\x1b[32mINFO:\x1b[0m y"])["bazel"], [True, False])
     _eq("timestamped progress", (progress_counts("(23:04:25) [5 / 10] x"), cache_hits("(23:04:25) INFO: 4 processes: 3 remote cache hit, 1 internal.")), ((5, 10), (3, 3)))
