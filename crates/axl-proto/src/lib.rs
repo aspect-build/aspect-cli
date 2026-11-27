@@ -231,6 +231,38 @@ mod tests {
         assert_eq!(reason_of(7).to_uppercase(), "DIGEST_MISMATCH");
     }
 
+    /// A `Duration` field reads as `<field>_ms`, its whole milliseconds, and
+    /// None when unset; the field itself is no attribute.
+    #[test]
+    fn a_duration_reads_as_its_whole_milliseconds() {
+        use crate::build_event_stream::TestResult;
+        let ms = |duration: Option<prost_types::Duration>| {
+            Heap::temp(|heap| {
+                let result = heap.alloc(TestResult {
+                    test_attempt_duration: duration,
+                    ..Default::default()
+                });
+                assert!(
+                    result
+                        .get_attr("test_attempt_duration", heap)
+                        .unwrap()
+                        .is_none(),
+                    "the Duration itself is not read"
+                );
+                let got = result
+                    .get_attr("test_attempt_duration_ms", heap)
+                    .expect("reading it")
+                    .expect("a `_ms` attribute");
+                got.unpack_i32().map(i64::from)
+            })
+        };
+        let at = |seconds, nanos| Some(prost_types::Duration { seconds, nanos });
+        assert_eq!(ms(at(1, 234_567_890)), Some(1234));
+        assert_eq!(ms(at(0, 999_999)), Some(0));
+        assert_eq!(ms(at(-1, -500_000_000)), Some(-1500));
+        assert_eq!(ms(None), None);
+    }
+
     #[test]
     fn an_enum_value_the_proto_does_not_know_reads_as_its_number() {
         assert_eq!(reason_of(99), "99");

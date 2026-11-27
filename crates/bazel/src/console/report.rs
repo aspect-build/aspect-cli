@@ -1277,6 +1277,99 @@ mod tests {
         );
     }
 
+    /// `input` through a collector reading a pipe.
+    fn collected_from_a_pipe(input: &str) -> Arc<super::super::processors::CollectedErrors> {
+        let observations = Arc::new(super::super::processors::Observations::default());
+        collect(
+            ErrorCollector::new(false, observations.clone()),
+            input.as_bytes().to_vec(),
+        );
+        observations.collected_errors().expect("kept")
+    }
+
+    /// Through a pipe in Bazel's colours: an action's `INFO: From` output
+    /// and an `ERROR:`'s body end at Bazel's coloured progress line, a tool's
+    /// uncoloured `ERROR:` in that output is no block of its own, and the
+    /// console is coloured. Bazel's message after a progress line that ended
+    /// an output is a `tail`, as the output's held last line would be: the
+    /// bytes cannot tell them apart, and the summary does.
+    #[test]
+    fn the_collector_reads_a_coloured_pipe() {
+        let kept = collected_from_a_pipe(concat!(
+            "\x1b[32mINFO: \x1b[0mFrom Compiling a.cc:\n",
+            "a.cc:1: warning: x\n",
+            "ERROR: not bazel's\n",
+            "\x1b[32m[1 / 3]\x1b[0m Compiling b.cc\n",
+            "\x1b[31m\x1b[1mERROR: \x1b[0mb/BUILD:2:3: Compiling b.cc failed: (Exit 1)\n",
+            "b.cc:1: error: y\n",
+            "\x1b[32m[2 / 3]\x1b[0m Linking\n",
+            "\x1b[31m\x1b[1mERROR: \x1b[0mBuild did NOT complete successfully\n",
+        ));
+        assert!(kept.color);
+        assert_eq!(
+            kept.blocks
+                .iter()
+                .map(|b| (
+                    b.kind.as_str(),
+                    b.text.as_str(),
+                    b.body_len,
+                    b.last_line.as_str()
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    "from",
+                    "\x1b[32mINFO: \x1b[0mFrom Compiling a.cc:\n",
+                    38,
+                    "ERROR: not bazel's\n"
+                ),
+                (
+                    "tail",
+                    "\x1b[31m\x1b[1mERROR: \x1b[0mb/BUILD:2:3: Compiling b.cc failed: (Exit 1)\nb.cc:1: error: y\n",
+                    0,
+                    ""
+                ),
+                (
+                    "tail",
+                    "\x1b[31m\x1b[1mERROR: \x1b[0mBuild did NOT complete successfully\n",
+                    0,
+                    ""
+                ),
+            ]
+        );
+    }
+
+    /// With `--color=no`, every `ERROR:` and `INFO: From` is taken for
+    /// Bazel's own (nothing tells a tool's apart), and the console is not
+    /// coloured. An action's output ends at Bazel's progress line, which
+    /// only colour tells from a tool's inside an `ERROR:`'s body, so that
+    /// body runs on to Bazel's next message.
+    #[test]
+    fn the_collector_reads_a_console_without_colour() {
+        let kept = collected_from_a_pipe(concat!(
+            "INFO: Analyzed 2 targets.\n",
+            "INFO: From Compiling a.cc:\n",
+            "a.cc:1: warning: x\n",
+            "[1 / 3] Compiling b.cc\n",
+            "ERROR: b/BUILD:2:3: Compiling b.cc failed: (Exit 1)\n",
+            "b.cc:1: error: y\n",
+            "[2 / 3] Linking\n",
+            "ERROR: Build did NOT complete successfully\n",
+        ));
+        assert!(!kept.color);
+        assert_eq!(
+            kinds_and_texts(&kept),
+            vec![
+                ("from", "INFO: From Compiling a.cc:\n"),
+                (
+                    "error",
+                    "ERROR: b/BUILD:2:3: Compiling b.cc failed: (Exit 1)\nb.cc:1: error: y\n[2 / 3] Linking\n"
+                ),
+                ("error", "ERROR: Build did NOT complete successfully\n"),
+            ]
+        );
+    }
+
     /// What Bazel relays of an action's output: the last value the flags
     /// give, an rc entry's for the command too; Bazel's default without
     /// one; no limit for `-1`.

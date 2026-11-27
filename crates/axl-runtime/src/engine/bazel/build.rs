@@ -3407,6 +3407,54 @@ Test = task(implementation = _impl)
         );
     }
 
+    /// A failed build through a console processor that collects errors:
+    /// its exit code once waited on; the errors its console collected, the
+    /// action's error with its stderr relayed under it, then, after Bazel's
+    /// redraw, its closing line, each header read (where, what, Bazel's
+    /// boilerplate); and the copy the history kept of the failed action's
+    /// stderr, by its output.
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_builds_exit_code_collected_errors_and_kept_log() {
+        let history = tempfile::tempdir().unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        let script = r#"
+def _impl(ctx):
+    processor = bazel.output.processor(display = "lines", stages = [bazel.output.collect_errors()])
+    build = ctx.bazel.build(
+        flags = ["--scenario=action_and_test_logs_console", "--basil-scratch=SCRATCH"] + processor.flags,
+        output = processor,
+        keep_action_logs = "failed",
+        build_events = True,
+    )
+    if build.exit_code != None:
+        fail("an exit code before wait(): %r" % build.exit_code)
+    status = build.wait()
+    if status.code != 1 or build.exit_code != 1:
+        fail("exit: %r %r" % (status.code, build.exit_code))
+    got = build.output_collected_errors()
+    said = [(b["kind"], b["location"], b["message"], b["boilerplate"]) for b in got["blocks"] if "message" in b]
+    want = [
+        ("error", "/ws/pkg/BUILD:3:8", "Executing genrule //pkg:broken failed: (Exit 1): bash failed: error executing Genrule command", False),
+        ("tail", "", "Build did NOT complete successfully", True),
+    ]
+    if said != want or not got["blocks"][0]["text"].endswith("broken\n"):
+        fail("collected: %r" % got)
+    if not got["color"] or got["not_kept"] != 0 or got["relay_cap"] != 1024 * 1024:
+        fail("collected: %r" % got)
+    kept = build.kept_action_log("bazel-out/bin/broken.out")
+    if sorted(kept.keys()) != ["stderr"] or ctx.std.fs.read_to_string(kept["stderr"]) != "ERROR: broken\n":
+        fail("kept: %r" % kept)
+    if build.kept_action_log("no/such/output") != {}:
+        fail("kept for another output")
+    return 0
+
+Test = task(implementation = _impl)
+"#
+        .replace("SCRATCH", scratch.path().to_str().unwrap());
+        run_task_with_history(&script, history.path());
+    }
+
     /// The task's record notes each build: its command, its exit, and the
     /// summary of its stream, whose failures point at the logs kept for them.
     #[cfg(unix)]

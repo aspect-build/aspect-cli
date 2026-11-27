@@ -1003,6 +1003,49 @@ mod tests {
         );
     }
 
+    /// Under curses, a note waits for the end of a message Bazel wrote and
+    /// goes before its progress area, never inside the area Bazel erases
+    /// and redraws; and the error collector, which reads Bazel's records
+    /// raw, never sees it.
+    #[test]
+    fn notes_under_a_pty_go_before_the_progress_area_and_past_the_collector() {
+        let sink = SharedSink::default();
+        let notes = Notes::default();
+        notes.push(b"INFO: //a:b Genrule stderr: /h/x.stderr".to_vec());
+        let observations = Arc::new(super::super::processors::Observations::default());
+        let collector = super::super::report::ErrorCollector::new(true, observations.clone());
+        let console = concat!(
+            "\x1b[31m\x1b[1mERROR: \x1b[0ma/BUILD:1:1: Executing genrule //a:b failed: (Exit 1)\r\n",
+            "  why\r\n",
+            "\x1b[32m[1 / 2]\x1b[0m 1 action running\r\n",
+            "\x1b[1A\x1b[K\x1b[32mINFO: \x1b[0mBuild completed\r\n",
+        );
+        let mut forwarder = Forwarder::spawn_logged(
+            Box::new(std::io::Cursor::new(console.as_bytes().to_vec())),
+            Box::new(sink.clone()),
+            vec![Box::new(collector)],
+            None,
+            Shape {
+                notes: Some(notes.clone()),
+                ..Shape::default()
+            },
+        )
+        .unwrap();
+        forwarder.join().unwrap();
+        let out = String::from_utf8_lossy(&sink.bytes()).into_owned();
+        let note = out.find("INFO: //a:b Genrule stderr").expect(&out);
+        assert!(out.find("  why").unwrap() < note, "{out:?}");
+        assert!(note < out.find("[1 / 2]").unwrap(), "{out:?}");
+        let kept = observations.collected_errors().expect("collected");
+        assert!(
+            kept.blocks
+                .iter()
+                .all(|b| !b.text.contains("Genrule stderr")),
+            "{:?}",
+            kept.blocks
+        );
+    }
+
     /// Hidden, nothing reaches the destination and the feed gets the lines.
     #[test]
     fn a_hidden_destination_gets_nothing_and_the_feed_every_line() {

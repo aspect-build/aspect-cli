@@ -963,6 +963,20 @@ fn scenario(name: &str) -> Scenario {
         // (Bazel reports that one only under `--build_event_publish_all_actions`),
         // a failed and a passing test attempt with a `test.log`. For the
         // history's log keeping.
+        // `action_and_test_logs` with Bazel's console for it: the failed
+        // action's error, its stderr relayed under it, Bazel's progress and
+        // its closing line.
+        "action_and_test_logs_console" => Scenario {
+            stderr_lines: &[
+                "INFO: Analyzed 4 targets.",
+                "ERROR: /ws/pkg/BUILD:3:8: Executing genrule //pkg:broken failed: (Exit 1): bash failed: error executing Genrule command",
+                "ERROR: broken",
+                "[3 / 4] Testing //pkg:fails",
+                "ERROR: Build did NOT complete successfully",
+            ],
+            ..scenario("action_and_test_logs")
+        },
+
         "action_and_test_logs" => {
             let dir = SCRATCH
                 .get()
