@@ -43,8 +43,103 @@ def _test_shard_tie(ctx):
     ], _error("/ws/tp/BUILD:3:8: Testing //tp:shards (shard 2 of 3, run 1 of 2) failed: (Exit 1): test.sh failed"))
     _eq("and a shard's run's", failure_ties.console_ties(state)["others"], [])
 
+_CFG = struct(id = "c1")
+
+def _failed_action(label: str, output: str, message: str, exit_code = 1, code = "NON_ZERO_EXIT"):
+    """A failed action's `action_completed` event, its spawn exiting with
+    `exit_code`."""
+    return _event("action_completed", struct(label = label, primary_output = output, configuration = _CFG), struct(
+        success = False,
+        type = "Genrule",
+        exit_code = 1,
+        failure_detail = struct(message = message, category = struct(code = code, spawn_exit_code = exit_code)),
+    ))
+
+def _aborted(kind: str, label: str, description: str, reason = "analysis_failure"):
+    """An Aborted event of a root cause, `kind` its id's kind."""
+    return _event(kind, struct(label = label, configuration = _CFG), struct(reason = reason, description = description), aborted = True)
+
+def _test_output_not_created(ctx):
+    # The action's primary output, as its line names it, ties it whole.
+    state = _ended(ctx, [_failed_action("//a:g", "bazel-out/k8-fastbuild/bin/a/out.txt", "Executing genrule //a:g failed: not all outputs were created or valid", code = "ACTION_OUTPUTS_NOT_CREATED")], _error("/ws/a/BUILD:3:8: output 'a/out.txt' was not created") + _error("/ws/a/BUILD:3:8: Executing genrule //a:g failed: not all outputs were created or valid"))
+    ties = failure_ties.console_ties(state)
+    _eq("output not created: located, quoted", (ties["actions"][0]["location"], ties["actions"][0]["lines"]), ("/ws/a/BUILD:3:8", ["output 'a/out.txt' was not created"]))
+    _eq("output not created: nothing else", ties["others"], [])
+
+def _test_declared_output(ctx):
+    state = _ended(ctx, [_failed_action("//a:g", "bazel-out/k8-fastbuild/bin/a/out.txt", "Executing genrule //a:g failed: not all outputs were created or valid", code = "ACTION_OUTPUTS_NOT_CREATED")], _error("/ws/a/BUILD:3:8: declared output 'a/out.txt' was not created by genrule. This is probably because the genrule actually didn't create this output, or because the output was a directory and the genrule was run remotely (note that only the contents of declared file outputs are copied from genrules run remotely)"))
+    ties = failure_ties.console_ties(state)
+    _eq("declared output: located", ties["actions"][0]["location"], "/ws/a/BUILD:3:8")
+    _eq("declared output: nothing else", ties["others"], [])
+
+def _test_analysis_root(ctx):
+    # A root's description, its first line, on one located line.
+    state = _ended(ctx, [_aborted("configured_label", "//a:b", "in deps attribute of genrule rule //a:b: missing value")], _error("/ws/a/BUILD:1:8: in deps attribute of genrule rule //a:b: missing value") + _error("Analysis of target '//a:b' (config: 2d89340) failed"))
+    ties = failure_ties.console_ties(state)
+    _eq("analysis root: located", ties["targets"]["//a:b"]["location"], "/ws/a/BUILD:1:8")
+    _eq("analysis root: the Analysis of target line its own", ties["others"], [])
+
+def _test_label_prefix(ctx):
+    # An attribute error's lines start `<label>: `.
+    state = _ended(ctx, [_aborted("configured_label", "//a:b", "")], _error("/ws/a/BUILD:2:8: //a:b: no such attribute 'bogus' in 'genrule' rule"))
+    ties = failure_ties.console_ties(state)
+    _eq("<label>: quoted, located", (ties["targets"]["//a:b"]["lines"], ties["targets"]["//a:b"]["location"]), (["//a:b: no such attribute 'bogus' in 'genrule' rule"], "/ws/a/BUILD:2:8"))
+    _eq("<label>: nothing else", ties["others"], [])
+
+def _test_missing_source(ctx):
+    # A target that failed with no action of its own: the line ending
+    # `<label> failed: <message>`.
+    state = _ended(ctx, [_event("target_completed", struct(label = "//a:m", configuration = _CFG), struct(success = False, failure_detail = struct(message = "missing input file '//a:x.txt'")))], _error("/ws/a/BUILD:4:8: Executing genrule //a:m failed: missing input file '//a:x.txt'"))
+    ties = failure_ties.console_ties(state)
+    _eq("missing source: located", ties["targets"]["//a:m"]["location"], "/ws/a/BUILD:4:8")
+    _eq("missing source: nothing else", ties["others"], [])
+
+def _test_package_errors_claim(ctx):
+    # `package contains errors: <pkg>: <text>` repeats what an entry of
+    # that package quotes: no other error of its own.
+    state = _ended(ctx, [_aborted("configured_label", "//a:b", "")], _error("/ws/a/BUILD:2:8: //a:b: no such attribute 'bogus' in 'genrule' rule") + _error("package contains errors: a: //a:b: no such attribute 'bogus' in 'genrule' rule"))
+    _eq("a package's repeat is claimed", failure_ties.console_ties(state)["others"], [])
+    state = _ended(ctx, [_aborted("configured_label", "//a:b", "")], _error("package contains errors: c: something else"))
+    _eq("another package's is Bazel's other error", [o["lines"][0] for o in failure_ties.console_ties(state)["others"]], ["package contains errors: c: something else"])
+
+def _test_an_unclaimed_error_is_listed(ctx):
+    # A BUILD file's error, which no event has: under Other errors, a
+    # passing build's too.
+    state = _ended(ctx, [], _error("/ws/x/BUILD:1:1: syntax error at 'oops'"))
+    _eq("listed whole", [o["lines"] for o in failure_ties.console_ties(state)["others"]], [["/ws/x/BUILD:1:1: syntax error at 'oops'"]])
+
+def _test_target_counts(ctx):
+    # Built from the events; failed, the targets with an entry of their own;
+    # blocked, those a failed root cause stopped.
+    action = struct(label = "//a:g", primary_output = "bazel-out/k8-fastbuild/bin/a/out.txt", configuration = _CFG)
+    state = _ended(ctx, [
+        _event("target_completed", struct(label = "//a:ok", configuration = _CFG), struct(success = True)),
+        _failed_action("//a:g", action.primary_output, "Executing genrule //a:g failed: (Exit 1): bash failed"),
+        _event("target_completed", struct(label = "//a:g", configuration = _CFG), struct(success = False), children = [struct(id = action)]),
+        _event("target_completed", struct(label = "//a:dep", configuration = _CFG), struct(success = False), children = [struct(id = struct(label = "//a:g", configuration = _CFG))]),
+    ], "")
+    _eq("built, failed, blocked", failures.target_counts(state), (1, 1, 1))
+
+def _test_last_words(ctx):
+    # A failed build no event explains: an entry of Bazel's exit code, its
+    # raw log's last `ERROR:` lines.
+    log = "INFO: Invocation ID: x\nERROR: first\nLoading: 0 packages loaded\nERROR: the last one\n"
+    state = failures.new_state(lambda path, n: (log, 0) if path == "/log" else None, None, ctx.std.re.compile(term_text.ANSI))
+    state.update(building = False)
+    got = failures.failure_summary(state, "t-1", False, log_path = "/log", bazel_exit = 2)
+    _eq("the exit code's entry quotes Bazel's last errors", [l for l in got if "first" in l or "the last one" in l], ["  │ first", "  │ the last one"])
+
 def _impl(ctx: TaskContext) -> int:
     _test_shard_tie(ctx)
+    _test_output_not_created(ctx)
+    _test_declared_output(ctx)
+    _test_analysis_root(ctx)
+    _test_label_prefix(ctx)
+    _test_missing_source(ctx)
+    _test_package_errors_claim(ctx)
+    _test_an_unclaimed_error_is_listed(ctx)
+    _test_target_counts(ctx)
+    _test_last_words(ctx)
     print("failures_test.axl: OK")
     return 0
 

@@ -771,6 +771,16 @@ def _actions_tests(ctx):
     _eq("a failed action's logged spawn is failed, not ran too", _split_of(action_split(mix)), dict(done = 14, total = 14, ran = 9, local = 2, internal = 1, failed = 1, not_run = 1))
     mix["all_actions"] = False
     _eq("with only failures published too", _split_of(action_split(mix)), dict(done = 14, total = 14, ran = 9, local = 2, internal = 1, failed = 1, not_run = 1))
+
+    # Two targets' identical actions (Bazel 9.3.3, //mix:sa1 //mix:sa2):
+    # `[3 / 3]`, one ran, the other's outputs shared, and nothing else says
+    # so: the remainder is skipped.
+    shared = _screen(ctx, ["x"], building = False, ended = True, done_total = (3, 3, False), inv = {"build_finished": _SUCCESS, "build_metrics": struct(action_summary = struct(
+        actions_executed = 2,
+        runner_count = [struct(name = "total", count = 2), struct(name = "internal", count = 1), struct(name = "darwin-sandbox", count = 1)],
+        action_cache_statistics = struct(hits = 0, misses = 1),
+    ), build_graph_metrics = struct(built_values = [struct(skyfunction_name = "ACTION_EXECUTION", count = 3)]))})
+    _eq("a shared action is skipped", _split_of(action_split(shared)), dict(done = 3, total = 3, ran = 1, internal = 1, not_run = 1))
     _eq("parts past Bazel's count are shown as counted, the count Bazel's", _split_of(action_split(dict(ok, done_total = (1, 3, True)))), dict(done = 1, total = 1, ran = 1, internal = 1))
     cached = _screen(ctx, ["x"], building = False, ended = True, done_total = (8563, 8563, False), inv = {"build_finished": _SUCCESS, "build_metrics": _REUSED, "options_parsed": struct(cmd_line = ["--disk_cache=/c", "--remote_cache=grpc://c"], explicit_cmd_line = [])})
     final = action_split(cached)
