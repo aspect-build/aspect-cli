@@ -108,6 +108,15 @@ def _test_an_unclaimed_error_is_listed(ctx):
     state = _ended(ctx, [], _error("/ws/x/BUILD:1:1: syntax error at 'oops'"))
     _eq("listed whole", [o["lines"] for o in failure_ties.console_ties(state)["others"]], [["/ws/x/BUILD:1:1: syntax error at 'oops'"]])
 
+def _test_timestamps(ctx):
+    # `--show_timestamps` puts `(hh:mm:ss) ` before each of Bazel's lines:
+    # its errors tie and list as they do without.
+    ts = "(14:14:50) "
+    state = _ended(ctx, [_aborted("configured_label", "//a:b", "in deps attribute of genrule rule //a:b: missing value")], ts + _error("/ws/a/BUILD:1:8: in deps attribute of genrule rule //a:b: missing value") + ts + _error("/ws/x/BUILD:1:1: syntax error at 'oops'") + "  its detail\n" + ts + _error("Build did NOT complete successfully"))
+    ties = failure_ties.console_ties(state)
+    _eq("timestamped: located", ties["targets"]["//a:b"]["location"], "/ws/a/BUILD:1:8")
+    _eq("timestamped: Bazel's other error with its body, not its closing line", [o["lines"] for o in ties["others"]], [["/ws/x/BUILD:1:1: syntax error at 'oops'", "  its detail"]])
+
 def _test_target_counts(ctx):
     # Built from the events; failed, the targets with an entry of their own;
     # blocked, those a failed root cause stopped.
@@ -138,6 +147,7 @@ def _impl(ctx: TaskContext) -> int:
     _test_missing_source(ctx)
     _test_package_errors_claim(ctx)
     _test_an_unclaimed_error_is_listed(ctx)
+    _test_timestamps(ctx)
     _test_target_counts(ctx)
     _test_last_words(ctx)
     print("failures_test.axl: OK")

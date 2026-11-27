@@ -11,6 +11,7 @@
 # Variants listed in fixtures/<case>/variants: noall (rerun without
 # --build_event_publish_all_actions), nocolor (rerun with --color=no --curses=no),
 # merged (rerun with Bazel's stdout on the pty too, as a terminal shares it with stderr),
+# timestamps (rerun with --show_timestamps),
 # console_only (no BEP; capped at CONSOLE_ONLY_CAP_S, then the server is killed - for the OOM
 # case). A case's optional `reset` script runs before each recording, to clear what its tests
 # keep between runs.
@@ -88,4 +89,5 @@ one "$ver" "--color=yes --curses=yes" 0
 case " $variants " in *" noall "*) one "$ver.noall" "--color=yes --curses=yes" 1 ;; esac
 case " $variants " in *" nocolor "*) one "$ver.nocolor" "--color=no --curses=no" 0 ;; esac
 case " $variants " in *" merged "*) one "$ver.merged" "--color=yes --curses=yes" 0 merged ;; esac
+case " $variants " in *" timestamps "*) one "$ver.timestamps" "--color=yes --curses=yes --show_timestamps" 0 ;; esac
 rm -rf "$RAW"

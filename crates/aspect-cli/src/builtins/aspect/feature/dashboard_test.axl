@@ -175,10 +175,10 @@ def _held_line_reads(ctx):
     for i in range(30):
         # A header naming no label, then Bazel's own coloured error.
         blocks.append({"kind": "from", "text": "\r\x1b[1A\x1b[K\x1b[32mINFO: \x1b[0mFrom Doing work %d:\n" % i, "body_len": 12, "last_line": "tool line 0\n"})
-        blocks.append({"kind": "tail", "text": "\r\x1b[1A\x1b[K\x1b[31m\x1b[1mERROR: \x1b[0mpkg/BUILD:%d:1: bazel's own %d\n" % (i + 1, i)})
+        blocks.append(_headed({"kind": "tail", "text": "\r\x1b[1A\x1b[K\x1b[31m\x1b[1mERROR: \x1b[0mpkg/BUILD:%d:1: bazel's own %d\n" % (i + 1, i)}))
     for held in ("held open", "held after a long line", "held on stderr"):
         blocks.append({"kind": "from", "text": "\r\x1b[1A\x1b[K\x1b[32mINFO: \x1b[0mFrom Doing more work:\n", "body_len": 9, "last_line": "open out\n"})
-        blocks.append({"kind": "tail", "text": "\r\x1b[1A\x1b[K\x1b[31m\x1b[1mERROR: \x1b[0m%s\n" % held})
+        blocks.append(_headed({"kind": "tail", "text": "\r\x1b[1A\x1b[K\x1b[31m\x1b[1mERROR: \x1b[0m%s\n" % held}))
     state = new_state(read = read, ansi = ctx.std.re.compile(ANSI), building = True)
     state.update(outputs = outputs, building = False, ended = True, collected_errors = {"blocks": blocks, "not_kept": 0, "stdout": True, "color": True})
     tab = dict(state, log_path = "", bazel_exit = 0, focus = "console", selected = 0, expand_failures = True, excerpts = {}, ties_cache = None, entries_cache = None)
@@ -191,6 +191,12 @@ def _held_line_reads(ctx):
     for path in ("/fx/open", "/fx/longprev", "/fx/erropen-err"):
         opened = [r[1] for r in reads if r[0] == path and r[1] > 4]
         _eq("held: %s read from its end, at most once a line, as far as that line is long" % path, (len(opened) <= 33, [n for n in opened if n > 256]), (True, []))
+
+def _headed(block):
+    """A kept block, its `ERROR:` header read as the collector reads one
+    (`location`, `message`, `coloured`, `boilerplate`, `body`)."""
+    got = (bazel.output._collected_errors(block["text"]) or {}).get("blocks") or []
+    return dict(block, **{k: got[0][k] for k in ("location", "message", "coloured", "boilerplate", "body") if got and k in got[0]})
 
 def _fake_process(have, ran, exit = 0):
     """A `ctx.std.process` with only `have` on PATH, recording each command
@@ -1507,7 +1513,7 @@ def _impl(ctx: TaskContext) -> int:
     # ] and [ step over the Failures list's rows in its order, Bazel's other
     # errors among them, round to the first again.
     other = "\x1b[31m\x1b[1mERROR: \x1b[0msyntax/BUILD.bazel:2:1: syntax error at 'newline'\n"
-    stepping = _screen(ctx, ["x"], fails = [{"kind": "action", "label": "//s:a", "detail": "Genrule", "files": [], "output": "o", "success": False}], building = False, ended = True, ansi = ctx.std.re.compile(ANSI), collected_errors = {"blocks": [{"kind": "error", "text": other}], "not_kept": 0, "stdout": False, "color": True})
+    stepping = _screen(ctx, ["x"], fails = [{"kind": "action", "label": "//s:a", "detail": "Genrule", "files": [], "output": "o", "success": False}], building = False, ended = True, ansi = ctx.std.re.compile(ANSI), collected_errors = {"blocks": [_headed({"kind": "error", "text": other})], "not_kept": 0, "stdout": False, "color": True})
     seen = []
     for _ in range(3):
         on_key(stepping, "]", 10)

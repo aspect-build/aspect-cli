@@ -2264,8 +2264,10 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
     /// what followed it before Bazel's next message or redraw, as Bazel
     /// wrote it. A block whose first line is an `ERROR:` also has that
     /// line's `location` (as Bazel wrote it, "" for none), `message` (the
-    /// text after the location), `coloured` (Bazel coloured its `ERROR:`)
-    /// and `boilerplate` (one of Bazel's closing lines). `not_kept` counts
+    /// text after the location), `coloured` (Bazel coloured its `ERROR:`),
+    /// `boilerplate` (one of Bazel's closing lines) and `body` (the lines
+    /// Bazel wrote with it, escapes left out, up to a blank line or one of
+    /// Bazel's own; a `Traceback`'s frames). `not_kept` counts
     /// the bytes of Bazel's own the caps left out and `froms_not_kept` the
     /// `INFO: From` blocks; `stdout` says whether the console's stream
     /// carried Bazel's stdout too (a terminal both share), `color` whether

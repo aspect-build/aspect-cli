@@ -405,7 +405,18 @@ pub struct ErrorHeader {
     /// Whether it is one of Bazel's closing lines, which say only that the
     /// build failed ([`super::report::is_boilerplate`]).
     pub boilerplate: bool,
+    /// The lines Bazel wrote with it, as an error quotes them (a
+    /// `Traceback`'s frames): the block's next lines, escape sequences left
+    /// out, up to the first that is blank, starts with an escape sequence
+    /// or a carriage return (one in Bazel's colours, a redraw), or is
+    /// Bazel's own (after a `--show_timestamps` prefix, one starting as
+    /// Bazel's do, [`super::feed::starts_as_bazels`], or its `FAILED:` and
+    /// `Use --…` lines); at most [`MAX_BODY_LINES`].
+    pub body: Vec<String>,
 }
+
+/// The most lines an [`ErrorHeader`]'s body quotes.
+pub const MAX_BODY_LINES: usize = 200;
 
 /// How Bazel colours its own `ERROR: `.
 const BAZEL_ERROR: &str = "\x1b[31m\x1b[1mERROR: ";
@@ -431,8 +442,32 @@ impl Block {
             message: message.to_string(),
             coloured: line.contains(BAZEL_ERROR),
             boilerplate: super::report::is_boilerplate(said),
+            body: error_body(&self.text),
         })
     }
+}
+
+/// The lines after a block's first that its `ERROR:` header quotes
+/// ([`ErrorHeader::body`]).
+fn error_body(text: &str) -> Vec<String> {
+    let mut out = vec![];
+    for raw in text.split('\n').skip(1).take(MAX_BODY_LINES) {
+        let raw = raw.strip_suffix('\r').unwrap_or(raw);
+        if raw.starts_with(['\x1b', '\r']) {
+            break;
+        }
+        let plain = ansi::text(raw.as_bytes());
+        let said = line::message(&plain);
+        if said.trim().is_empty()
+            || super::feed::starts_as_bazels(said)
+            || said.starts_with("FAILED:")
+            || said.starts_with("Use --")
+        {
+            break;
+        }
+        out.push(plain);
+    }
+    out
 }
 
 /// Whether `head`, what an `ERROR: ` says before its first `: `, is where

@@ -1,0 +1,82 @@
+(14:44:09) [32mINFO: [0mCurrent date is 2026-11-27
+(14:44:09) 
+[1A[K(14:44:09) [32mComputing main repo mapping:[0m 
+[1A[K(14:44:09) [32mLoading:[0m 
+[1A[K(14:44:09) [32mLoading:[0m 0 packages loaded
+[1A[K(14:44:09) [32mAnalyzing:[0m 7 targets (0 packages loaded, 0 targets configured)
+[1A[K(14:44:09) [31m[1mERROR: [0mno such package 'nowhere': BUILD file not found in any of the following directories. Add a BUILD file to a directory to mark it as a package.
+ - ${WORKSPACE}/nowhere
+(14:44:09) [32mAnalyzing:[0m 7 targets (0 packages loaded, 0 targets configured)
+
+[1A[K[1A[K(14:44:09) [31m[1mERROR: [0m${WORKSPACE}/ar/BUILD.bazel:3:8: no such package 'nowhere': BUILD file not found in any of the following directories. Add a BUILD file to a directory to mark it as a package.
+ - ${WORKSPACE}/nowhere and referenced by '//ar:badlabel'
+(14:44:09) [32mAnalyzing:[0m 7 targets (0 packages loaded, 0 targets configured)
+
+[1A[K[1A[K(14:44:09) [31m[1mERROR: [0m${WORKSPACE}/ar2/BUILD.bazel:3:8: no such package 'nowhere': BUILD file not found in any of the following directories. Add a BUILD file to a directory to mark it as a package.
+ - ${WORKSPACE}/nowhere and referenced by '//ar2:badlabel'
+(14:44:09) [32mAnalyzing:[0m 7 targets (0 packages loaded, 0 targets configured)
+
+[1A[K[1A[K(14:44:09) [31m[1mERROR: [0m${WORKSPACE}/le/BUILD.bazel:2:1: syntax error at 'newline': expected ,
+(14:44:09) [32mAnalyzing:[0m 7 targets (0 packages loaded, 0 targets configured)
+
+[1A[K[1A[K(14:44:09) [31m[1mERROR: [0m${WORKSPACE}/le/BUILD.bazel: no such target '//le:x': target 'x' not declared in package 'le' defined by ${WORKSPACE}/le/BUILD.bazel
+(14:44:09) [32mAnalyzing:[0m 7 targets (0 packages loaded, 0 targets configured)
+
+[1A[K[1A[K(14:44:09) [31m[1mERROR: [0m${WORKSPACE}/ar2/BUILD.bazel:4:8: no such target '//le:x': target 'x' not declared in package 'le' defined by ${WORKSPACE}/le/BUILD.bazel and referenced by '//ar2:useslе'
+(14:44:09) [32mAnalyzing:[0m 7 targets (0 packages loaded, 0 targets configured)
+
+[1A[K[1A[K(14:44:09) [31m[1mERROR: [0m${WORKSPACE}/ar2/BUILD.bazel:1:8: Executing genrule //ar2:boom1 failed: (Exit 1): bash failed: error executing Genrule command (from target //ar2:boom1) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo '\''boom1 broke'\'' >&2; exit 1'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+boom1 broke
+(14:44:09) [32mAnalyzing:[0m 7 targets (0 packages loaded, 0 targets configured)
+[32m[1 / 5][0m 4 actions running
+    Executing genrule //ar2:boom2; 0s darwin-sandbox
+    Executing genrule //ar:fine; 0s darwin-sandbox
+    Executing genrule //ar:boom; 0s darwin-sandbox
+    Executing genrule //ar2:boom1; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K(14:44:09) [31m[1mERROR: [0m${WORKSPACE}/ar2/BUILD.bazel:2:8: Executing genrule //ar2:boom2 failed: (Exit 2): bash failed: error executing Genrule command (from target //ar2:boom2) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo '\''boom2 broke'\'' >&2; exit 2'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+boom2 broke
+(14:44:09) [32mAnalyzing:[0m 7 targets (0 packages loaded, 0 targets configured)
+[32m[2 / 5][0m 3 actions running
+    Executing genrule //ar2:boom2; 0s darwin-sandbox
+    Executing genrule //ar:fine; 0s darwin-sandbox
+    Executing genrule //ar:boom; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[1A[K[1A[K(14:44:09) [31m[1mERROR: [0m${WORKSPACE}/ar/BUILD.bazel:1:8: Executing genrule //ar:boom failed: (Exit 1): bash failed: error executing Genrule command (from target //ar:boom) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo '\''boom broke'\'' >&2; exit 1'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+boom broke
+(14:44:09) [32mAnalyzing:[0m 7 targets (0 packages loaded, 0 targets configured)
+[32m[3 / 5][0m 2 actions running
+    Executing genrule //ar:fine; 0s darwin-sandbox
+    Executing genrule //ar:boom; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[1A[K(14:44:09) [35mWARNING: [0merrors encountered while analyzing target '//ar2:useslе', it will not be built.
+Analysis failed
+(14:44:09) [32mAnalyzing:[0m 7 targets (0 packages loaded, 0 targets configured)
+[32m[5 / 5][0m no actions running
+[1A[K[1A[K(14:44:09) [35mWARNING: [0merrors encountered while analyzing target '//ar:badlabel', it will not be built.
+Analysis failed
+(14:44:09) [32mAnalyzing:[0m 7 targets (0 packages loaded, 0 targets configured)
+[32m[5 / 5][0m no actions running
+[1A[K[1A[K(14:44:09) [32mINFO: [0mAnalyzed 7 targets (0 packages loaded, 0 targets configured).
+(14:44:09) [32m[5 / 5][0m no actions running
+[1A[K(14:44:09) [35mWARNING: [0merrors encountered while analyzing target '//ar2:badlabel', it will not be built.
+Analysis failed
+(14:44:09) [32m[5 / 5][0m no actions running
+[1A[K(14:44:09) [32mINFO: [0mAnalysis succeeded for only 1 of 7 top-level targets
+(14:44:09) [32m[5 / 5][0m no actions running
+[1A[K(14:44:09) [32mINFO: [0mFound 4 targets...
+(14:44:09) [32m[5 / 5][0m no actions running
+[1A[KUse --verbose_failures to see the command lines of failed build steps.
+(14:44:09) [32m[5 / 5][0m no actions running
+[1A[K(14:44:09) [32mINFO: [0mElapsed time: 0.094s, Critical Path: 0.03s
+(14:44:09) [32m[5 / 5][0m no actions running
+[1A[K(14:44:09) [32mINFO: [0m5 processes: 4 internal, 1 darwin-sandbox.
+(14:44:09) [32m[5 / 5][0m no actions running
+[1A[K(14:44:09) [31m[1mERROR: [0mBuild did NOT complete successfully
+(14:44:09) [31m[1mFAILED:[0m 
+[1A[K(14:44:09) [31m[1mFAILED:[0m 
+[1A[K(14:44:09) [32mINFO: [0mBuild Event Protocol files produced successfully.
+[0m

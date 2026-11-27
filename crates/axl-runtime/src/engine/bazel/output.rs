@@ -647,9 +647,9 @@ pub(crate) fn user_choice(flags: &[String], name: &str) -> Option<bool> {
 /// "text", "body_len", "last_line"}], "not_kept": n, "froms_not_kept": n,
 /// "stdout": bool, "color": bool, "relay_cap": n | None}`, each block whose
 /// first line is an `ERROR:` (an `error`, or a `tail` that is Bazel's next
-/// message) with that line's `location`, `message`, `coloured` and
-/// `boilerplate` too ([`ErrorHeader`]); None before the console has ended
-/// or without a `collect_errors()` stage.
+/// message) with that line's `location`, `message`, `coloured`,
+/// `boilerplate` and `body` too ([`ErrorHeader`]); None before the console
+/// has ended or without a `collect_errors()` stage.
 ///
 /// [`ErrorHeader`]: bazel::console::processors::ErrorHeader
 pub(crate) fn collected_errors(
@@ -666,6 +666,7 @@ pub(crate) fn collected_errors(
                 block["message"] = h.message.into();
                 block["coloured"] = h.coloured.into();
                 block["boilerplate"] = h.boilerplate.into();
+                block["body"] = h.body.into();
             }
             block
         })

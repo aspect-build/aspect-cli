@@ -42,46 +42,34 @@ _BAZEL = struct(
 # it follows (`classify`).
 _HEADERS = ["INFO:", "WARNING:", "ERROR:", "DEBUG:", "FAIL:", "TIMEOUT:", "Target ", "Loading:", "Analyzing:", "Executed ", "Build ", "//", "@", "["]
 
-# Bazel's own lines that say only that the build failed: in no entry and
-# not among the other errors.
-_BOILERPLATE = ("Build did NOT complete successfully", "Build failed. Not running tests", "command succeeded, but ")
-
-# A Bazel `ERROR:` line in its colours.
-_BAZEL_ERROR = "\x1b[31m\x1b[1mERROR: "
-
-def _bazel_headers(state: dict, text: str) -> list:
-    """Bazel's `ERROR:` lines in `text`, the console's kept blocks in
-    order (`console_ties`), each `{start, end, plain, location, message, coloured}`: where
-    the line starts and ends, its text without escapes and before the last
-    CR (a redraw), its location (`pkg/BUILD.bazel:3:8`, `pkg/BUILD.bazel`,
-    made relative to the workspace) and what it says after that. Where
-    Bazel coloured its own (`_BAZEL_ERROR`) an uncoloured one is a tool's
-    and left out."""
-    ansi = state.get("ansi")
+def _bazel_headers(state: dict, blocks: list, bounds: list, text: str) -> list:
+    """Bazel's `ERROR:` lines, in order: the first line of each kept block
+    that is one, as the collector read it (`location`, `message`,
+    `coloured`, `boilerplate` and `body`, escapes, what a carriage return
+    wrote over and a `--show_timestamps` prefix left out). Each is
+    `{start, end, plain, location, message, boilerplate, body}`: where its
+    line starts and ends in `text` (`bounds`, each block's), what it says
+    after `ERROR: `, its location made relative to the workspace
+    (`pkg/BUILD.bazel:3:8`), what it says after that, and the lines Bazel
+    wrote with it. Where Bazel coloured its own, an uncoloured one is a
+    tool's and left out."""
     workspace = _workspace(state)
     found = []
-    at = 0
-    for _ in range(len(text)):
-        p = text.find(_BAZEL.error, at)
-        if p < 0:
-            break
-        start = text.rfind("\n", 0, p) + 1
-        end = text.find("\n", p)
-        end = len(text) if end < 0 else end
-        at = end + 1
-        line = text[start:end]
-        plain = (ansi.replace(line, "") if ansi != None else line).rpartition("\r")[2]
-        if not plain.startswith(_BAZEL.error):
+    for b, (start, stop, _) in zip(blocks, bounds):
+        if b.get("message") == None:
             continue
-        plain = plain[len(_BAZEL.error):]
-        head, sep, rest = plain.partition(": ")
-        pieces = head.split(":")
-        location = ""
-        message = plain
-        if sep and " " not in head and ((len(pieces) >= 2 and pieces[1].isdigit()) or head.endswith(("/BUILD", "/BUILD.bazel"))):
-            location = head[len(workspace) + 1:] if workspace and head.startswith(workspace + "/") else head
-            message = rest
-        found.append({"start": start, "end": end, "plain": plain, "location": location, "message": message, "coloured": _BAZEL_ERROR in line})
+        end = text.find("\n", start, stop)
+        place = b["location"]
+        found.append({
+            "start": start,
+            "end": end if end >= 0 else stop,
+            "plain": place + ": " + b["message"] if place else b["message"],
+            "location": place[len(workspace) + 1:] if workspace and place.startswith(workspace + "/") else place,
+            "message": b["message"],
+            "coloured": b["coloured"],
+            "boilerplate": b["boilerplate"],
+            "body": b.get("body") or [],
+        })
     if [h for h in found if h["coloured"]]:
         found = [h for h in found if h["coloured"]]
     return found
@@ -358,19 +346,16 @@ def console_ties(state: dict) -> dict:
     # escapes from what it relays too: the collector says which it saw.
     plain = not kept.get("color")
     _absorb_tails(state, text, bounds, froms, spans, stdout, plain)
-    headers = [h for h in _bazel_headers(state, text) if not [sp for sp in spans if sp[0] <= h["start"] and h["start"] < sp[1]]]
+    headers = [h for h in _bazel_headers(state, blocks, bounds, text) if not [sp for sp in spans if sp[0] <= h["start"] and h["start"] < sp[1]]]
     claimed = {}
     by = _index_headers(headers)
     result["actions"] = _tie_actions(state, text, headers, by, claimed, spans, tails, stdout, plain)
     result["targets"] = _tie_targets(state, headers, by, claimed)
     _claim_restated(state, result["targets"], headers, claimed)
     _claim_named_failures(state, headers, by, claimed)
-    result["others"] = _other_errors(state, text, headers, claimed, spans)
+    result["others"] = _other_errors(state, headers, claimed, spans)
     state["ties_cache"] = (key, result)
     return result
-
-# The most lines one of Bazel's other errors quotes after its own.
-_MAX_OTHER_LINES = 200
 
 def _index_headers(headers: list) -> dict:
     """Bazel's `ERROR:` lines by what each says, so every tie is a lookup:
@@ -592,33 +577,19 @@ def _claim_named_failures(state: dict, headers: list, by: dict, claimed: dict):
             if h["message"].startswith(_BAZEL.analysis_of % label) and h["message"].endswith(" failed"):
                 claimed[k] = True
 
-def _other_errors(state: dict, text: str, headers: list, claimed: dict, spans: list) -> list:
+def _other_errors(state: dict, headers: list, claimed: dict, spans: list) -> list:
     """Bazel's `ERROR:` blocks no tie claimed (`console_ties`), in its
-    order, each once: `{"lines": [...]}`, its line (the workspace's path
-    left out of it) then the lines Bazel wrote with it (a `Traceback`'s
-    frames), up to a blank line, a redraw, one in Bazel's colours or a
-    line of Bazel's own (`_HEADERS`); never one inside an action's tied
-    output, nor Bazel's boilerplate (`_BOILERPLATE`)."""
+    order, each once: `{"lines": [...]}`, its line then the lines Bazel
+    wrote with it (its `body`: a `Traceback`'s frames), the workspace's
+    path left out of them; never one inside an action's tied output, nor
+    one of Bazel's closing lines (`boilerplate`)."""
     workspace = _workspace(state)
-    ansi = state.get("ansi")
     out = []
     seen = {}
     for k, h in enumerate(headers):
-        if k in claimed or h["plain"].startswith(_BOILERPLATE) or [s for s in spans if s[0] <= h["start"] and h["start"] < s[1]]:
+        if k in claimed or h["boilerplate"] or [s for s in spans if s[0] <= h["start"] and h["start"] < s[1]]:
             continue
-        lines = [h["plain"]]
-        at = h["end"] + 1
-        for _ in range(_MAX_OTHER_LINES):
-            if at >= len(text):
-                break
-            end = text.find("\n", at)
-            end = len(text) if end < 0 else end
-            raw = text[at:end]
-            plain = ansi.replace(raw, "") if ansi != None else raw
-            if not plain.strip() or raw.startswith(("\x1b", "\r")) or plain.startswith(tuple(_HEADERS)) or plain.startswith(("FAILED:", "Use --")):
-                break
-            lines.append(plain)
-            at = end + 1
+        lines = [h["plain"]] + h["body"]
         if workspace:
             lines = [l.replace(workspace + "/", "") for l in lines]
         joined = "\n".join(lines)

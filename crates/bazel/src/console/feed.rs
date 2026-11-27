@@ -317,7 +317,7 @@ impl Kinds {
     pub fn kind(&mut self, text: &str) -> &'static str {
         let own = severity(text);
         let line = lead_stripped(text);
-        if STARTS.iter().any(|s| line.starts_with(s)) {
+        if starts_as_bazels(line) {
             self.carried = if line.starts_with("ERROR:") { own } else { "" };
             own
         } else if own.is_empty() {
@@ -332,9 +332,14 @@ impl Kinds {
     /// coloured as a tool colours `INFO:` (the colon inside the colour,
     /// which Bazel puts after its space).
     pub fn bazel(text: &str, coloured: &str) -> bool {
-        let line = lead_stripped(text);
-        STARTS.iter().any(|s| line.starts_with(s)) && !tools_own(coloured)
+        starts_as_bazels(lead_stripped(text)) && !tools_own(coloured)
     }
+}
+
+/// Whether `text` starts as a line of Bazel's own does (`STARTS`), as it
+/// is: no prefix or indent left out.
+pub fn starts_as_bazels(text: &str) -> bool {
+    STARTS.iter().any(|s| text.starts_with(s))
 }
 
 /// `text` without a `--show_timestamps` prefix and leading spaces.

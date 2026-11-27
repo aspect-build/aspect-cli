@@ -37,7 +37,7 @@ folder with `src/` (Bazel files suffixed `.in`), `cmd` and `variants`; record it
                             the `.in` suffix its Bazel files carry (so this repository's Bazel
                             and formatters leave them alone) is dropped, as record.sh does
   cmd                       the bazel arguments, exactly (startup options first, as for `bazel`)
-  variants                  extra recordings: noall, nocolor, merged, console_only
+  variants                  extra recordings: noall, nocolor, merged, timestamps, console_only
   reset                     optional: a shell script record.sh runs before each recording, to
                             clear what the case's tests keep between runs
   <ver>.bep.json            --build_event_json_file output (cmd includes --build_event_publish_all_actions)
@@ -51,6 +51,8 @@ folder with `src/` (Bazel files suffixed `.in`), `cmd` and `variants`; record it
   <ver>.nocolor.*           same command with --color=no --curses=no
   <ver>.merged.*            same command with Bazel's stdout on the pty too, as a terminal shares it
                             with stderr: an action's stdout is in the console, after its stderr
+  <ver>.timestamps.*        same command with --show_timestamps: `(hh:mm:ss) ` before each of
+                            Bazel's lines
   <ver>[.<variant>].golden  the replay test's expected output for that recording
 ```
 

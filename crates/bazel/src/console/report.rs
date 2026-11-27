@@ -1458,6 +1458,7 @@ mod tests {
             message: message.into(),
             coloured,
             boilerplate,
+            body: vec![],
         };
         let kept = collected(
             "\x1b[32mINFO: \x1b[0mStarting\n\
@@ -1500,6 +1501,44 @@ mod tests {
             kept.blocks[0].error_header(),
             Some(header("", "in r rule //rf:x: refused", false, false)),
             "a timestamp left out, `in r rule //rf:x` no location"
+        );
+    }
+
+    /// An `ERROR:` header quotes the lines Bazel wrote with it, escapes left
+    /// out, up to a blank line or one of Bazel's own, a timestamped one too.
+    #[test]
+    fn an_error_header_quotes_the_lines_written_with_it() {
+        let body = |console: &str| {
+            let observations = Arc::new(super::super::processors::Observations::default());
+            collect(
+                ErrorCollector::new(false, observations.clone()),
+                console.as_bytes().to_vec(),
+            );
+            let kept = observations.collected_errors().expect("kept");
+            kept.blocks[0].error_header().expect("a header").body
+        };
+        assert_eq!(
+            body(
+                "ERROR: /ws/a/BUILD:3:1: Traceback (most recent call last):\n\tFile \"/ws/a/BUILD\", line 3\n    .-> //a:b\na \x1b[1mbold\x1b[0m word\n\x1b[1mcoloured\x1b[0m\n"
+            ),
+            vec![
+                "\tFile \"/ws/a/BUILD\", line 3",
+                "    .-> //a:b",
+                "a bold word"
+            ],
+            "a frame, an indented label and a word in colour; a line starting in colour ends it"
+        );
+        assert_eq!(
+            body(
+                "(12:00:01) ERROR: /ws/a/BUILD:3:1: bad\nits detail\n(12:00:01) INFO: Found 1 target...\nmore\n"
+            ),
+            vec!["its detail"],
+            "a timestamped line of Bazel's own ends it"
+        );
+        assert_eq!(body("ERROR: x failed\nwhy\n\nafter a blank\n"), vec!["why"]);
+        assert_eq!(
+            body("ERROR: x failed\nUse --sandbox_debug to see verbose messages\n"),
+            Vec::<String>::new()
         );
     }
 
