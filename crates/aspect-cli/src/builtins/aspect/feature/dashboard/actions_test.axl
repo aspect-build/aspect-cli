@@ -56,7 +56,7 @@ _SUCCESS = dashboard_testing.SUCCESS
 _BIG = struct(action_summary = struct(
     actions_executed = 6990,
     runner_count = [struct(name = "total", count = 6990), struct(name = "internal", count = 4390), struct(name = "darwin-sandbox", count = 3200, exec_kind = "Local")],
-    action_cache_statistics = struct(hits = 611, misses = 6990, miss_details = [struct(reason = "DIFFERENT_DEPS"), struct(reason = "NOT_CACHED", count = 4107), struct(reason = "UNCONDITIONAL_EXECUTION", count = 447), struct(reason = "7", count = 2436)]),
+    action_cache_statistics = struct(hits = 611, misses = 6990, miss_details = [struct(reason = "DIFFERENT_DEPS"), struct(reason = "NOT_CACHED", count = 4107), struct(reason = "UNCONDITIONAL_EXECUTION", count = 447), struct(reason = "DIGEST_MISMATCH", count = 2436)]),
     action_data = [struct(mnemonic = "Genrule", actions_executed = 4000), struct(mnemonic = "SourceSymlinkManifest", actions_executed = 683), struct(mnemonic = "ExecutableSymlink", actions_executed = 620), struct(mnemonic = "RepoMappingManifest", actions_executed = 602), struct(mnemonic = "TestRunner", actions_executed = 600), struct(mnemonic = "RunfilesTree", actions_executed = 484), struct(mnemonic = "BazelWorkspaceStatusAction", actions_executed = 1), struct(mnemonic = "FileWrite", actions_executed = None)],
     actions_created = 9500,
 ))

@@ -80,7 +80,6 @@ tests_text = dashboard_actions.tests_text
 add_lines = dashboard_log.add_lines
 classify = dashboard_log.classify
 console_lines = dashboard_log.console_lines
-has_capital = dashboard_log.has_capital
 new_search = dashboard_log.new_search
 paste_text = dashboard_log.paste_text
 replay_lines = dashboard_log.replay_lines
@@ -824,7 +823,7 @@ def _impl(ctx: TaskContext) -> int:
 
     # Smart case: a capital of the query's own matches case.
     for query, want in [("fail", False), ("Fail", True), ("a\\Wb", False), ("\\pL", False), ("\\p{Lu}x", False), ("(?P<Name>a)", False), ("(?<N>a)", False), ("\\w C", True), ("é", False), ("É", True), ("\\x4A", False), ("\\x{1F}", False), ("\\u{00C9}x", False), ("\\U0001F600", False), ("(?U)a", False), ("(?iR:a)", False), ("\\x4AB", True), ("(?i)A", True), ("\\(?User", True)]:
-        _eq("has_capital %r" % query, has_capital(query), want)
+        _eq("has_uppercase %r" % query, ctx.std.re.has_uppercase(query), want)
     smart = _screen(ctx, ["ERROR: a FAILED", "ERROR: b failed"])
     on_key(smart, "/", 10)
     on_key(smart, "tab", 10)

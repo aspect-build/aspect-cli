@@ -99,7 +99,7 @@ def _relay_pieces(state: dict, rec: dict, stdout: bool, plain: bool):
     for name in (("stderr", "stdout") if stdout else ("stderr",)):
         if name not in paths:
             continue
-        got = state["read"](paths[name], _MAX_LOG_BYTES)
+        got = state["read"](paths[name], (state.get("collected_errors") or {}).get("relay_cap") or _MAX_LOG_BYTES)
         if got == None:
             return None
         named = []

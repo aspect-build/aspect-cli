@@ -618,6 +618,9 @@ def failure_summary(state: dict, task_id: str, tty: bool, log_path: str = "", li
     not_kept = console_ties(state)["not_kept"]
     if not_kept:
         out.append(muted + _counts("(%d bytes of Bazel's error messages not kept)", not_kept) + reset)
+    froms_not_kept = (state.get("collected_errors") or {}).get("froms_not_kept", 0) or 0
+    if froms_not_kept:
+        out.append(muted + _counts("(%d of the actions' INFO: From blocks not kept)", froms_not_kept) + reset)
     raw = (" · Bazel's raw log: " + log_path) if log_path else ""
     out.append(summary_counts(state) + raw)
     out.append("All of it: aspect history show %s" % task_id)

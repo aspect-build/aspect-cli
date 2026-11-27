@@ -1293,10 +1293,6 @@ def _last_flags(inv: dict, names: list) -> dict:
             last["--" + name[4:]] = False
     return last
 
-# Bazel's action cache miss reasons newer than the CLI's protos, which read
-# as their numbers.
-_NEWER_MISS_REASONS = {"7": "DIGEST_MISMATCH"}
-
 def _by_count(counts: dict) -> list:
     """`counts`' `(name, n)`, the most first, those of none left out."""
     return sorted([(k, n) for k, n in counts.items() if n], key = lambda kv: (-kv[1], kv[0]))
@@ -1373,7 +1369,6 @@ def action_lines(state: dict) -> list:
 
         # A reason newer than the CLI's protos reads as its number.
         for reason, n in _by_count(reasons):
-            reason = _NEWER_MISS_REASONS.get(reason, reason)
             why = ("reason " + reason) if reason.isdigit() else reason.lower().replace("_", " ")
             out.append("    " + why + " " * max(1, column - len(why)) + _thousands(n))
     if c.get("spawns"):

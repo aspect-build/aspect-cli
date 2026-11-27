@@ -51,91 +51,26 @@ def new_search() -> dict:
     the newest line (scrolled up, or held on a match), and `back` the current
     match, as lines from the newest shown (-1 for none): both counted from
     the end, so new lines arriving keep them on the same line."""
-    return {"open": False, "query": "", "case": False, "word": False, "pattern": None, "error": "", "mode": "jump", "origin": 0, "anchored": False, "back": -1}
+    return {"open": False, "query": "", "case": False, "matches_case": False, "word": False, "pattern": None, "error": "", "mode": "jump", "origin": 0, "anchored": False, "back": -1}
 
-def has_capital(query: str) -> bool:
-    """Whether `query` has a capital letter of its own: not one naming an
-    escape (`\\W`, `\\pL`, `\\p{Lu}`), a hex digit of one (`\\x4A`,
-    `\\u{00C9}`, `\\U0001F600`), a flag (`(?U)`, `(?iR:…)`) or a group
-    (`(?P<Name>…)`, `(?<Name>…)`)."""
-    at = ""
-    end = ""
-    need = 0
-    full = 0
-    recent = ""
-    for c in query.elems():
-        prev = recent
-        recent = (recent + c)[-3:]
-        if at == "skip":
-            if c == end:
-                at = ""
-            continue
-        if at == "flags":
-            if c in "imsxURu-":
-                continue
-            at = ""
-            if c in "):":
-                continue
-        if at == "hex":
-            if c == "{" and need == full:
-                at = "skip"
-                end = "}"
-                continue
-            if need > 0 and c in "0123456789abcdefABCDEF":
-                need -= 1
-                if need == 0:
-                    at = ""
-                continue
-            at = ""
-        if at == "escape":
-            # An escaped character opens nothing: `\\(?U` is no flag group.
-            at = ""
-            recent = ""
-            if c in ("p", "P"):
-                at = "class"
-            elif c in ("x", "u", "U"):
-                at = "hex"
-                need = {"x": 2, "u": 4, "U": 8}[c]
-                full = need
-            continue
-        if at == "class":
-            at = ""
-            if c == "{":
-                at = "skip"
-                end = "}"
-            continue
-        if c == "\\":
-            at = "escape"
-            continue
-        if prev.endswith("(?") or prev.endswith("(?P"):
-            if c == "<":
-                at = "skip"
-                end = ">"
-                continue
-            if c == "P" and prev.endswith("(?"):
-                continue
-            if c in "imsxURu-" and prev.endswith("(?"):
-                at = "flags"
-                continue
-        if c != c.lower():
-            return True
-    return False
-
-def case_sensitive(search: dict) -> bool:
+def case_sensitive(state: dict) -> bool:
     """Whether the search matches case: when Ctrl+T says so, else, smart case
-    as in fzf and ripgrep, when its query has a capital (`has_capital`)."""
-    return search["case"] or has_capital(search["query"])
+    as in fzf and ripgrep, when its query has an uppercase letter of its own
+    (`std.re.has_uppercase`)."""
+    search = state["search"]
+    return search["case"] or (state.get("re") != None and state["re"].has_uppercase(search["query"]))
 
 def _search_update(state: dict):
     """Recompile the search's pattern from its query and toggles. A query
     that does not compile (one still being typed) keeps the last pattern that
     did, its error shown in the bar."""
     search = state["search"]
+    search["matches_case"] = case_sensitive(state)
     if not search["query"]:
         search["pattern"] = None
         search["error"] = ""
         return
-    case = case_sensitive(search)
+    case = search["matches_case"]
     error = state["re"].check(search["query"], case_sensitive = case, whole_word = search["word"])
     if error != None:
         search["error"] = error
@@ -373,7 +308,7 @@ def _search_bar(search: dict, matches: int, cols: int) -> str:
         return (_c("active") if on else _c("muted")) + label + _RESET
 
     return (
-        head + query + "▏" + " " + toggle(case_sensitive(search), "Aa") + " " + toggle(search["word"], "W") + " " +
+        head + query + "▏" + " " + toggle(search.get("matches_case", search["case"]), "Aa") + " " + toggle(search["word"], "W") + " " +
         (_c("error") + found + _RESET if search["error"] else found) + _c("muted") + hints + _RESET
     )
 
@@ -812,7 +747,6 @@ dashboard_log = namespace(
     FILTERS = _FILTERS,
     folded_to_lines = folded_to_lines,
     folding = folding,
-    has_capital = has_capital,
     MAX_LOG = _MAX_LOG,
     new_search = new_search,
     paste_text = paste_text,
