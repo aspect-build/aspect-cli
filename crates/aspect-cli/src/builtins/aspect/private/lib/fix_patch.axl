@@ -4,8 +4,9 @@
 it names into a directory of its own, and runs `patch` once per file section,
 on that section's bytes alone, naming the copy to change: patch never takes a
 file name from the diff. Each copy patch changed or made is then renamed
-onto the workspace file its path resolves to, and one patch emptied for a
-removal is removed there: nothing else reaches the workspace.
+onto the workspace file its path resolves to, keeping its mode but setuid
+and setgid, and one patch emptied for a removal is removed there: nothing
+else reaches the workspace.
 
 A patch is refused whole, every file as it was, with a warning saying why,
 where:
@@ -302,17 +303,25 @@ def _creates(f: _File) -> bool:
     isn't there."""
     return f.old == None or (len(f.section.hunks) > 0 and all([h.old_count == 0 for h in f.section.hunks]))
 
+# The most of a file held in memory at once by a copy or a compare.
+_CHUNK = 1024 * 1024
+
 def _copy_in(fs, src: str, dst: str) -> None:
-    """Copy `src`'s bytes and mode to a new `dst`, and nothing else: a flag
-    like macOS's `uchg` that a clone would carry stays behind, so the copy
-    can be patched and removed."""
-    data = fs.open(src).read()
-    out = fs.create(dst)
-    out.write(data)
-    out.close()
+    """Copy `src`'s bytes to a new `dst` a chunk at a time, then its mode
+    without setuid and setgid, which a linter's rewrite gives no reason to
+    keep. Nothing else travels: a flag like macOS's `uchg` that a clone
+    would carry stays behind, so the copy can be patched and removed."""
     mode = fs.metadata(src).mode
+    data = fs.open(src)
+    out = fs.create(dst)
+    for _ in range(1 << 30):
+        chunk = data.read(_CHUNK)
+        if not chunk:
+            break
+        out.write(chunk)
+    out.close()
     if mode != None:
-        fs.set_permissions(dst, mode)
+        fs.set_permissions(dst, mode & 0o1777)
 
 def _move_in(fs, src: str, tmp: str, dst: str) -> None:
     """Copy `src` to `tmp` and rename that onto `dst`."""
@@ -332,8 +341,18 @@ def _replace(fs, src: str, dst: str) -> None:
         fail(err)
 
 def _same_bytes(fs, a: str, b: str) -> bool:
-    """Whether files `a` and `b` hold the same bytes, whatever their text."""
-    return fs.open(a).read() == fs.open(b).read()
+    """Whether files `a` and `b` hold the same bytes, whatever their text:
+    their sizes first, then a chunk at a time."""
+    if fs.metadata(a).size != fs.metadata(b).size:
+        return False
+    one, two = fs.open(a), fs.open(b)
+    for _ in range(1 << 30):
+        x, y = one.read(_CHUNK), two.read(_CHUNK)
+        if x != y:
+            return False
+        if not x:
+            break
+    return True
 
 def _inside(path: str) -> bool:
     """Whether a relative `path` stays inside the directory it is taken in."""
@@ -403,10 +422,10 @@ def apply_fix_patch(
       a patch with no file sections (an ed script, garbage); an empty one
       is passed over.
     - Files are copied in by their bytes and mode alone, so a flag like
-      macOS's `uchg` never reaches a copy. A result is renamed into place,
-      so a symlink in the tree stays one, a hard link to a file elsewhere is
-      broken off, and a read-only file is fixed as patch fixes it, its mode
-      kept. One that can't be written or removed is named in a WARNING, and
+      macOS's `uchg` never reaches a copy, and setuid and setgid are
+      dropped. A result is renamed into place, so a symlink in the tree
+      stays one, a hard link to a file elsewhere is broken off, and a
+      read-only file is fixed as patch fixes it, its other mode bits kept. One that can't be written or removed is named in a WARNING, and
       the rest still are; any other I/O failure refuses the patch.
     - Rejects for hunks that failed are kept in a directory an INFO line
       names. The copies go when the task ends, however it ends.

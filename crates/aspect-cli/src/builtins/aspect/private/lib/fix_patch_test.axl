@@ -7,8 +7,9 @@ differ, or checks the environment it runs in (in a nested run, its stdin a
 pipe); a stand-in copies' directory plays a disk that takes two names as
 one. A few cases need what only some hosts have, and are probed for: a disk
 that folds case or Unicode (and, where it doesn't, a case-only rename that
-applies), permissions a root user ignores, and the `uchg` flag (set through
-`sh`, so a host with no `chflags`, such as Linux, skips the case).
+applies), permissions a root user ignores, setuid a host may refuse, and
+the `uchg` flag (set through `sh`, so a host with no `chflags`, such as
+Linux, skips the case).
 
 Run with:
   aspect dev test-fix-patch
@@ -546,6 +547,19 @@ printf 'l\\n' > back/src/target.txt && ln -s target.txt back/src/lnk.txt
     _eq("an executable fixed, still executable", (fs.read_to_string(tree + "/src/tool.sh"), tool.executable), ("X\n", True))
     _eq("a hard link out of the tree broken off", (fs.read_to_string(tree + "/src/hl.txt"), fs.read_to_string(root + "/outside-hl.txt")), ("H\n", "h\n"))
     _eq("a symlink in the tree stays one", (fs.read_to_string(tree + "/src/target.txt"), fs.try_metadata(tree + "/src/lnk.txt").is_symlink), ("L\n", True))
+
+    # setuid and setgid are dropped on purpose, the other bits kept, where
+    # the host lets the file have them at all. A stand-in notes the copy's
+    # mode before it writes, which would clear them anyway.
+    fs.write(tree + "/src/suid.sh", "s\n")
+    catch(fs.set_permissions, tree + "/src/suid.sh", 0o6755, types = [std.io.Error])
+    suid = fs.metadata(tree + "/src/suid.sh").mode
+    if suid & 0o6000:
+        fs.write(root + "/suid.patch", fix("src/suid.sh", "s", "S"))
+        shim = _stand_in(fs, root, "mode-patch", 'eval "last=\\${$#}"\nls -l "$last" | cut -c1-10 > \'%s/suid.mode\'\nprintf \'S\\n\' > "$last"\n' % root)
+        _eq("a setuid file", apply_fix_patch(ctx, root + "/suid.patch", cwd = tree, program = shim), None)
+        _eq("its copy has no setuid or setgid", "s" in fs.read_to_string(root + "/suid.mode").lower(), False)
+        _eq("fixed, its other mode bits kept", (fs.read_to_string(tree + "/src/suid.sh"), fs.metadata(tree + "/src/suid.sh").mode), ("S\n", suid & 0o1777))
 
     # Permissions a root user ignores are probed, not assumed.
     fs.write(tree + "/src/secret.txt", "s\n")
