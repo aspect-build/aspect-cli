@@ -8,7 +8,7 @@ Golden frames of `render` are in crates/aspect-cli/tests/testdata/dashboard;
 `aspect dev test-dashboard --update` writes them anew.
 """
 
-load("@aspect//feature/dashboard.axl", "ANSI", "CONTROLS", "KEYS", "action_bar", "action_counts", "action_parts", "action_results", "action_row", "action_rows", "action_seconds", "action_split", "actions_text", "add_lines", "aged_time", "analysing", "attempt_state", "bazel_line", "bep_progress", "blocked_targets", "blocked_text", "bounded_log", "build_progress", "build_row", "built", "cache_hits", "classify", "console_height", "console_lines", "copy_text", "count_aborted", "count_aborted_test", "count_event", "count_spawn", "crumbs", "cut_text", "elapsed", "end_build", "failure_detail", "failure_of", "failure_rows", "failure_summary", "first_unlogged", "fit", "fit_logs", "fold_build", "has_capital", "help_rows", "highlightable", "invocation_lines", "keys_line", "keys_row", "link", "link_at", "link_marks", "link_span_at", "link_spans", "links_row", "local_test_logs", "log_view", "mark_cells", "metrics_lines", "new_build", "new_counts", "new_search", "note_blocked", "note_event", "note_phase", "note_progress", "note_spawn_time", "on_key", "open_in_editor", "open_link", "open_peek", "opens", "output_of", "own_execution_log", "panes_shown", "paste_text", "phase_status", "picked_build", "progress_counts", "refusal", "render", "replay_lines", "report_lines", "reset_attempt", "results_capacity", "reused", "running_actions", "say_note", "scrollbar", "scrolled_rows", "severity", "shares", "short_count", "shown_by", "shown_lines", "shown_tips", "slowest_rows", "slowest_title", "status_row", "step_match", "text_width", "tips_count", "tips_lines", "tips_role", "test_progress", "quoted_rows", "error_parts", "excerpt_rows", "tests_cached_text", "tests_text", "wrap_line")
+load("@aspect//feature/dashboard.axl", "ANSI", "CONTROLS", "KEYS", "action_bar", "action_counts", "action_parts", "action_results", "action_row", "action_rows", "action_seconds", "action_split", "actions_text", "add_lines", "aged_time", "analysing", "attempt_state", "bazel_line", "bep_progress", "blocked_targets", "blocked_text", "bounded_log", "build_progress", "build_row", "built", "cache_hits", "classify", "console_height", "console_lines", "copy_text", "count_aborted", "count_aborted_test", "count_event", "count_spawn", "crumbs", "cut_text", "elapsed", "end_build", "error_parts", "excerpt_rows", "failure_detail", "failure_of", "failure_rows", "failure_summary", "first_unlogged", "fit", "fit_logs", "fold_build", "has_capital", "help_rows", "highlightable", "invocation_lines", "keys_line", "keys_row", "link", "link_at", "link_marks", "link_span_at", "link_spans", "links_row", "local_test_logs", "log_view", "mark_cells", "metrics_lines", "new_build", "new_counts", "new_search", "note_blocked", "note_event", "note_phase", "note_progress", "note_spawn_time", "on_key", "open_in_editor", "open_link", "open_peek", "opens", "output_of", "own_execution_log", "panes_shown", "paste_text", "phase_status", "picked_build", "progress_counts", "quoted_rows", "refusal", "render", "replay_lines", "report_lines", "reset_attempt", "results_capacity", "reused", "running_actions", "say_note", "scrollbar", "scrolled_rows", "severity", "shares", "short_count", "shown_by", "shown_lines", "shown_tips", "slowest_rows", "slowest_title", "status_row", "step_match", "test_progress", "tests_cached_text", "tests_text", "text_width", "tips_count", "tips_lines", "tips_role", "wrap_line")
 load("@std//theme.axl", "theme")
 load("../private/lib/results_pages.axl", "ASPECT_PAGE", "BES_PAGE", "bes_results_url", "results_page", "results_pages")
 
@@ -464,6 +464,7 @@ def _actions_tests(ctx):
     for i in range(1, 11):
         _action(live, i, "Genrule", True, True)
         count_spawn(live["counts"], struct(cache_hit = True, runner = "disk cache hit"))
+
     # Bazel's count leads the events by a frame: a gap is not done until it
     # has outlasted the count it opened at, then unchanged; running stays
     # Bazel's, pending takes the rest, the sum exact.
@@ -1944,6 +1945,7 @@ def _impl(ctx: TaskContext) -> int:
         "✗ //t:remote  test · failed 1 of 1 attempt · 0.4s",
         "  log is only in the remote cache",
     ])
+
     # Shards and --runs_per_test both: each named by both.
     both = dict(tests, fails = [
         _t("//t:sr", "/out/t/fails/test.log", shard = 2, run = 1),
