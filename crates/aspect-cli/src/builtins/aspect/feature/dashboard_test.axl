@@ -1970,7 +1970,7 @@ def _impl(ctx: TaskContext) -> int:
         "✗ //anal:anal  anal/BUILD.bazel:1:8",
         "  │ missing input file '//anal:nonexistent'",
         "",
-        "✗ error · syntax/BUILD.bazel:2:1",
+        "✗ //syntax  analysis · syntax/BUILD.bazel:2:1",
         "  │ syntax error at 'newline': expected ,",
         "",
         "✗ error",
@@ -2563,6 +2563,49 @@ def _impl(ctx: TaskContext) -> int:
     got = [_visible(l) for l in failure_summary(nk, {"errors": nk_errs, "distinct": len(nk_errs)}, "t-9", False)]
     _eq("--nokeep_going: 2 entries", [l for l in got if l.startswith("✗") or l.startswith("──")], ["── Failures (2) ──", "✗ //le  analysis · le/BUILD.bazel:2:1", "✗ //mt:gone  analysis · p2/BUILD.bazel:3:8"])
     _eq("the build-aborted line with its root", "Analysis of target '//p2:e' failed; build aborted: Analysis failed" in "\n".join(got), True)
+
+    # ws/an again, as Bazel 9.3.3 streams it: the missing source's own
+    # Aborted `unconfigured_label` (`//an:nope.txt`) is no root; the target
+    # that needed it is, its dependent blocked under it.
+    an2 = dict(an, fails = list(an["fails"]), logged_index = None, blocked_cache = None, listed_cache = None, counts = dict(an["counts"]))
+    count_event(an2["counts"], "unconfigured_label", struct(label = "//an:nope.txt"), struct(), True)
+    note_event(an2, "unconfigured_label", struct(label = "//an:nope.txt"), struct(), True)
+    got = [_visible(l) for l in failure_summary(an2, {"errors": an_errs, "distinct": 4}, "t-9", False)]
+    _eq("a missing source is no root", [l for l in got if l.startswith("✗") or "blocked" in l], [
+        "✗ //an:missing  an/BUILD.bazel:1:8",
+        "  ○ blocked: //an:dep",
+        "✗ //nowhere:x  analysis · an/BUILD.bazel:3:8",
+        "  ○ blocked: //an:badlabel",
+        "0 built, 1 failed, 2 blocked · 0 tests passed, 0 failed",
+    ])
+
+    # ws/le2 asked for by pattern (Bazel 9.3.3): its syntax error, Bazel's
+    # `package contains errors` and `command succeeded, but` lines are one
+    # entry though nothing depends on it.
+    le2_errs = [{"header": h, "body": [], "log": None, "label": None, "target": None} for h in [
+        "ERROR: le2/BUILD.bazel:2:1: syntax error at 'newline': expected ,",
+        "ERROR: package contains errors: le2: syntax error at 'newline': expected ,",
+    ]]
+    le2 = dict(kinds, counts = new_counts(), root_causes = {}, logged_index = None, blocked_cache = None, listed_cache = None, fails = [], kept_errors = {"errors": le2_errs, "distinct": 2}, read = None, build = None)
+    got = [_visible(l) for l in failure_summary(le2, {"errors": le2_errs, "distinct": 2}, "t-9", False)]
+    _eq("a broken package asked for: one entry", [l for l in got if l.startswith("✗") or l.startswith("──") or l.startswith("  │")], ["── Failures (1) ──", "✗ //le2  analysis · le2/BUILD.bazel:2:1", "  │ syntax error at 'newline': expected ,"])
+
+    # ws/mf (Bazel 9.3.3): a `fail()` in a macro, `Traceback` its header and
+    # its BUILD line in the first frame: one entry at that line, with the
+    # traceback, the `no such target` errors and the dependent blocked.
+    tb = ["Traceback (most recent call last):"]
+    frames = ["\tFile \"mf/BUILD.bazel\", line 2, column 10, in <toplevel>", "\t\tbad_macro(name = \"m\")", "\tFile \"mf/defs.bzl\", line 2, column 9, in bad_macro", "\t\tfail(\"bad_macro refuses \" + name)", "Error in fail: bad_macro refuses m"]
+    mf_errs = [
+        {"header": "ERROR: Traceback (most recent call last):", "body": frames, "log": None, "label": None, "target": None},
+        {"header": "ERROR: package contains errors: mf: Traceback (most recent call last):", "body": frames, "log": None, "label": None, "target": None},
+        {"header": "ERROR: mf/BUILD.bazel: no such target '//mf:x': target 'x' not declared in package 'mf' defined by mf/BUILD.bazel", "body": [], "log": None, "label": None, "target": None},
+        {"header": "ERROR: q/BUILD.bazel:1:8: no such target '//mf:x': target 'x' not declared in package 'mf' defined by mf/BUILD.bazel and referenced by '//q:on_mf'", "body": [], "log": None, "label": None, "target": None},
+    ]
+    mf = dict(kinds, counts = dict(new_counts(), failures = ["//q:on_mf"], failed_labels = {"//q:on_mf": True}, failed = 1), root_causes = {"//q:on_mf": ["//mf:x"]}, logged_index = None, blocked_cache = None, listed_cache = None, fails = [], kept_errors = {"errors": mf_errs, "distinct": 4}, read = None, build = None)
+    note_event(mf, "unconfigured_label", struct(label = "//mf:x"), struct(), True)
+    count_event(mf["counts"], "unconfigured_label", struct(label = "//mf:x"), struct(), True)
+    got = [_visible(l) for l in failure_summary(mf, {"errors": mf_errs, "distinct": 4}, "t-9", False)]
+    _eq("a macro's fail(): one entry at its BUILD line", [l for l in got if l.startswith("✗") or l.startswith("──") or "blocked" in l], ["── Failures (1) ──", "✗ //mf  analysis · mf/BUILD.bazel:2:10", "  ○ blocked: //q:on_mf", "0 built, 0 failed, 1 blocked · 0 tests passed, 0 failed"])
 
     # A signal-killed action (//f:killed, Bazel 9.3.3): `killed` where the
     # exit code goes, and no command line quoted.

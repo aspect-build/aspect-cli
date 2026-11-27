@@ -1614,13 +1614,27 @@ def _excerpt_row(line: str, width: int) -> str:
         return "  " + _c("muted") + "│ …" + _RESET
     return "  " + _c("muted") + "│" + _RESET + " " + fit(_expand_tabs(line), max(1, width - 4)).rstrip()
 
+def missing_sources(state: dict) -> dict:
+    """The source files a kept error says are missing (`missing input file
+    '//an:nope.txt'`), each a root of no failure of its own: the target
+    that needed it failed."""
+    out = {}
+    for e in (state.get("kept_errors") or {}).get("errors", []) or []:
+        header = e.get("header", "")
+        at = header.find("missing input file '")
+        if at >= 0:
+            out[header[at + len("missing input file '"):].partition("'")[0]] = True
+    return out
+
 def listed_failures(state: dict) -> list:
     """The indexes of `state["fails"]` the Failures list has a row for, in
     order: every failed action, and for a test the attempt the failure
     summary quotes (`test_group`), its other attempts, shards and runs
-    reached with `}` `{` from it."""
+    reached with `}` `{` from it; never a missing source file's root
+    (`missing_sources`)."""
     fails = state["fails"]
-    key = len(fails)
+    missing = missing_sources(state)
+    key = (len(fails), len(missing))
     cached = state.get("listed_cache")
     if cached != None and cached[0] == key:
         return cached[1]
@@ -1632,7 +1646,7 @@ def listed_failures(state: dict) -> list:
     for label, at in by_label.items():
         chosen[label] = test_group(state, [fails[i] for i in at])["index"]
         chosen[label] = at[chosen[label]]
-    listed = [i for i, rec in enumerate(fails) if rec["kind"] != "test" or chosen.get(rec["label"]) == i]
+    listed = [i for i, rec in enumerate(fails) if (rec["kind"] != "test" or chosen.get(rec["label"]) == i) and not (rec.get("detail") == "analysis failed" and rec["label"] in missing)]
     state["listed_cache"] = (key, listed)
     return listed
 
@@ -2100,12 +2114,10 @@ def count_event(counts: dict, kind: str, event_id, payload, aborted = None):
             counts["failed_roots"][label] = True
             count_aborted(counts, label, reason)
         elif kind == "unconfigured_label" and label and label not in counts["failed_roots"]:
-            # One that failed loading, its package broken: Bazel gives no
-            # reason, but it is a root cause all the same.
+            # One that failed loading (its package broken, or a source file
+            # missing): Bazel gives no reason, but it is a root cause all
+            # the same; a label no one asked for, it counts as no target.
             counts["failed_roots"][label] = True
-            if label not in counts["aborted"]:
-                counts["aborted"][label] = True
-                _fail(counts, label)
         return
     if kind == "target_configured":
         if not _get(event_id, "aspect", ""):
@@ -6316,6 +6328,28 @@ def _unlabelled_in(e: dict, label: str, workspace: str = "") -> bool:
         build = build[len(root):]
     return build.rpartition("/")[0] == package
 
+def _traceback_located(e: dict):
+    """`e` as a located error where it is a `Traceback` whose first frame
+    is a BUILD file's line (`File "mf/BUILD.bazel", line 2, column 10`):
+    `ERROR: mf/BUILD.bazel:2:10: Traceback (most recent call last):`, its
+    body kept; else None."""
+    header = e.get("header", "")
+    if header != "ERROR: Traceback (most recent call last):":
+        return None
+    for line in e.get("body") or []:
+        line = line.strip()
+        if not line.startswith("File \""):
+            continue
+        path, _, rest = line[len("File \""):].partition("\"")
+        if path.rpartition("/")[2] not in ("BUILD", "BUILD.bazel"):
+            return None
+        words = rest.replace(",", " ").split(" ")
+        at = [words[i + 1] for i in range(len(words) - 1) if words[i] in ("line", "column") and words[i + 1].isdigit()]
+        if not at:
+            return None
+        return dict(e, header = "ERROR: %s:%s: Traceback (most recent call last):" % (path, ":".join(at[:2])))
+    return None
+
 def _makes(rec: dict, e: dict) -> bool:
     """Whether `e` says the record's own output was not created (`output
     'mc/d0.out' was not created` of `bazel-out/…/bin/mc/d0.out`)."""
@@ -6789,12 +6823,18 @@ def failure_summary(state: dict, kept, task_id: str, tty: bool, log_path: str = 
     # headed by that error, its dependents blocked under it.
     broken = {}
     for k, e in enumerate(errors):
+        # A `fail()` or other evaluation error: `Traceback`, its first frame
+        # its BUILD file's line (`File "mf/BUILD.bazel", line 2, column 10`).
+        located = _traceback_located(e)
+        if located != None:
+            errors[k] = located
+            e = located
         location = error_parts(e.get("header", ""))[0]
         if used[k] or not location or header_labels(e.get("header", "")) or e.get("target"):
             continue
         build = location.rpartition(":")[0].rpartition(":")[0] if location.count(":") >= 2 else location.rpartition(":")[0]
         reason = error_parts(e.get("header", ""))[2]
-        about = reason.startswith(("no such package", "no such target")) or "referenced by" in reason
+        about = reason.startswith(("no such package", "no such target", "output '")) or "referenced by" in reason or "was not created" in reason
         if build.rpartition("/")[2] in ("BUILD", "BUILD.bazel") and not _failed_action(e.get("header", "")) and not about:
             pkg = build.rpartition("/")[0]
             if pkg not in broken and not [r for r in state["fails"] if r["kind"] == "action" and r.get("detail") != "analysis failed" and _unlabelled_in(e, r["label"], workspace)]:
@@ -6806,9 +6846,6 @@ def failure_summary(state: dict, kept, task_id: str, tty: bool, log_path: str = 
             groups.setdefault(pkg, []).append(rec)
     for pkg in sorted(broken.keys()):
         k = broken[pkg]
-        naming = [j for j, e in enumerate(errors) if not used[j] and [l for l in header_labels(e.get("header", "")) if l.partition("//")[2].partition(":")[0] == pkg]]
-        if not groups.get(pkg) and not naming:
-            continue
         used[k] = True
         found = [(k, errors[k])]
         stopped = []
@@ -6816,13 +6853,22 @@ def failure_summary(state: dict, kept, task_id: str, tty: bool, log_path: str = 
             found += claim(rec["label"]) + aborted_by.pop(rec["label"], [])
             stopped += [l for l in by_root.pop(rec["label"], []) if l not in stopped]
         for j, e in enumerate(errors):
-            if not used[j] and [l for l in header_labels(e.get("header", "")) if l.partition("//")[2].partition(":")[0] == pkg]:
+            header = e.get("header", "")
+            said = [l for l in header_labels(header) if l.partition("//")[2].partition(":")[0] == pkg]
+            again = "package contains errors: %s:" % pkg in header or "loading package '%s'" % pkg in header or "Package '%s' contains errors" % pkg in header
+            if not used[j] and (said or again):
                 used[j] = True
-                found.append((j, e))
+
+                # Bazel's `package contains errors` repeats the package's
+                # own error: said once.
+                if not again:
+                    found.append((j, e))
         details, lines, _ = from_errors(found)
         entries.append(dict(entry(0, k, "//" + pkg, "analysis", details, lines, ""), blocked = stopped))
     for i, rec in enumerate(state["fails"]):
         if rec["kind"] == "action" and rec.get("detail") == "analysis failed" and rec["label"].partition("//")[2].partition(":")[0] in groups:
+            continue
+        if rec["kind"] == "action" and rec.get("detail") == "analysis failed" and rec["label"] in missing_sources(state):
             continue
         if rec["kind"] == "action" and rec.get("detail") == "analysis failed":
             found = claim(rec["label"]) + aborted_by.pop(rec["label"], [])
@@ -6865,6 +6911,9 @@ def failure_summary(state: dict, kept, task_id: str, tty: bool, log_path: str = 
         for k, _ in left:
             used[k] = False
     for i, e in enumerate(errors):
+        # Bazel's `Couldn't start the build` only restates the errors before.
+        if not used[i] and entries and e.get("header", "").startswith("ERROR: Couldn't start the build"):
+            used[i] = True
         if not used[i] and e.get("header"):
             used[i] = True
             location, exit, reason = error_parts(e["header"])

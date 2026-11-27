@@ -337,7 +337,7 @@ pub fn quote(text: &str) -> String {
 
 /// Bazel's own closing lines, which a recap would only repeat.
 static BOILERPLATE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
-    Regex::new(r"^ERROR: (?:Build did NOT complete successfully|Build failed\. Not running tests|command succeeded, but there were loading phase errors)")
+    Regex::new(r"^ERROR: (?:Build did NOT complete successfully|Build failed\. Not running tests|command succeeded, but )")
         .unwrap()
 });
 
@@ -1479,6 +1479,24 @@ mod tests {
             );
             assert_eq!(kept.errors[0].target.as_deref(), Some(target), "{line}");
         }
+    }
+
+    /// Bazel's closing lines restate the errors before them: none is kept
+    /// (`command succeeded, but …`, every form Bazel 7 to 9 writes).
+    #[test]
+    fn bazels_closing_lines_are_not_kept() {
+        let observations = std::sync::Arc::new(super::super::processors::Observations::default());
+        let mut p = RecapErrors::new(10, 0, Style::default()).keeping(observations.clone());
+        feed(
+            &mut p,
+            &[
+                "ERROR: command succeeded, but there were errors parsing the target pattern",
+                "ERROR: command succeeded, but there were loading phase errors",
+                "ERROR: command succeeded, but not all targets were analyzed",
+                "ERROR: Build did NOT complete successfully",
+            ],
+        );
+        assert_eq!(observations.errors().expect("kept").errors.len(), 0);
     }
 
     /// A signal-killed action's header is cut after the signal, as after an
