@@ -2436,6 +2436,7 @@ mod tests {
             drawn: true,
             returns: false,
             crlf: false,
+            note: false,
             in_output: false,
             streamed: false,
             tail: false,

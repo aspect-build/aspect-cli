@@ -531,8 +531,9 @@ impl Config {
             _ => None,
         };
         let mut chain: Vec<Box<dyn LineProcessor>> = vec![];
-        // Before anything rewrites a record (the theme's colours, paths, a
-        // user's `rewrite`): the summary ties Bazel's lines as it wrote them.
+        // It reads Bazel's records as Bazel wrote them, before anything
+        // rewrites one (the theme's colours, paths, a user's `rewrite`): the
+        // summary ties Bazel's lines as it wrote them.
         if self
             .stages
             .iter()

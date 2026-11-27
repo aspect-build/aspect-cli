@@ -105,6 +105,15 @@ pub trait LineProcessor: Send {
     fn report(&mut self) -> Option<Vec<u8>> {
         None
     }
+
+    /// Whether this stage only reads Bazel's records as Bazel wrote them:
+    /// it is given each one as it comes, before any stage runs and before a
+    /// rendering of curses into lines makes rows of them, and its
+    /// [`LineProcessor::process`] result is not used. Not given the CLI's
+    /// own notes.
+    fn reads_raw(&self) -> bool {
+        false
+    }
 }
 
 /// The running reader thread. Joined after the child has exited.
@@ -405,7 +414,8 @@ impl Splitter {
         };
         for note in notes {
             // Its own classifier: Bazel's knows where its progress area is.
-            let line = Classifier::default().classify(&note);
+            let mut line = Classifier::default().classify(&note);
+            line.note = true;
             if self.screen.is_some() {
                 let mut bytes = note;
                 bytes.push(b'\n');
@@ -523,6 +533,12 @@ impl Splitter {
         if !self.last_drawn && (line.drawn || line.opens_output) {
             self.write_notes();
         }
+        line.returns = boundary == b"\r";
+        line.crlf = boundary == b"\r\n";
+        for p in self.processors.iter_mut().filter(|p| p.reads_raw()) {
+            p.see(&line);
+            p.process(record);
+        }
         self.last_drawn = line.drawn || boundary != b"\n" && boundary != b"\r\n";
         if self.screen.is_some() {
             let mut bytes = record.to_vec();
@@ -531,8 +547,6 @@ impl Splitter {
             // Kept: a `\n` that follows a `\r` across reads goes to the screen.
             return true;
         }
-        line.returns = boundary == b"\r";
-        line.crlf = boundary == b"\r\n";
         self.chain(record, boundary, line)
     }
 
@@ -564,6 +578,9 @@ impl Splitter {
         let mut current = record.to_vec();
         for i in 0..self.processors.len() {
             let p = &mut self.processors[i];
+            if p.reads_raw() {
+                continue;
+            }
             p.see(&line);
             match p.process(&current) {
                 Some(bytes) => current = bytes,

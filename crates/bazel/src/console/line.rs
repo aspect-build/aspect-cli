@@ -244,6 +244,9 @@ pub struct Line {
     /// Whether the record ended in `\r\n`. Set by the splitter, as
     /// [`Line::returns`] is.
     pub crlf: bool,
+    /// Whether it is a line of the CLI's own the forwarder wrote between
+    /// Bazel's ([`super::forward::Notes`]), not Bazel's.
+    pub note: bool,
     /// Whether it came while an action's or a test's output was open, or
     /// after streamed test output was announced: a tool's, whatever its
     /// shape.
@@ -425,6 +428,7 @@ impl Classifier {
             drawn,
             returns: false,
             crlf: false,
+            note: false,
             in_output: inside,
             streamed: self.streamed && !announces,
             tail: was_tail && label && !self.streamed,
