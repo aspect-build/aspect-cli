@@ -80,6 +80,7 @@ load("@aspect//private/lib/redis_test.axl", "redis_tests")
 load("@aspect//private/lib/remote_executor_test.axl", "remote_executor_tests")
 load("@aspect//private/lib/repro_commands_test.axl", "repro_commands_tests")
 load("@aspect//private/lib/resp_test.axl", "resp_tests")
+load("@aspect//private/lib/results_pages_test.axl", "results_pages_tests")
 load("@aspect//private/lib/runnable_test.axl", "runnable_tests")
 load("@aspect//private/lib/runner_job_history_test.axl", "runner_job_history_tests")
 load("@aspect//private/lib/sandbox_recovery_test.axl", "sandbox_recovery_tests")
@@ -641,6 +642,10 @@ def config(ctx: ConfigContext):
     # case per rule.
     # Run with: aspect dev test-failures
     ctx.tasks.add(failures_tests)
+
+    # results_pages.axl: the results pages an invocation has.
+    # Run with: aspect dev test-results-pages
+    ctx.tasks.add(results_pages_tests)
 
     # aspect_endpoint_auth.axl: host parsing, suffix matching, credential gate.
     # Run with: aspect dev test-aspect-endpoint-auth

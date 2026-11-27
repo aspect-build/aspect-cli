@@ -7,7 +7,7 @@ Bazel's own upload has (`--bes_results_url` with the stream's uuid).
 ASPECT_PAGE = "Aspect Build Results"
 BES_PAGE = "BES Results"
 
-def results_pages(bazel_base, bazel_uuid, data) -> list:
+def results_pages(bazel_base: str, bazel_uuid: str, data: dict) -> list:
     """Every results page the invocation has, as `(label, url)`, the CLI's
     first:
 
@@ -38,7 +38,7 @@ def bes_results_url(event) -> str:
             url = arg.partition("=")[2]
     return url
 
-def results_page(bazel_base, bazel_uuid, data):
+def results_page(bazel_base: str, bazel_uuid: str, data: dict) -> str:
     """The results page to open, or `""`: the CLI-streamed invocation's when
     `data` (a task update's) names one, else the one Bazel uploaded."""
     pages = results_pages(bazel_base, bazel_uuid, data)

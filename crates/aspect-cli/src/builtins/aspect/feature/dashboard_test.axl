@@ -1,5 +1,5 @@
 """Tests for the `Dashboard` feature: its layout helpers, keys and
-`render`, and the results pages it links (`results_pages.axl`).
+`render`.
 
 Run with:
   aspect dev test-dashboard
@@ -18,7 +18,7 @@ load("@aspect//feature/dashboard.axl", "end_build", "fold_build", "new_build", "
 load("@std//theme.axl", "theme")
 load("../private/lib/failure_records.axl", "failure_records")
 load("../private/lib/failures.axl", "failures")
-load("../private/lib/results_pages.axl", "ASPECT_PAGE", "BES_PAGE", "bes_results_url", "results_page", "results_pages")
+load("../private/lib/results_pages.axl", "ASPECT_PAGE", "BES_PAGE")
 load("../private/lib/term_text.axl", "term_text")
 
 ANSI = term_text.ANSI
@@ -1044,23 +1044,6 @@ def _actions_tests(ctx):
                 fail("%s at %d columns: rows not as wide as the frame: %r\n%s" % (name, cols, bad, "\n".join(drawn)))
 
 def _impl(ctx: TaskContext) -> int:
-    sink = {"aspect_results_url": "https://app.example.com/", "sink_invocation_id": "sink-1"}
-    _eq("cli-streamed", results_page("", "", sink), "https://app.example.com/sink-1")
-    _eq("cli-streamed wins", results_page("https://bes.example.com", "uuid-1", sink), "https://app.example.com/sink-1")
-    _eq("bazel-uploaded", results_page("https://bes.example.com/invocation/", "uuid-1", {}), "https://bes.example.com/invocation/uuid-1")
-    _eq("sink without a viewer", results_page("https://bes.example.com", "uuid-1", {"sink_invocation_id": "sink-1"}), "https://bes.example.com/uuid-1")
-    _eq("nothing", results_page("", "uuid-1", {}), "")
-    _eq("both pages", results_pages("https://bes.example.com/invocation", "uuid-1", sink), [
-        (ASPECT_PAGE, "https://app.example.com/sink-1"),
-        (BES_PAGE, "https://bes.example.com/invocation/uuid-1"),
-    ])
-    parsed = struct(payload = struct(cmd_line = ["--bes_results_url=https://old.example.com", "--keep_going", "--bes_results_url=https://new.example.com"]))
-    _eq("the last --bes_results_url wins", bes_results_url(parsed), "https://new.example.com")
-    _eq("no --bes_results_url", bes_results_url(struct(payload = struct(cmd_line = ["--keep_going"]))), "")
-    _eq("bazel streams to aspect", results_pages("https://app.example.com", "uuid-1", {"bes_streamed_by_bazel": True}), [
-        (ASPECT_PAGE, "https://app.example.com/uuid-1"),
-    ])
-
     _eq("rows under the status", running_actions(["[1 / 9] 2 actions running", "    a.cc; 1s", "    b.cc; 2s"]), ["a.cc; 1s", "b.cc; 2s"])
     _eq("one action in the status", running_actions(["[18,401 / 18,434] Compiling Rust rlib axl-proto (2 files); 11s darwin-sandbox"]), ["Compiling Rust rlib axl-proto (2 files); 11s darwin-sandbox"])
     _eq("a count, no rows", running_actions(["[5 / 9] 3 actions, 1 running"]), [])
