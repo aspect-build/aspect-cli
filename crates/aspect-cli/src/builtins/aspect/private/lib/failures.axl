@@ -9,6 +9,7 @@ load("./term_text.axl", "term_text")
 
 _c = term_text.c
 _counts = term_text.counts
+_tenths = term_text.tenths
 _RESET = term_text.RESET
 text_width = term_text.text_width
 wrap_line = term_text.wrap_line
@@ -22,8 +23,16 @@ _target_entry = failure_records.target_entry
 _workspace = failure_records.workspace
 blocked_targets = failure_records.blocked_targets
 build_outcome = failure_records.build_outcome
+test_shape = failure_records.test_shape
 _status_word = failure_ties.status_word
 console_ties = failure_ties.console_ties
+
+# What a flaky test's failed attempt says of it.
+FLAKY_NOTE = "flaky, passed on a later attempt"
+
+def _more_lines(n: int) -> str:
+    """`… 3 more lines`: what an excerpt leaves out, counted."""
+    return _counts("… %d more line", n) + ("" if n == 1 else "s")
 
 def failure_detail(state: dict, record: dict, flaky_note: bool = True) -> str:
     """What tells a failure apart from others of its label: an action's
@@ -36,16 +45,14 @@ def failure_detail(state: dict, record: dict, flaky_note: bool = True) -> str:
     detail = record["detail"]
     if record.get("status") == "timeout":
         ms = record.get("duration_ms", 0)
-        detail += " · timeout" + (" after %d.%ds" % (ms // 1000, ms % 1000 // 100) if ms else "")
+        detail += " · timeout" + (" after " + _tenths(ms) if ms else "")
     if flaky_note and state.get("counts", {}).get("flaky", {}).get(record["label"]):
-        detail += " · flaky, passed on a later attempt"
-    key = (record["label"], record["config"])
-    runs, shards = state["test_counts"].get(key, (0, 0))
-    seen_runs, seen_shards = state["spread"].get(key, (1, 1))
+        detail += " · " + FLAKY_NOTE
+    runs, shards = test_shape(state, record["label"], record["config"])
     parts = []
-    if max(shards, seen_shards) > 1:
+    if shards > 1:
         parts.append("shard %d" % record["shard"])
-    if max(runs, seen_runs) > 1:
+    if runs > 1:
         parts.append("run %d" % record["run"])
     return " · ".join(parts + [detail])
 
@@ -233,9 +240,6 @@ def _attempts_text(n: int, of = None) -> str:
     of = max(n, of or n)
     return _counts("failed %d of %d attempt", (n, of)) + ("" if of == 1 else "s")
 
-def _seconds(ms: int) -> str:
-    return "%d.%ds" % (ms // 1000, ms % 1000 // 100)
-
 def own_excerpt(state: dict, rec: dict, excerpt) -> tuple:
     """`(details, lines, log)` of a failed action from its record alone:
     its exit code (`exit 3`, none for 0), what `excerpt` (`std.excerpt`,
@@ -260,10 +264,7 @@ def test_group(state: dict, recs: list) -> dict:
     `others`, each other failed shard or run's last attempt with what names
     it (`shard 3 of 3 · run 2 of 2`), and whether it `timed_out`."""
     label = recs[0]["label"]
-    key = (label, recs[0].get("config", ""))
-    runs, shards = state["test_counts"].get(key, (0, 0))
-    seen_runs, seen_shards = state["spread"].get(key, (1, 1))
-    shards, runs = max(shards, seen_shards), max(runs, seen_runs)
+    runs, shards = test_shape(state, label, recs[0].get("config", ""))
 
     def named(at):
         return " · ".join((["shard %d of %d" % (at[0], shards)] if shards > 1 else []) + (["run %d of %d" % (at[1], runs)] if runs > 1 else []))
@@ -288,11 +289,11 @@ def test_group(state: dict, recs: list) -> dict:
     timed_out = last.get("status") == "timeout"
     ms = last.get("duration_ms", 0) or 0
     if timed_out:
-        details.append("timed out" + (" after " + _seconds(ms) if ms else ""))
+        details.append("timed out" + (" after " + _tenths(ms) if ms else ""))
     else:
         details.append(_attempts_text(attempts, tried))
         if ms >= 100:
-            details.append(_seconds(ms))
+            details.append(_tenths(ms))
     others = [(named(at), parts[at][-1]) for at in order[1:]]
     return {"rec": last, "index": [i for i, r in enumerate(recs) if r == last][-1], "details": details, "others": others, "timed_out": timed_out}
 
@@ -317,11 +318,11 @@ def _traceback_lines(lines: list) -> list:
     at = 0
     for k in keep:
         if k > at:
-            out.append(_counts("… %d more line", k - at) + ("" if k - at == 1 else "s"))
+            out.append(_more_lines(k - at))
         out.append(lines[k])
         at = k + 1
     if at < len(lines):
-        out.append(_counts("… %d more line", len(lines) - at) + ("" if len(lines) - at == 1 else "s"))
+        out.append(_more_lines(len(lines) - at))
     return out
 
 def failure_entries(state: dict) -> dict:
@@ -565,7 +566,7 @@ def failure_summary(state: dict, task_id: str, tty: bool, log_path: str = "", li
                     for j, row in enumerate(quoted_rows(line, max(20, width - 4))):
                         out.append("  " + muted + bar + reset + " " + ("  " if j else "") + row)
                 if e["more"]:
-                    out.append("  " + muted + bar + reset + " " + _counts("… %d more line", e["more"]) + ("" if e["more"] == 1 else "s"))
+                    out.append("  " + muted + bar + reset + " " + _more_lines(e["more"]))
                 if e["log"]:
                     out.append("  " + muted + "log" + reset + " " + e["log"])
                 for line in e["extra"]:
@@ -596,7 +597,7 @@ def failure_summary(state: dict, task_id: str, tty: bool, log_path: str = "", li
                     for j, row in enumerate(quoted_rows(line, max(20, width - 4))):
                         out.append("  " + muted + bar + reset + " " + ("  " if j else "") + row)
                 if more:
-                    out.append("  " + muted + bar + reset + " " + _counts("… %d more line", more) + ("" if more == 1 else "s"))
+                    out.append("  " + muted + bar + reset + " " + _more_lines(more))
         if len(others) > max_entries:
             out.append(_counts("… and %d more", len(others) - max_entries) + " · aspect history show %s" % task_id)
     not_kept = console_ties(state)["not_kept"]
@@ -608,6 +609,7 @@ def failure_summary(state: dict, task_id: str, tty: bool, log_path: str = "", li
     return [linked(l) for l in out] if linked else out
 
 failures = namespace(
+    FLAKY_NOTE = FLAKY_NOTE,
     collect_event = failure_records.collect_event,
     new_state = failure_records.new_state,
     entry_text = entry_text,

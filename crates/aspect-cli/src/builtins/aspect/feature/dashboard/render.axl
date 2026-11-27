@@ -27,6 +27,7 @@ text_width = term_text.text_width
 wrap_line = term_text.wrap_line
 blocked_targets = failure_records.blocked_targets
 blocked_text = failure_records.blocked_text
+FLAKY_NOTE = failures.FLAKY_NOTE
 _expand_tabs = failures.expand_tabs
 _failure_counts = failures.failure_counts
 _GAP_ROW = failures.GAP_ROW
@@ -204,7 +205,7 @@ def record_excerpt(state: dict, i: int) -> tuple:
             text = entry_text(state, e)
             details = ([text["kind"]] if text["kind"] else []) + text["details"]
             if e["flaky"]:
-                details.append("flaky, passed on a later attempt")
+                details.append(FLAKY_NOTE)
             return (details, excerpt_rows(text["lines"])[0])
     return ([], [])
 
