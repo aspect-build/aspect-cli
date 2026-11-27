@@ -6306,21 +6306,26 @@ def action_errors(state: dict) -> dict:
     no target and is at its own package's BUILD file (`_unlabelled_in`),
     and its `(Exit N)` is not another than the record's exit code (a
     record whose command exited 0, or ran none, takes no error with one). A
-    record and a candidate pair, rule by rule, when the lines of the
+    record and a candidate pair, rule by rule, when the error says the
+    record's output was not created (`_makes`), else when the lines of the
     error's body that no rival error's body has (escapes and CRs left out,
     a line cut with `…` the text before it) are in the record's own kept
     log (`_plain_text`), else when the source it compiled is the record's
     object (`_compiles`), else when the console matched it to that very
     log, else when it names the record's label and each is the other's
-    only one left. Under each rule a record with one pick, or an error
-    with one picker, pairs, and the rest are tried again, until none
-    does; a record left whose candidates are all at one BUILD line no other
-    has a candidate at takes them all (`also`). A record no rule settles
-    gets no error, and the summary tells it
-    from the record alone; an action's error left over with it is its,
-    and shown with no other. A second error about the same action
-    (Bazel's `1 input file(s) do not exist` after `missing input file`)
-    goes with it."""
+    only one left, else, for a record no error names, when it says the
+    record's target's name (`_says_name`). Under each rule a record with
+    one pick, or an error with one picker, pairs, and the rest are tried
+    again, until none does. A further error that says what failed goes
+    with the paired record whose error is at its BUILD line (by its name
+    where several are), and a record left whose candidates are all at one
+    BUILD line no other has a candidate at takes them all (`also`). A
+    record no rule settles gets no error, and the summary tells it from
+    the record alone. An error left that says what failed, or names a
+    failed record's output or target, is a record's, never an entry of its
+    own; one about the package stays for its analysis root. A second error
+    about the same action (Bazel's `1 input file(s) do not exist` after
+    `missing input file`) goes with it."""
     kept = state.get("kept_errors")
     errors = list((kept or {}).get("errors", []) or [])
     key = (len(state["fails"]), len(errors), bool(state.get("building")))
@@ -6417,26 +6422,25 @@ def action_errors(state: dict) -> dict:
     by(lambda i, j: bool(text[i]) and any([l in text[i] for l in distinct[j]]))
     by(lambda i, j: _compiles(state["fails"][i], errors[j]))
     by(lambda i, j: bool(own[i]) and errors[j].get("log") == own[i])
-    by(lambda i, j: _says_name(state["fails"][i], errors[j]))
     by(lambda i, j: _error_names(errors[j], state["fails"][i]["label"]))
+    by(lambda i, j: _says_name(state["fails"][i], errors[j]) and not [k for k in candidates(i) if _error_names(errors[k], state["fails"][i]["label"])])
 
     # A record's further errors (`Checking d0 failed: not all outputs were
-    # created or valid` after `output 'mc/d0.out' was not created`): each
-    # paired record whose name it says (both of `Building docs for api`),
-    # else the one record whose error is at its BUILD line.
+    # created or valid` after `output 'mc/d0.out' was not created`): the
+    # paired record whose error is at its BUILD line, the one whose name it
+    # says where several are (a list comprehension's), never one it names
+    # in passing at another line (`Building docs for api`).
     for j in range(len(errors)):
         e = errors[j]
         if used[j] or not _failed_action(e.get("header", "")):
             continue
         line = error_parts(e.get("header", ""))[0]
-        mine = [i for i in records if i in out and j in candidates(i)]
-        namers = [i for i in mine if _says_name(state["fails"][i], e)]
-        if not namers:
-            namers = [i for i in mine if line and error_parts(out[i].get("header", ""))[0] == line]
-            namers = namers if len(namers) == 1 else []
-        for i in namers:
+        at = [i for i in records if i in out and j in candidates(i) and line and error_parts(out[i].get("header", ""))[0] == line]
+        if len(at) > 1:
+            at = [i for i in at if _says_name(state["fails"][i], e)]
+        if len(at) == 1:
             used[j] = True
-            out[i] = dict(out[i], also = list(out[i].get("also", [])) + [e])
+            out[at[0]] = dict(out[at[0]], also = list(out[at[0]].get("also", [])) + [e])
 
     # A record left whose candidates, narrowed to the BUILD line of those
     # that name it where any do, are all at one line no other record left

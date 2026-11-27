@@ -2454,10 +2454,9 @@ def _impl(ctx: TaskContext) -> int:
     got = [_visible(l) for l in failure_summary(ar, {"errors": ar_errs, "distinct": 3}, "t-9", False)]
     _eq("the analysis root's located error stays its own", [l for l in got if l.startswith("✗") or "referenced by" in l], ["✗ //nowhere:x  analysis · ar/BUILD.bazel:3:8", "  │ - nowhere and referenced by '//ar:badlabel'", "✗ //ar:boom  Genrule · exit 1 · ar/BUILD.bazel:1:8"])
 
-    # ws/sn (Bazel 9.3.3): `Building docs for api failed` names both
-    # //sn:docs and //sn:api, `Packaging failed` neither; each entry has
-    # its output's error, the line naming it, and api the one at its line, a
-    # reason said once.
+    # ws/sn (Bazel 9.3.3): `Building docs for api failed` is at docs's
+    # line though it names api too, `Packaging failed` at api's: each goes
+    # with the entry at its line, a reason said once.
     sn_errs = [{"header": h, "body": [], "log": None, "label": None, "target": None} for h in [
         "ERROR: sn/BUILD.bazel:3:4: output 'sn/api.out' was not created",
         "ERROR: sn/BUILD.bazel:3:4: Packaging failed: not all outputs were created or valid",
@@ -2465,9 +2464,29 @@ def _impl(ctx: TaskContext) -> int:
         "ERROR: sn/BUILD.bazel:2:4: Building docs for api failed: not all outputs were created or valid",
     ]]
     got, _ = _entries([_act("//sn:%s" % n, "Check", "bazel-out/bin/sn/%s.out" % n, 0) for n in ("docs", "api")], sn_errs, {}, {})
-    _eq("a line naming two goes with each", sorted([(e[0], e[1]) for e in got]), [
+    _eq("a further error goes with the entry at its line", sorted([(e[0], e[1]) for e in got]), [
         ("✗ //sn:api  Check · sn/BUILD.bazel:3:4", ["output 'sn/api.out' was not created", "not all outputs were created or valid"]),
         ("✗ //sn:docs  Check · sn/BUILD.bazel:2:4", ["output 'sn/docs.out' was not created", "not all outputs were created or valid"]),
+    ])
+
+    # ws/sp (Bazel 9.3.3): api and gen fail with exit codes; docs and after
+    # make no output, their messages naming api and gen in passing. Each
+    # further error is the one at its line's.
+    sp_errs = [
+        {"header": "ERROR: sp/BUILD.bazel:3:4: Packaging failed: (Exit 2)", "body": ["api broke"], "log": None, "label": None, "target": "//sp:api"},
+        {"header": "ERROR: sp/BUILD.bazel:4:8: Executing genrule //sp:gen failed: (Exit 3)", "body": ["gen broke"], "log": None, "label": None, "target": "//sp:gen"},
+        {"header": "ERROR: sp/BUILD.bazel:5:4: output 'sp/after.out' was not created", "body": [], "log": None, "label": None, "target": None},
+        {"header": "ERROR: sp/BUILD.bazel:5:4: Checking gen output failed: not all outputs were created or valid", "body": [], "log": None, "label": None, "target": None},
+        {"header": "ERROR: sp/BUILD.bazel:2:4: output 'sp/docs.out' was not created", "body": [], "log": None, "label": None, "target": None},
+        {"header": "ERROR: sp/BUILD.bazel:2:4: Building docs for api failed: not all outputs were created or valid", "body": [], "log": None, "label": None, "target": None},
+    ]
+    sp_recs = [_act("//sp:api", "Check", "bazel-out/bin/sp/api.out", 2), _act("//sp:gen", "Genrule", "bazel-out/bin/sp/gen.txt", 3), _act("//sp:after", "Check", "bazel-out/bin/sp/after.out", 0), _act("//sp:docs", "Check", "bazel-out/bin/sp/docs.out", 0)]
+    got, _ = _entries(sp_recs, sp_errs, {}, {})
+    _eq("a name in passing takes nothing", sorted([(e[0], e[1]) for e in got]), [
+        ("✗ //sp:after  Check · sp/BUILD.bazel:5:4", ["output 'sp/after.out' was not created", "not all outputs were created or valid"]),
+        ("✗ //sp:api  Check · exit 2 · sp/BUILD.bazel:3:4", ["api broke"]),
+        ("✗ //sp:docs  Check · sp/BUILD.bazel:2:4", ["output 'sp/docs.out' was not created", "not all outputs were created or valid"]),
+        ("✗ //sp:gen  Genrule · exit 3 · sp/BUILD.bazel:4:8", ["gen broke"]),
     ])
 
     # A signal-killed action (//f:killed, Bazel 9.3.3): `killed` where the
