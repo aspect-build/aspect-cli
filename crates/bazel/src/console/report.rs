@@ -337,7 +337,7 @@ pub fn quote(text: &str) -> String {
 
 /// Bazel's own closing lines, which a recap would only repeat.
 static BOILERPLATE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
-    Regex::new(r"^ERROR: (?:Build did NOT complete successfully|Build failed\. Not running tests)")
+    Regex::new(r"^ERROR: (?:Build did NOT complete successfully|Build failed\. Not running tests|command succeeded, but there were loading phase errors)")
         .unwrap()
 });
 

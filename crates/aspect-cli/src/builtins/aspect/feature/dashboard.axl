@@ -3741,6 +3741,10 @@ def action_results(split: dict, room: int, rows = 3, short = False, stack = Fals
     if not parts:
         return []
 
+    # The end's rows are its own: no live drop memory carries over.
+    if split["final"]:
+        memory = None
+
     # A live part shown this build keeps its place at 0, dimmed, so the
     # parts don't come and go as Bazel's counts move (`? 0 unreported`).
     if memory != None:
@@ -4185,8 +4189,8 @@ def _top(state: dict, cols: int, rows: int) -> list:
 
 # The Results rows a build may come to have past its targets and tests: the
 # tests running and pending (one or two where the Tests row has no room for
-# them), its actions (up to five: ran, the cache hits on up to three, the
-# rest, what runs and is pending), critical path and failures.
+# them), its actions (as many as its free rows hold: ran, the cache hits,
+# the rest, what runs and is pending), critical path and failures.
 _OPTIONAL_RESULTS = 8
 
 def _actions_memory(state: dict, room: int, rows: int, pane: int) -> dict:
@@ -6767,9 +6771,61 @@ def failure_summary(state: dict, kept, task_id: str, tty: bool, log_path: str = 
     # Bazel's other errors: each where Bazel said it.
     late = len(errors) + len(state["fails"])
     index = logged_index(state)
+    workspace = _workspace(state)
+
+    # Bazel's `Analysis of target '//p2:e' failed; build aborted` is the
+    # root's that blocked it (else the target's own).
+    aborted_by = {}
+    for k, e in enumerate(errors):
+        header = e.get("header", "")
+        if not used[k] and header.startswith("ERROR: Analysis of target '") and "' failed; build aborted" in header:
+            target = header[len("ERROR: Analysis of target '"):].partition("'")[0]
+            root = (blocked.get(target) or [target])[0]
+            used[k] = True
+            aborted_by.setdefault(root, []).append((k, e))
+
+    # A broken package (its BUILD file's own error, a syntax error): every
+    # root in it, and every error naming one of its targets, is one entry,
+    # headed by that error, its dependents blocked under it.
+    broken = {}
+    for k, e in enumerate(errors):
+        location = error_parts(e.get("header", ""))[0]
+        if used[k] or not location or header_labels(e.get("header", "")) or e.get("target"):
+            continue
+        build = location.rpartition(":")[0].rpartition(":")[0] if location.count(":") >= 2 else location.rpartition(":")[0]
+        reason = error_parts(e.get("header", ""))[2]
+        about = reason.startswith(("no such package", "no such target")) or "referenced by" in reason
+        if build.rpartition("/")[2] in ("BUILD", "BUILD.bazel") and not _failed_action(e.get("header", "")) and not about:
+            pkg = build.rpartition("/")[0]
+            if pkg not in broken and not [r for r in state["fails"] if r["kind"] == "action" and r.get("detail") != "analysis failed" and _unlabelled_in(e, r["label"], workspace)]:
+                broken[pkg] = k
+    groups = {}
     for i, rec in enumerate(state["fails"]):
+        pkg = rec["label"].partition("//")[2].partition(":")[0]
+        if rec["kind"] == "action" and rec.get("detail") == "analysis failed" and pkg in broken:
+            groups.setdefault(pkg, []).append(rec)
+    for pkg in sorted(broken.keys()):
+        k = broken[pkg]
+        naming = [j for j, e in enumerate(errors) if not used[j] and [l for l in header_labels(e.get("header", "")) if l.partition("//")[2].partition(":")[0] == pkg]]
+        if not groups.get(pkg) and not naming:
+            continue
+        used[k] = True
+        found = [(k, errors[k])]
+        stopped = []
+        for rec in groups.get(pkg, []):
+            found += claim(rec["label"]) + aborted_by.pop(rec["label"], [])
+            stopped += [l for l in by_root.pop(rec["label"], []) if l not in stopped]
+        for j, e in enumerate(errors):
+            if not used[j] and [l for l in header_labels(e.get("header", "")) if l.partition("//")[2].partition(":")[0] == pkg]:
+                used[j] = True
+                found.append((j, e))
+        details, lines, _ = from_errors(found)
+        entries.append(dict(entry(0, k, "//" + pkg, "analysis", details, lines, ""), blocked = stopped))
+    for i, rec in enumerate(state["fails"]):
+        if rec["kind"] == "action" and rec.get("detail") == "analysis failed" and rec["label"].partition("//")[2].partition(":")[0] in groups:
+            continue
         if rec["kind"] == "action" and rec.get("detail") == "analysis failed":
-            found = claim(rec["label"])
+            found = claim(rec["label"]) + aborted_by.pop(rec["label"], [])
 
             # A root that failed loading: the errors at its own package's
             # BUILD file (its syntax error) are its, said first.
@@ -6805,6 +6861,9 @@ def failure_summary(state: dict, kept, task_id: str, tty: bool, log_path: str = 
         found = claim(label)
         details, lines, log = from_errors(found)
         entries.append(entry(0, found[0][0] if found else late, label, "", details, lines, log))
+    for left in aborted_by.values():
+        for k, _ in left:
+            used[k] = False
     for i, e in enumerate(errors):
         if not used[i] and e.get("header"):
             used[i] = True

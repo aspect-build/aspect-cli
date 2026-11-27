@@ -711,6 +711,8 @@ def _actions_tests(ctx):
         if not seen or seen[-1] != kinds:
             seen.append(kinds)
     _eq("no part comes and goes as counts move", len(seen), 1)
+    ended = dict(flicker, final = True, running = False, estimated = False, unreported = 0, running_now = 0, total = 2000, done = 2000, local = 1850)
+    _eq("the end ignores the live drop memory", action_results(ended, 26, 2, short = True, memory = dict(memory, dropped = 9)), action_results(ended, 26, 2, short = True))
     two_kinds = dict(flicker, local = 1540, disk = 300, disk_on = True)
     _eq("two hit kinds become one total before any goes", [_visible(r) for r in action_results(two_kinds, 30, 2, short = True)], ["█ 150 ran · ▒ ~1,840 hits", "? 10 unreported · ─ 4 running"])
 
@@ -2516,7 +2518,51 @@ def _impl(ctx: TaskContext) -> int:
     le_state = dict(kinds, counts = dict(new_counts(), failures = ["//le:x", "//ar2:uses"], failed_labels = {"//le:x": True, "//ar2:uses": True}, failed = 2, failed_roots = {"//le:x": True}), root_causes = {"//ar2:uses": ["//le:x"]}, logged_index = None, blocked_cache = None, listed_cache = None, fails = [], kept_errors = {"errors": le_errs, "distinct": 3}, read = None, build = None)
     note_event(le_state, "unconfigured_label", struct(label = "//le:x"), struct(), True)
     got = [_visible(l) for l in failure_summary(le_state, {"errors": le_errs, "distinct": 3}, "t-9", False)]
-    _eq("a loading root: one entry, its syntax error first, its dependent blocked", [l for l in got if l.startswith("✗") or "blocked" in l or l.startswith("  │ syntax")], ["✗ //le:x  analysis · le/BUILD.bazel:2:1", "  │ syntax error at 'newline': expected ,", "  ○ blocked: //ar2:uses", "0 built, 1 failed, 1 blocked · 0 tests passed, 0 failed"])
+    _eq("a loading root: one entry, its syntax error first, its dependent blocked", [l for l in got if l.startswith("✗") or "blocked" in l or l.startswith("  │ syntax")], ["✗ //le  analysis · le/BUILD.bazel:2:1", "  │ syntax error at 'newline': expected ,", "  ○ blocked: //ar2:uses", "0 built, 1 failed, 1 blocked · 0 tests passed, 0 failed"])
+
+    # ws/p1 and p2 (Bazel 7.7.3 and 9.3.3): one broken package's two roots,
+    # //le:x and //le:y, are one entry headed by its syntax error, every
+    # dependent blocked under it; //mt:gone, missing from a package that
+    # parsed, its own root at its first referencing line in Bazel's order.
+    uc_errs = [{"header": h, "body": [], "log": None, "label": None, "target": None} for h in [
+        "ERROR: le/BUILD.bazel:2:1: syntax error at 'newline': expected ,",
+        "ERROR: le/BUILD.bazel: no such target '//le:y': target 'y' not declared in package 'le' defined by le/BUILD.bazel",
+        "ERROR: le/BUILD.bazel: no such target '//le:x': target 'x' not declared in package 'le' defined by le/BUILD.bazel",
+        "ERROR: mt/BUILD.bazel: no such target '//mt:gone': target 'gone' not declared in package 'mt' defined by mt/BUILD.bazel",
+        "ERROR: p1/BUILD.bazel:2:8: no such target '//le:y': target 'y' not declared in package 'le' defined by le/BUILD.bazel and referenced by '//p1:b'",
+        "ERROR: p1/BUILD.bazel:1:8: no such target '//le:x': target 'x' not declared in package 'le' defined by le/BUILD.bazel and referenced by '//p1:a'",
+        "ERROR: p2/BUILD.bazel:1:8: no such target '//le:x': target 'x' not declared in package 'le' defined by le/BUILD.bazel and referenced by '//p2:a'",
+        "ERROR: p2/BUILD.bazel:3:8: no such target '//mt:gone': target 'gone' not declared in package 'mt' defined by mt/BUILD.bazel and referenced by '//p2:e'",
+        "ERROR: p1/BUILD.bazel:3:8: no such target '//mt:gone': target 'gone' not declared in package 'mt' defined by mt/BUILD.bazel and referenced by '//p1:c'",
+    ]]
+    roots = {"//p1:a": ["//le:x"], "//p2:a": ["//le:x"], "//p2:d": ["//le:x"], "//p1:b": ["//le:y"], "//p1:c": ["//mt:gone"], "//p2:e": ["//mt:gone"]}
+    uc = dict(kinds, counts = dict(new_counts(), failures = sorted(roots.keys()), failed_labels = {l: True for l in roots}, failed = len(roots)), root_causes = roots, logged_index = None, blocked_cache = None, listed_cache = None, fails = [], kept_errors = {"errors": uc_errs, "distinct": len(uc_errs)}, read = None, build = None)
+    for label in ("//le:x", "//le:y", "//mt:gone"):
+        note_event(uc, "unconfigured_label", struct(label = label), struct(), True)
+    got = [_visible(l) for l in failure_summary(uc, {"errors": uc_errs, "distinct": len(uc_errs)}, "t-9", False)]
+    _eq("one broken package, one entry; a missing target its own", [l for l in got if l.startswith("✗") or "blocked:" in l or l.startswith("──")], [
+        "── Failures (2) ──",
+        "✗ //le  analysis · le/BUILD.bazel:2:1",
+        "  ○ blocked: //p1:a, //p2:a, //p2:d +1 blocked",
+        "✗ //mt:gone  analysis · p2/BUILD.bazel:3:8",
+        "  ○ blocked: //p1:c, //p2:e",
+    ])
+
+    # The same under --nokeep_going: no Aborted unconfigured labels, the
+    # `no such target` errors under the syntax error, `Analysis of target
+    # … failed; build aborted` the root's that blocked it: 2 entries.
+    nk_errs = [{"header": h, "body": [], "log": None, "label": None, "target": None} for h in [
+        "ERROR: le/BUILD.bazel:2:1: syntax error at 'newline': expected ,",
+        "ERROR: mt/BUILD.bazel: no such target '//mt:gone': target 'gone' not declared in package 'mt' defined by mt/BUILD.bazel",
+        "ERROR: le/BUILD.bazel: no such target '//le:x': target 'x' not declared in package 'le' defined by le/BUILD.bazel",
+        "ERROR: le/BUILD.bazel: no such target '//le:y': target 'y' not declared in package 'le' defined by le/BUILD.bazel",
+        "ERROR: p2/BUILD.bazel:3:8: no such target '//mt:gone': target 'gone' not declared in package 'mt' defined by mt/BUILD.bazel and referenced by '//p2:e'",
+        "ERROR: Analysis of target '//p2:e' failed; build aborted: Analysis failed",
+    ]]
+    nk = dict(uc, counts = dict(new_counts(), failures = ["//p2:e"], failed_labels = {"//p2:e": True}, failed = 1, failed_roots = {"//mt:gone": True}), root_causes = {"//p2:e": ["//mt:gone"]}, logged_index = None, blocked_cache = None, listed_cache = None, fails = [{"kind": "action", "label": "//mt:gone", "detail": "analysis failed", "files": [("error", ("no such target '//mt:gone': target 'gone' not declared in package 'mt' defined by mt/BUILD.bazel", False))], "output": "", "success": False}], kept_errors = {"errors": nk_errs, "distinct": len(nk_errs)})
+    got = [_visible(l) for l in failure_summary(nk, {"errors": nk_errs, "distinct": len(nk_errs)}, "t-9", False)]
+    _eq("--nokeep_going: 2 entries", [l for l in got if l.startswith("✗") or l.startswith("──")], ["── Failures (2) ──", "✗ //le  analysis · le/BUILD.bazel:2:1", "✗ //mt:gone  analysis · p2/BUILD.bazel:3:8"])
+    _eq("the build-aborted line with its root", "Analysis of target '//p2:e' failed; build aborted: Analysis failed" in "\n".join(got), True)
 
     # A signal-killed action (//f:killed, Bazel 9.3.3): `killed` where the
     # exit code goes, and no command line quoted.
