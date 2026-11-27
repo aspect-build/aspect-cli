@@ -6700,7 +6700,9 @@ def console_ties(state: dict) -> dict:
       '<target>'` of the first target naming it alone, quoted without that
       end, and its location.
 
-    Each line tied, saying exactly what an entry quotes, or naming a listed
+    Each line tied, saying exactly what an entry quotes (`package contains
+    errors: <pkg>: <text>` too, where an entry of that package quotes
+    `<text>`, or, with no text, says its package has an error), or naming a listed
     target as what failed (`… <label> failed: …`, `Analysis of target
     '<label>' … failed`), is claimed, with the output an action's tie spans; every
     other one but Bazel's boilerplate (`_BOILERPLATE`) is among `others`,
@@ -6859,6 +6861,28 @@ def console_ties(state: dict) -> dict:
             for k in by["said"].get(line, []):
                 claimed[k] = True
         result["targets"][label] = out
+
+    # Bazel's `package contains errors: <pkg>: <text>` repeats a line an
+    # entry of that package quotes; with no text, it says what an entry of
+    # that package Bazel names as its own root cause says already.
+    quoted = {}
+    for rec in fails:
+        if rec["kind"] != "target":
+            continue
+        pkg = rec["label"].partition("//")[2].partition(":")[0]
+        said = quoted.setdefault(pkg, {})
+        for line in (result["targets"].get(rec["label"]) or {}).get("lines", []):
+            said[line] = True
+        first = rec.get("description", "").partition("\n")[0]
+        if first:
+            said[first] = True
+        if not rec.get("description") and causes.get(rec["label"]) == [rec["label"]]:
+            said[""] = True
+    for k, h in enumerate(headers):
+        if h["said"].startswith("package contains errors: "):
+            pkg, _, rest = h["said"][len("package contains errors: "):].partition(": ")
+            if rest in quoted.get(pkg, {}):
+                claimed[k] = True
 
     # A line naming a listed target as what failed (`Executing genrule
     # //an:missing failed: 1 input file(s) do not exist`, `Analysis of

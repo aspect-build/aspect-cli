@@ -26,8 +26,6 @@ exit 1
   ○ blocked: //q:on_at
 
 ── Other errors from Bazel ──
-ERROR: package contains errors: at2: //at2:t1: expected value of type 'list(output)' for
-         attribute 'outs' in 'genrule' rule, but got "a.txt" (string)
 ERROR: at/BUILD.bazel:1:8: //at:t: expected value of type 'list(output)' for attribute 'outs' in
          'genrule' rule, but got "notalist.txt" (string)
 ERROR: at/BUILD.bazel:1:8: //at:t: missing value for mandatory attribute 'outs' in 'genrule' rule
@@ -54,6 +52,5 @@ All of it: aspect history show t-replay
 ○ //q3:u1  blocked by //at2:ok
 ○ //q:on_at  blocked by //at:ok
 ○ //q3:u2  blocked by //at2:t2
-! package contains errors: at2: //at2:t1: expected value of type 'list(output)'…'genrule' rule, but got "a.txt" (string)
 ! at/BUILD.bazel:1:8: //at:t: expected value of type 'list(output)' for attribu…e' rule, but got "notalist.txt" (string)
 ! at/BUILD.bazel:1:8: //at:t: missing value for mandatory attribute 'outs' in 'genrule' rule
