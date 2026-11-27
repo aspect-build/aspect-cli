@@ -114,6 +114,11 @@ pub trait LineProcessor: Send {
     fn reads_raw(&self) -> bool {
         false
     }
+
+    /// For a stage that [`LineProcessor::reads_raw`]: the last record, given
+    /// as ending in a bare `\r` at the end of a read, ended in `\r\n`, whose
+    /// `\n` the next read brought.
+    fn crlf_after_cr(&mut self) {}
 }
 
 /// The running reader thread. Joined after the child has exited.
@@ -443,6 +448,9 @@ impl Splitter {
         while i < carry.len() {
             let b = carry[i];
             if b == b'\n' && start == i && self.after_cr.is_some() {
+                for p in self.processors.iter_mut().filter(|p| p.reads_raw()) {
+                    p.crlf_after_cr();
+                }
                 if self.after_cr.take() == Some(false) {
                     if self.screen.is_some() {
                         self.render(b"\n", None);

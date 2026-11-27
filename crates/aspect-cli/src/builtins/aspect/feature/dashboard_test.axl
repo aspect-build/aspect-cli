@@ -38,46 +38,65 @@ def _eq(label, got, want):
         fail("%s: got %r, want %r" % (label, got, want))
 
 def _held_line_reads(ctx):
-    """Telling a held last line reads, of each successful action's output
-    that ends in a newline, its last bytes alone (a character's), once, however many of
-    Bazel's errors follow an output; of one that does not, its end, as far
-    as the held line is long, once for each line it is checked against; each
-    output's log is found once."""
+    """Telling a held last line reads, of each successful action's log
+    that ends in a newline, its last bytes alone (a character's), once,
+    however many of Bazel's errors follow an output; of one that does not,
+    its end, as far as the held line is long, once for each line it is
+    checked against; each output's logs are found once. A held line after
+    a line longer than that read is the tool's too, and each stream Bazel
+    relays holds its own."""
     files = {}
     outputs = []
+
+    def output(name, **logs):
+        outputs.append({"kind": "action", "label": "//o:" + name, "detail": "Work", "files": [(stream, "file:///fx/" + path) for stream, path in logs.items()], "output": name, "success": True})
+
     for i in range(200):
-        path = "/fx/out-%d" % i
-        files[path] = ("tool line %d\n" % i) * 50
-        outputs.append({"kind": "action", "label": "//o:o%d" % i, "detail": "Work", "files": [("stderr", "file://" + path)], "output": "o%d" % i, "success": True})
+        files["/fx/out-%d" % i] = ("tool line %d\n" % i) * 50
+        output("o%d" % i, stderr = "out-%d" % i)
     files["/fx/open"] = "open out\n\x1b[31m\x1b[1mERROR: \x1b[0mheld open"
-    outputs.append({"kind": "action", "label": "//o:open", "detail": "Work", "files": [("stderr", "file:///fx/open")], "output": "open", "success": True})
+    output("open", stderr = "open")
+    files["/fx/longprev"] = "a" * 600 + "\n\x1b[31m\x1b[1mERROR: \x1b[0mheld after a long line"
+    output("longprev", stderr = "longprev")
+    files["/fx/erropen-out"] = "out line ends\n"
+    files["/fx/erropen-err"] = "\x1b[31m\x1b[1mERROR: \x1b[0mheld on stderr"
+    output("erropen", stdout = "erropen-out", stderr = "erropen-err")
     reads = []
 
+    # As `std.fs.try_read_tail` reads: a cut text starts at a line's start,
+    # else, with no whole line in it, at a character's.
     def read(path, n):
         reads.append((path, n))
         if path not in files:
             return None
         text = files[path]
-        return (text[max(0, len(text) - n):], max(0, len(text) - n))
+        start = max(0, len(text) - n)
+        if start > 0 and text[start - 1] != "\n":
+            nl = text.find("\n", start)
+            if nl >= 0 and nl + 1 < len(text):
+                start = nl + 1
+        return (text[start:], start)
 
     blocks = []
     for i in range(30):
         # A header naming no label, then Bazel's own coloured error.
         blocks.append({"kind": "from", "text": "\r\x1b[1A\x1b[K\x1b[32mINFO: \x1b[0mFrom Doing work %d:\n" % i, "body_len": 12, "last_line": "tool line 0\n"})
         blocks.append({"kind": "tail", "text": "\r\x1b[1A\x1b[K\x1b[31m\x1b[1mERROR: \x1b[0mpkg/BUILD:%d:1: bazel's own %d\n" % (i + 1, i)})
-    blocks.append({"kind": "from", "text": "\r\x1b[1A\x1b[K\x1b[32mINFO: \x1b[0mFrom Doing more work:\n", "body_len": 9, "last_line": "open out\n"})
-    blocks.append({"kind": "tail", "text": "\r\x1b[1A\x1b[K\x1b[31m\x1b[1mERROR: \x1b[0mheld open\n"})
+    for held in ("held open", "held after a long line", "held on stderr"):
+        blocks.append({"kind": "from", "text": "\r\x1b[1A\x1b[K\x1b[32mINFO: \x1b[0mFrom Doing more work:\n", "body_len": 9, "last_line": "open out\n"})
+        blocks.append({"kind": "tail", "text": "\r\x1b[1A\x1b[K\x1b[31m\x1b[1mERROR: \x1b[0m%s\n" % held})
     state = summary_state(read, ctx.std.env, ctx.std.re.compile(ANSI))
-    state.update(outputs = outputs, building = False, ended = True, bazel_errors = {"blocks": blocks, "not_kept": 0, "stdout": False})
+    state.update(outputs = outputs, building = False, ended = True, bazel_errors = {"blocks": blocks, "not_kept": 0, "stdout": True})
     tab = dict(state, log_path = "", bazel_exit = 0, focus = "console", selected = 0, expand_failures = True, excerpts = {}, ties_cache = None, entries_cache = None)
     ansi = ctx.std.re.compile(ANSI)
     others = [r for r in [ansi.replace(r, "") for r in failure_rows(tab, 400, 120)] if r.startswith("! ")]
-    _eq("held: Bazel's own errors listed, the tool's held line not", (len(others), [r for r in others if "held open" in r]), (30, []))
-    closed = [r for r in reads if r[0].startswith("/fx/out-")]
-    _eq("held: an output ending in a newline read for its last bytes alone", [r for r in closed if r[1] > 4], [])
-    _eq("held: and once, found once", (len([r for r in closed if r[1] > 0]), len(closed) <= 2 * 200), (200, True))
-    opened = [r[1] for r in reads if r[0] == "/fx/open" and r[1] > 4]
-    _eq("held: the open one read from its end, once for each line, as far as that line is long", (len(opened), [n for n in opened if n > 256]), (31, []))
+    _eq("held: Bazel's own errors listed, the tools' held lines not", (len(others), [r for r in others if "held " in r]), (30, []))
+    closed = [r for r in reads if r[0].startswith("/fx/out-") or r[0] == "/fx/erropen-out"]
+    _eq("held: a log ending in a newline read for its last bytes alone", [r for r in closed if r[1] > 4], [])
+    _eq("held: and once, found once", (len([r for r in closed if r[1] > 0]), len(closed) <= 2 * 201), (201, True))
+    for path in ("/fx/open", "/fx/longprev", "/fx/erropen-err"):
+        opened = [r[1] for r in reads if r[0] == path and r[1] > 4]
+        _eq("held: %s read from its end, at most once a line, as far as that line is long" % path, (len(opened) <= 33, [n for n in opened if n > 256]), (True, []))
 
 def _screen(ctx, log, **kw):
     """A dashboard's whole state, as the feature keeps it, over `log`."""

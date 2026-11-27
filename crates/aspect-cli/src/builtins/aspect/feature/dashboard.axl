@@ -6672,15 +6672,12 @@ def _relayed(text: str, at: int, lead: str, pieces: list, tails: dict) -> int:
 # the tool's (`_absorb_tails`).
 _MAX_PLAIN_REST = 64 * 1024
 
-def _last_piece(state: dict, rec: dict, stdout: bool):
-    """The path of the log Bazel relays last of a successful action's output:
-    its stdout where the console carried Bazel's stdout too (`stdout`) and
-    it wrote some, else its stderr; None for none."""
+def _relayed_logs(state: dict, rec: dict, stdout: bool) -> list:
+    """The paths of the logs Bazel relays of a successful action's output:
+    its stderr, and its stdout where the console carried Bazel's stdout too
+    (`stdout`)."""
     paths = dict(_action_logs(state, rec))
-    for name in (("stdout", "stderr") if stdout else ("stderr",)):
-        if name in paths:
-            return paths[name]
-    return None
+    return [paths[name] for name in (("stderr", "stdout") if stdout else ("stderr",)) if name in paths]
 
 def _absorb_tails(state: dict, text: str, blocks: list, froms: list, spans: list, stdout: bool, plain: bool):
     """Extend `spans` over the blocks after an action's `INFO: From` output
@@ -6693,14 +6690,14 @@ def _absorb_tails(state: dict, text: str, blocks: list, froms: list, spans: list
     such action is enough, and which it is does not matter: the lines are a
     tool's, not Bazel's.
 
-    - The line after the output where it is the output's last line with no
+    - The line after the output where it is a log's last line with no
       newline, which Bazel writes after its next redraw (a tail) or, without
-      colour, with a newline added: only an output that does not end in a
-      newline has one, so each successful action's last log is found and
-      read for its last bytes alone (a character), once, and only one
-      that ends otherwise is read
-      further, from its end, as far as that line is long. It is the tool's
-      where the log's last line is exactly that line.
+      colour, with a newline added: only a log that does not end in a
+      newline has one, and each stream Bazel relays holds its own, so each
+      successful action's relayed logs are found and read for their last
+      bytes alone (a character), once, and only one that ends otherwise is
+      read further, from its end, as far as that line is long. It is the
+      tool's where that log's last line is exactly that line.
     - Without colour (`plain`, `--color=no`), where a tool's own `ERROR:`
       lines read as Bazel's: the blocks after the output, up to a line's
       end, are the tool's where the output, escapes stripped as Bazel strips
@@ -6716,13 +6713,16 @@ def _absorb_tails(state: dict, text: str, blocks: list, froms: list, spans: list
         by_label.setdefault(rec["label"], []).append(k)
     open_logs = {}
 
-    # The log an output ends with, where it ends without a newline: found,
-    # and its last bytes read, once.
-    def open_log(k):
+    # An output's relayed logs that end without a newline: found, and their
+    # last bytes read, once.
+    def open_logs_of(k):
         if k not in open_logs:
-            path = _last_piece(state, outputs[k], stdout)
-            got = state["read"](path, 4) if path != None else None
-            open_logs[k] = path if got != None and got[0] != "" and not got[0].endswith("\n") else None
+            found = []
+            for path in _relayed_logs(state, outputs[k], stdout):
+                got = state["read"](path, 4)
+                if got != None and got[0] != "" and not got[0].endswith("\n"):
+                    found.append(path)
+            open_logs[k] = found
         return open_logs[k]
 
     for i, header, body_len, last in froms:
@@ -6740,20 +6740,22 @@ def _absorb_tails(state: dict, text: str, blocks: list, froms: list, spans: list
         held = text[at:stop if stop >= 0 else end]
         found = False
         for k in named or range(len(outputs)):
-            path = open_log(k)
-            if path == None:
-                continue
-            got = state["read"](path, 4 * len(held) + 4)
-            if got == None:
-                continue
-            line = got[0].rpartition("\n")[2]
-            if plain and ansi != None:
-                line = ansi.replace(line, "")
-            if line == held and ("\n" in got[0] or got[1] == 0):
-                spans.append((start, stop + 1 if stop >= 0 else end))
-                found = True
+            for path in open_logs_of(k):
+                # From the last line's start where it fits, else from a
+                # character's in it: longer than `held` then.
+                got = state["read"](path, 4 * len(held) + 4)
+                line = got[0].rpartition("\n")[2] if got != None else None
+                if line != None and plain and ansi != None:
+                    line = ansi.replace(line, "")
+                if line == held:
+                    spans.append((start, stop + 1 if stop >= 0 else end))
+                    found = True
+                    break
+            if found:
                 break
-        if found or not plain or not named:
+
+        # A last line past what the console stage keeps is kept as none.
+        if found or not plain or not named or (body_len > 0 and last == ""):
             continue
 
         # Without colour: the error blocks after the output, up to a line's

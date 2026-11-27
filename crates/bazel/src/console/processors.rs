@@ -353,13 +353,15 @@ pub struct Observations {
 /// What [`crate::console::report::CollectErrors`] kept of the console, in
 /// the order Bazel wrote it: each of Bazel's own `ERROR:` messages with
 /// what followed it before Bazel's next message or redraw, each `INFO:
-/// From …:` block of an action's output likewise, and each coloured
-/// `ERROR:` right after an output ([`BlockKind::Tail`]); and how many bytes
-/// of them its caps left out.
+/// From …:` header of an action's output with its body's length and last
+/// line, and each record that may be an output's held last line
+/// ([`BlockKind::Tail`]); how many bytes of Bazel's own its caps left out
+/// (`not_kept`), and how many `INFO: From` blocks (`froms_not_kept`).
 #[derive(Debug, Clone, Default)]
 pub struct BazelBlocks {
     pub blocks: Vec<Block>,
     pub not_kept: u64,
+    pub froms_not_kept: u64,
 }
 
 /// One kept block: what starts it ([`BlockKind`]), and its text: its
