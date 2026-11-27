@@ -142,16 +142,37 @@ def _union_kinds(hooks: list[ExecLogHook]) -> list[str] | None:
             out[kind] = True
     return sorted(out) if out else None
 
+def _takes_files(hook: ExecLogHook) -> bool:
+    return not hook.kinds or "file" in hook.kinds
+
+def _union_file_paths(hooks: list[ExecLogHook]) -> list[str] | None:
+    """The `file` entries' paths the runtime must deliver: the union of what
+    every hook taking files asked for (`file_paths`), or None for every file,
+    which one asking for all of them makes it, as with `_union_kinds`."""
+    out = {}
+    for hook in hooks:
+        if not _takes_files(hook):
+            continue
+        if not hook.file_paths:
+            return None
+        for path in hook.file_paths:
+            out[path] = True
+    return sorted(out) if out else None
+
 def _is_exact(hooks: list[ExecLogHook], kinds: list[str] | None) -> bool:
     """Whether the runtime's filter is already exactly right for every hook, so
     dispatch can skip re-checking each entry's kind in AXL.
 
     True when no hook filters, so every entry is wanted by everyone; or when every
-    hook asked for the same set, which is then the set the runtime was given.
+    hook asked for the same set, which is then the set the runtime was given, and
+    every hook taking files for the same paths (`_union_file_paths`).
     False when hooks disagree, because the union is wider than the narrowest hook
     asked for and delivering it unchecked would hand that hook kinds it never
     asked for — an unfiltered auditor beside a `kinds = ["spawn"]` hook is the
     common shape, and `_union_kinds` reports None for it."""
+    files = _union_file_paths(hooks)
+    if [h for h in hooks if _takes_files(h) and sorted(h.file_paths) != (files or [])]:
+        return False
     if kinds == None:
         return all([not hook.kinds for hook in hooks])
     for hook in hooks:
@@ -186,7 +207,13 @@ def _open(bazel_trait: BazelTrait) -> struct:
         return struct(sinks = sinks, entries = None, hooks = [], exact = True)
 
     kinds = _union_kinds(hooks)
-    entries = bazel.execution_log._hook_iterator() if kinds == None else bazel.execution_log._hook_iterator(kinds = kinds)
+    files = _union_file_paths(hooks)
+    wanted = {}
+    if kinds != None:
+        wanted["kinds"] = kinds
+    if files != None:
+        wanted["file_paths"] = files
+    entries = bazel.execution_log._hook_iterator(**wanted)
     return struct(
         sinks = sinks + [entries],
         entries = entries,
@@ -194,9 +221,13 @@ def _open(bazel_trait: BazelTrait) -> struct:
         exact = _is_exact(hooks, kinds),
     )
 
-def _wants(hook: ExecLogHook, kind: str) -> bool:
-    """Whether `hook` asked for entries of `kind`. `kinds = []` means all."""
-    return not hook.kinds or kind in hook.kinds
+def _wants(hook: ExecLogHook, kind: str, path: str | None = None) -> bool:
+    """Whether `hook` asked for entries of `kind`, and of a `file` entry at
+    `path`, for one there. `kinds = []` means all, as `file_paths = []`
+    means every file."""
+    if hook.kinds and kind not in hook.kinds:
+        return False
+    return kind != "file" or path == None or not hook.file_paths or [p for p in hook.file_paths if p in path] != []
 
 def _fire(ctx: TaskContext, h: struct, entry) -> None:
     """Hand one entry to every hook that asked for its kind."""
@@ -205,11 +236,11 @@ def _fire(ctx: TaskContext, h: struct, entry) -> None:
             hook.on_entry(ctx, entry)
         return
 
-    # Hooks disagree about kinds, so the runtime's union over-delivers for some
+    # Hooks disagree about kinds or files, so the runtime's union over-delivers for some
     # of them. One `type()` per entry, not one per hook.
     kind = type(entry.type)
     for hook in h.hooks:
-        if _wants(hook, kind):
+        if _wants(hook, kind, entry.type.path if kind == "file" else None):
             hook.on_entry(ctx, entry)
 
 def _pump(ctx: TaskContext, h: struct) -> int:
@@ -244,6 +275,7 @@ bazel_exec_log = namespace(
     Hook = ExecLogHook,
 )
 
+testonly_union_file_paths = _union_file_paths
 testonly_union_kinds = _union_kinds
 testonly_is_exact = _is_exact
 testonly_fire = _fire

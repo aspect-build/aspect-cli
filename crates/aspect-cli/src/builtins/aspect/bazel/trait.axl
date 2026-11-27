@@ -85,7 +85,9 @@ def default_retry(code: int) -> bool:
 # become Starlark values (`bazel.execution_log.iterator(kinds = ...)`), which is
 # the difference between a dispatch that costs nothing and one that adds seconds
 # to the end of every build. `[]` means every kind, and is only the right answer
-# for a hook that genuinely reads all of them.
+# for a hook that genuinely reads all of them. `file_paths` narrows the `file`
+# entries the same way, to those whose path contains one of its strings
+# (`["/testlogs/"]` for a test's logs); `[]` means every file.
 #
 # `on_entry` receives `(ctx, entry)` where `entry` is a
 # `bazel.build.execution_log.ExecLogEntry`: `entry.id` plus `entry.type`, the
@@ -132,6 +134,7 @@ def default_retry(code: int) -> bool:
 ExecLogHook = record(
     on_entry = field(typing.Callable[[TaskContext, typing.Any], None]),
     kinds = field(list[str], default = []),
+    file_paths = field(list[str], default = []),
 )
 
 # Fired by every built-in task that drives Bazel: build, test, run, lint,

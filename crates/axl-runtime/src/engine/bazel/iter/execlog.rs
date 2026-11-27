@@ -1,7 +1,8 @@
 //! [`ExecLogIter`] backs `bazel.execution_log.iterator(kinds = [...])`: created
 //! before the spawn and passed in `execution_log = [...]`. Its `kinds=` filter
 //! runs here in Rust, so a consumer that only wants spawns does not pay a
-//! Starlark allocation per file in the build.
+//! Starlark allocation per file in the build, and so does its `file_paths=`
+//! filter, for one that wants only some of the files.
 //!
 //! A bound handle is a subscriber the producer blocks for, so `build.wait()`
 //! releases every one still held before joining the reader, which is what
@@ -120,6 +121,10 @@ pub struct ExecLogIter {
     /// `None` means no filter — every entry yields.
     #[allocative(skip)]
     kinds: Option<Arc<HashSet<i32>>>,
+    /// Of the `file` entries, only those whose path contains one of these;
+    /// `None` for every one.
+    #[allocative(skip)]
+    file_paths: Option<Arc<Vec<String>>>,
     /// Starts [`Subscription::pending`]: this handle exists before the build it
     /// will be bound to.
     #[allocative(skip)]
@@ -147,10 +152,18 @@ impl ExecLogIter {
     pub fn with_hook(signals: Arc<Signals>, kinds: Option<HashSet<i32>>, hook: bool) -> Self {
         Self {
             kinds: kinds.map(Arc::new),
+            file_paths: None,
             sub: Subscription::pending(),
             signals,
             hook,
         }
+    }
+
+    /// This handle, its `file` entries only those whose path contains one of
+    /// `paths` (every one when None).
+    pub fn with_file_paths(mut self, paths: Option<Vec<String>>) -> Self {
+        self.file_paths = paths.map(Arc::new);
+        self
     }
 
     /// Whether the handle feeds `exec_log_event` hooks, not a task's own loop.
@@ -169,9 +182,15 @@ impl ExecLogIter {
     }
 
     fn wants(&self, entry: &ExecLogEntry) -> bool {
-        match self.kinds.as_ref() {
+        let kind = match self.kinds.as_ref() {
             Some(kinds) => entry_kind_in(entry, kinds),
             None => true,
+        };
+        kind && match (self.file_paths.as_ref(), entry.r#type.as_ref()) {
+            (Some(paths), Some(exec_log_entry::Type::File(f))) => {
+                paths.iter().any(|p| f.path.contains(p.as_str()))
+            }
+            _ => true,
         }
     }
 }
@@ -431,6 +450,41 @@ mod tests {
             }
         }
         assert_eq!(labels, vec!["//a:a".to_string(), "//b:b".to_string()]);
+    }
+
+    /// A hook that wants only a test's logs is handed no other file, and
+    /// every other kind it asked for.
+    #[test]
+    fn try_pop_skips_files_off_the_paths_asked_for() {
+        let (sender, recv) = bounded::<ExecLogEntry>(16);
+        let iter = ExecLogIter::new(Signals::new(), Some([3, 7].into_iter().collect()))
+            .with_file_paths(Some(vec!["/testlogs/".to_string()]));
+        iter.bind(recv).unwrap();
+        let log = entry(
+            9,
+            exec_log_entry::Type::File(exec_log_entry::File {
+                path: "bazel-out/k8/testlogs/t/test.log".into(),
+                digest: None,
+            }),
+        );
+        for e in [file(1), log, spawn(3, "//a:a"), file(4)] {
+            sender.send(e).unwrap();
+        }
+        let mut got = vec![];
+        while let Some(e) = pop(&iter) {
+            match e.r#type {
+                Some(exec_log_entry::Type::Spawn(s)) => got.push(s.target_label),
+                Some(exec_log_entry::Type::File(f)) => got.push(f.path),
+                other => panic!("filter let through {other:?}"),
+            }
+        }
+        assert_eq!(
+            got,
+            vec![
+                "bazel-out/k8/testlogs/t/test.log".to_string(),
+                "//a:a".to_string()
+            ]
+        );
     }
 
     #[test]

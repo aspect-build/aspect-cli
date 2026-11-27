@@ -1753,7 +1753,9 @@ fn register_execlog_sinks(globals: &mut GlobalsBuilder) {
     /// `type(entry.type)` returns — before the entry becomes a Starlark value. This
     /// is worth reaching for: a log holds one entry per spawn *plus* one per file,
     /// directory, input set and runfiles tree, so `kinds = ["spawn"]` is commonly a
-    /// few percent of the stream.
+    /// few percent of the stream. Optional `file_paths=` keeps of the `file`
+    /// entries only those whose path contains one of its strings
+    /// (`file_paths = ["/testlogs/"]` for a test's logs), in Rust too.
     ///
     /// The handle must be drained before `build.wait()`, which releases any still-bound
     /// handle so a task that forgets cannot hang. Because Bazel writes the log to a
@@ -1776,9 +1778,10 @@ fn register_execlog_sinks(globals: &mut GlobalsBuilder) {
         #[starlark(require = named, default = NoneOr::None)] kinds: NoneOr<
             UnpackList<values::Value<'v>>,
         >,
+        #[starlark(require = named, default = NoneOr::None)] file_paths: NoneOr<UnpackList<String>>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<iter::ExecLogIter> {
-        exec_log_iterator(kinds, false, eval)
+        exec_log_iterator(kinds, file_paths, false, eval)
     }
 
     /// `iterator`, marked as the one `bazel/exec_log.axl` feeds
@@ -1790,19 +1793,32 @@ fn register_execlog_sinks(globals: &mut GlobalsBuilder) {
         #[starlark(require = named, default = NoneOr::None)] kinds: NoneOr<
             UnpackList<values::Value<'v>>,
         >,
+        #[starlark(require = named, default = NoneOr::None)] file_paths: NoneOr<UnpackList<String>>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<iter::ExecLogIter> {
-        exec_log_iterator(kinds, true, eval)
+        exec_log_iterator(kinds, file_paths, true, eval)
     }
 }
 
-/// An execution-log handle for `kinds` (every kind when None), `hook` if
-/// the `exec_log_event` hooks' (see `ExecLogIter::is_hook`).
+/// An execution-log handle for `kinds` (every kind when None), its `file`
+/// entries only those whose path contains one of `file_paths` (every one
+/// when None), `hook` if the `exec_log_event` hooks' (see
+/// `ExecLogIter::is_hook`).
 fn exec_log_iterator<'v>(
     kinds: NoneOr<UnpackList<values::Value<'v>>>,
+    file_paths: NoneOr<UnpackList<String>>,
     hook: bool,
     eval: &mut Evaluator<'v, '_, '_>,
 ) -> anyhow::Result<iter::ExecLogIter> {
+    let file_paths = match file_paths {
+        NoneOr::None => None,
+        NoneOr::Other(list) if list.items.is_empty() => {
+            anyhow::bail!(
+                "file_paths=[] is not valid; omit `file_paths` to receive every file entry"
+            )
+        }
+        NoneOr::Other(list) => Some(list.items),
+    };
     let kinds = match kinds {
         NoneOr::None => None,
         NoneOr::Other(list) => {
@@ -1818,11 +1834,10 @@ fn exec_log_iterator<'v>(
     };
     // The run's signals travel with the handle, so blocking iteration over it
     // stays a safe point on a cancel (see `ExecLogIter::iter_next`).
-    Ok(iter::ExecLogIter::with_hook(
-        Env::from_eval(eval)?.signals.clone(),
-        kinds,
-        hook,
-    ))
+    Ok(
+        iter::ExecLogIter::with_hook(Env::from_eval(eval)?.signals.clone(), kinds, hook)
+            .with_file_paths(file_paths),
+    )
 }
 
 #[starlark_module]

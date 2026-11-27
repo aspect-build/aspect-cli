@@ -742,7 +742,7 @@ def _dashboard_impl(ctx: FeatureContext):
             count_spawn(state["counts"], what)
         note_spawn_time(state, _get(entry, "type"))
 
-    t.exec_log_event.append(ExecLogHook(on_entry = _spawn, kinds = ["spawn", "file"]))
+    t.exec_log_event.append(ExecLogHook(on_entry = _spawn, kinds = ["spawn", "file"], file_paths = ["/testlogs/"]))
     t.bazel_attempt_end.append(_attempt_end)
     ctx.traits[Phases].task_update.append(_update)
     ctx.hooks.pre_task(_pre)
