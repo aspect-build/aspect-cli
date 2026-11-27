@@ -4,9 +4,10 @@
 //!   rules emit tips, and Bazel's raw log is kept in a file the summary
 //!   names; disabled, the console is Bazel's own.
 //! * `output_intercept` hooks answer the lines an `intercept` stage holds. Its
-//!   timeout is far longer than the test, so a line nothing answered would
-//!   show up unchanged and late: both the rewritten output and the elapsed
-//!   time say the drain happened.
+//!   timeout is far longer than a line takes to be answered, so a line nothing
+//!   answered would show up unchanged and late: the rewritten output, and how
+//!   long each held line took from basil's write to the CLI's output, say the
+//!   drain happened.
 //! * A cancelled build still forwards what Bazel prints while it winds down.
 
 #![cfg(unix)]
@@ -17,9 +18,10 @@ use common::{aspect_cli, base_env, basil_bin};
 use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
 use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-/// The `intercept` stage's `timeout_ms`, as a bound the run must stay under.
+/// The `intercept` stage's `timeout_ms`. A held line answered by a hook is
+/// out in well under half of it; one nothing answered, only after all of it.
 const INTERCEPT_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// The config a case runs under. `no_bes` clears the trait's `build_event`
@@ -98,24 +100,65 @@ fn aspect(root: &Path, task: &str) -> Command {
     cmd
 }
 
+fn epoch_ms() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0)
+}
+
 /// Run `aspect build` in a fresh workspace; return its stderr and the hooks'
 /// report: the ids the first hook saw, `;`, then those the last one saw.
+///
+/// Each line an intercept holds (`password=…`, answered; `INFO: Build…`,
+/// kept) is timed from basil's write of it (`BASIL_STDERR_STAMPS`) to when
+/// the CLI's stderr has it: the hold alone, never the CLI's start-up or
+/// exit, or anything else the run waits on.
 fn run(no_bes: bool) -> (String, String) {
     let dir = workspace("config.axl", |root| {
         config(&root.join("report.txt").display().to_string(), no_bes)
     });
     let report = dir.path().join("report.txt");
+    let stamps = dir.path().join("basil-stderr.txt");
 
-    let start = Instant::now();
-    let out = aspect(dir.path(), "build")
-        .output()
+    let mut child = aspect(dir.path(), "build")
+        .env("BASIL_STDERR_STAMPS", &stamps)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
         .expect("running aspect build");
-    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-    assert!(
-        start.elapsed() < INTERCEPT_TIMEOUT,
-        "a held line waited out its timeout:\n{stderr}"
-    );
-    assert!(out.status.success(), "aspect build failed:\n{stderr}");
+    let mut arrived: Vec<(u128, String)> = Vec::new();
+    for line in BufReader::new(child.stderr.take().unwrap()).lines() {
+        arrived.push((epoch_ms(), line.unwrap_or_default()));
+    }
+    let status = child.wait().expect("waiting for aspect build");
+    let stderr: String = arrived.iter().map(|(_, l)| format!("{l}\n")).collect();
+    assert!(status.success(), "aspect build failed:\n{stderr}");
+
+    let written = std::fs::read_to_string(&stamps).unwrap_or_default();
+    for (held, shown) in [
+        ("password=hunter2 leaked", "(password elided)"),
+        (
+            "INFO: Build completed successfully",
+            "INFO: Build completed successfully",
+        ),
+    ] {
+        let at: u128 = written
+            .lines()
+            .find_map(|l| l.split_once('\t').filter(|(_, line)| *line == held))
+            .and_then(|(ms, _)| ms.parse().ok())
+            .unwrap_or_else(|| panic!("basil never wrote {held:?}: {written}"));
+        let out = arrived
+            .iter()
+            .find(|(_, l)| l.contains(shown))
+            .map(|(ms, _)| *ms)
+            .unwrap_or_else(|| panic!("{shown:?} never came out:\n{stderr}"));
+        let held_for = Duration::from_millis(out.saturating_sub(at) as u64);
+        assert!(
+            held_for < INTERCEPT_TIMEOUT / 2,
+            "{held:?} was held {held_for:?}, waiting out its timeout:\n{stderr}"
+        );
+    }
     let seen = std::fs::read_to_string(&report).unwrap_or_default();
     (stderr, seen.trim().to_string())
 }

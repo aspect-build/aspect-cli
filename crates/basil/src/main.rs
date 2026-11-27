@@ -118,6 +118,22 @@ fn release() -> String {
     env::var("BASIL_RELEASE").unwrap_or_else(|_| "9.0.0".to_string())
 }
 
+/// When a test asked for it (`BASIL_STDERR_STAMPS`), append when `line` is
+/// written to stderr, as milliseconds since the epoch, a tab and the line, so
+/// the test can time what the CLI does with it from basil's write on.
+fn stamp_stderr_line(line: &str) {
+    let Some(path) = env::var_os("BASIL_STDERR_STAMPS") else {
+        return;
+    };
+    let ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
+        let _ = file.write_all(format!("{ms}\t{line}\n").as_bytes());
+    }
+}
+
 /// Append this invocation's argv to `BASIL_ARGV_LOG`, one line per invocation,
 /// when a test asked for it.
 ///
@@ -223,6 +239,7 @@ fn run_build(args: &[String], verb: &str) {
         .is_some_and(|a| a == "--curses=yes");
     let mut drawn = false;
     for line in s.stderr_lines {
+        stamp_stderr_line(line);
         if std::mem::take(&mut drawn) {
             eprint!("\r\x1b[1A\x1b[K");
         }
