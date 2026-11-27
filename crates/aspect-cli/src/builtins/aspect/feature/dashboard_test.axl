@@ -698,6 +698,7 @@ def _actions_tests(ctx):
         (big9, 35, 2, False, ["█ 5,705 ran · ╳ 4 failed", "▒ 3,136 hits · ○ 411 blocked"]),
     ]:
         _eq("drop order at %d cells, %d rows" % (room, rows), [_visible(r) for r in action_results(split, room, rows, short = room < 60, stack = stack)], want)
+
     # Live, with the build's `memory`: a part gone stays gone while the
     # pane's size holds, and one kept doesn't go for a digit (r51m_live60:
     # running and unreported took turns).
