@@ -226,6 +226,7 @@ load("@aspect//tips.axl", "TipsTrait")
 load("../private/lib/agent.axl", "under_agent")
 load("../private/lib/bazel_results.axl", "bb_clientd_root")
 load("../private/lib/environment.axl", "warn")
+load("../private/lib/failure_records.axl", "failure_records")
 load("../private/lib/failures.axl", "failures")
 load("../private/lib/task_template_args.axl", "TASK_PRESET_PRECEDENCE", "task_template_args")
 load("../private/lib/term_text.axl", "term_text")
@@ -287,12 +288,12 @@ def _console_impl(ctx: FeatureContext):
     summary = [None]
 
     def _fresh(task_ctx):
-        return failures.new_state(task_ctx.std.fs.try_read_tail, bb_clientd_root(task_ctx.std.env), task_ctx.std.re.compile(term_text.ANSI))
+        return failure_records.new_state(task_ctx.std.fs.try_read_tail, bb_clientd_root(task_ctx.std.env), task_ctx.std.re.compile(term_text.ANSI))
 
     def _collect(task_ctx, event):
         if event.kind == "build_started" or summary[0] == None:
             summary[0] = _fresh(task_ctx)
-        failures.collect_event(summary[0], event)
+        failure_records.collect_event(summary[0], event)
 
     # The summary lists as many failures as the recap would repeat errors,
     # with or without the Dashboard.

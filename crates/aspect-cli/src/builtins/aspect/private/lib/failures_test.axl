@@ -6,6 +6,7 @@ Run with:
   aspect dev test-failures
 """
 
+load("./failure_records.axl", "failure_records")
 load("./failure_ties.axl", "failure_ties")
 load("./failures.axl", "failures")
 load("./term_text.axl", "term_text")
@@ -34,9 +35,9 @@ def _ended(ctx, events: list, console: str, logs = {}, relay_cap = _RELAY_CAP):
         text = logs[path]
         return (text[len(text) - n:], len(text) - n) if len(text) > n else (text, 0)
 
-    state = failures.new_state(read, None, ctx.std.re.compile(term_text.ANSI))
+    state = failure_records.new_state(read, None, ctx.std.re.compile(term_text.ANSI))
     for e in events:
-        failures.collect_event(state, e)
+        failure_records.collect_event(state, e)
     state.update(building = False, collected_errors = bazel.output._collected_errors(console, relay_cap = relay_cap))
     return state
 
@@ -242,7 +243,7 @@ def _test_last_words(ctx):
     # A failed build no event explains: an entry of Bazel's exit code, its
     # raw log's last `ERROR:` lines.
     log = "INFO: Invocation ID: x\nERROR: first\nLoading: 0 packages loaded\nERROR: the last one\n"
-    state = failures.new_state(lambda path, n: (log, 0) if path == "/log" else None, None, ctx.std.re.compile(term_text.ANSI))
+    state = failure_records.new_state(lambda path, n: (log, 0) if path == "/log" else None, None, ctx.std.re.compile(term_text.ANSI))
     state.update(building = False)
     got = failures.failure_summary(state, "t-1", False, log_path = "/log", bazel_exit = 2)
     _eq("the exit code's entry quotes Bazel's last errors", [l for l in got if "first" in l or "the last one" in l], ["  │ first", "  │ the last one"])

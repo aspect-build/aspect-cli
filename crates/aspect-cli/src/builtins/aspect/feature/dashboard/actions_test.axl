@@ -14,31 +14,31 @@ load("@std//theme.axl", "theme")
 load("../../private/lib/failure_records.axl", "failure_records")
 load("../../private/lib/term_text.axl", "term_text")
 
-action_bar = dashboard_actions.action_bar
+action_bar = dashboard_actions.testonly_action_bar
 action_counts = dashboard_actions.action_counts
-action_parts = dashboard_actions.action_parts
+action_parts = dashboard_actions.testonly_action_parts
 action_results = dashboard_actions.action_results
 action_split = dashboard_actions.action_split
 actions_text = dashboard_actions.actions_text
-analysing = dashboard_actions.analysing
-bep_progress = failure_records.bep_progress
-build_progress = dashboard_actions.build_progress
-cache_kinds = dashboard_actions.cache_kinds
-count_event = failure_records.count_event
+analysing = dashboard_actions.testonly_analysing
+bep_progress = failure_records.testonly_bep_progress
+build_progress = dashboard_actions.testonly_build_progress
+cache_kinds = dashboard_actions.testonly_cache_kinds
+count_event = failure_records.testonly_count_event
 count_spawn = failure_records.count_spawn
 help_rows = dashboard_keys.help_rows
-hit_count = dashboard_actions.hit_count
-hit_percent = dashboard_actions.hit_percent
-metrics_lines = dashboard_render.metrics_lines
-new_counts = failure_records.new_counts
-note_event = failure_records.note_event
+hit_count = dashboard_actions.testonly_hit_count
+hit_percent = dashboard_actions.testonly_hit_percent
+metrics_lines = dashboard_render.testonly_metrics_lines
+new_counts = failure_records.testonly_new_counts
+note_event = failure_records.testonly_note_event
 note_log_file = failure_records.note_log_file
 note_progress = dashboard_actions.note_progress
 render = dashboard_render.render
 running_actions = dashboard_actions.running_actions
-shares = dashboard_actions.shares
+shares = dashboard_actions.testonly_shares
 short_count = term_text.short_count
-status_row = dashboard_actions.status_row
+status_row = dashboard_actions.testonly_status_row
 target_rows = dashboard_actions.target_rows
 text_width = term_text.text_width
 _visible = dashboard_testing.visible

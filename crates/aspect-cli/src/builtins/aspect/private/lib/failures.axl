@@ -632,8 +632,6 @@ def failure_summary(state: dict, task_id: str, tty: bool, log_path: str = "", li
 
 failures = namespace(
     FLAKY_NOTE = FLAKY_NOTE,
-    collect_event = failure_records.collect_event,
-    new_state = failure_records.new_state,
     entry_text = entry_text,
     excerpt_rows = excerpt_rows,
     expand_tabs = _expand_tabs,
@@ -643,10 +641,9 @@ failures = namespace(
     failure_summary = failure_summary,
     GAP_ROW = _GAP_ROW,
     NO_REASON = _NO_REASON,
-    quoted_rows = quoted_rows,
+    testonly_quoted_rows = quoted_rows,
     MAX_FLAKY_LISTED = _MAX_FLAKY_LISTED,
-    summary_counts = summary_counts,
     tab_extras = _tab_extras,
     target_counts = target_counts,
-    test_group = test_group,
+    testonly_test_group = test_group,
 )

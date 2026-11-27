@@ -651,7 +651,7 @@ def row_labels(state: dict) -> list:
 
 dashboard_keys = namespace(
     help_rows = help_rows,
-    KEYS = KEYS,
+    testonly_KEYS = KEYS,
     keys_row = keys_row,
     LEAVE_KEYS = _LEAVE_KEYS,
     MAX_KEYS = _MAX_KEYS,

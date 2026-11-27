@@ -9,7 +9,7 @@ _own_labels = failure_records.own_labels
 _referrers = failure_records.referrers
 _workspace = failure_records.workspace
 log_paths = failure_records.log_paths
-repaired = failure_records.repaired
+repaired = bazel.build_events.repaired
 
 # Every string of Bazel's console a tie reads, by what it is. The fixtures
 # (crates/aspect-cli/tests/testdata/failures) pin each one per Bazel version:

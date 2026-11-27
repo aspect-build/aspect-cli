@@ -28,12 +28,12 @@ load("../private/lib/failures.axl", "failures")
 load("../private/lib/term_text.axl", "term_text")
 
 ANSI = term_text.ANSI
-bep_progress = failure_records.bep_progress
+bep_progress = failure_records.testonly_bep_progress
 collect_event = failure_records.collect_event
 failure_entries = failures.failure_entries
 failure_summary = failures.failure_summary
 action_split = dashboard_actions.action_split
-failure_rows = dashboard_render.failure_rows
+failure_rows = dashboard_render.testonly_failure_rows
 
 _FIXTURES = "crates/aspect-cli/tests/testdata/failures"
 

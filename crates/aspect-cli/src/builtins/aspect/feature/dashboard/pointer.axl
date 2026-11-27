@@ -517,9 +517,9 @@ def mouse_key(state: dict, key: str) -> bool:
     return True
 
 dashboard_pointer = namespace(
-    copy_text = copy_text,
+    testonly_copy_text = copy_text,
     editor = _editor,
-    highlightable = highlightable,
+    testonly_highlightable = highlightable,
     hover_colour = _hover_colour,
     link_at = link_at,
     link_marks = link_marks,
@@ -527,9 +527,9 @@ dashboard_pointer = namespace(
     mouse_key = mouse_key,
     next_editor = next_editor,
     open_in_editor = open_in_editor,
-    open_link = open_link,
-    open_peek = open_peek,
-    opens = opens,
+    testonly_open_link = open_link,
+    testonly_open_peek = open_peek,
+    testonly_opens = opens,
     peek_paint = _peek_paint,
     selection_colour = _selection_colour,
     selection_rows = selection_rows,
