@@ -406,7 +406,7 @@ def _rows_of(state: dict, lines: list) -> int:
     """How many screen rows `lines` take in the console, wrapped as drawn."""
     if not state.get("wrap", True):
         return len(lines)
-    width = max(1, state.get("cols", 80) - 4)
+    width = max(1, state["cols"] - 4)
     rows = 0
     for line in lines:
         rows += len(wrap_line(line, width))
@@ -697,7 +697,7 @@ def report_lines(state: dict, task_id: str, tty: bool, replayed = False, linked 
             out.append("  %s~%s %s  %s%s" % (yellow, reset, rec["label"], failure_detail(state, rec, flaky_note = False), ("  " + path) if path else ""))
     for label, url in results_pages(state["bes_base"], state["bazel_uuid"], state["update"]):
         out.append("%s: %s" % (label, link(url, url) if tty else url))
-    return out + failure_summary(state, task_id, tty, state.get("log_path", ""), linked, excerpt, state.get("cols") or 100, state.get("bazel_exit"), max_entries = max_entries)
+    return out + failure_summary(state, task_id, tty, state.get("log_path", ""), linked, excerpt, state["cols"], state.get("bazel_exit"), max_entries = max_entries)
 
 dashboard_log = namespace(
     add_lines = add_lines,

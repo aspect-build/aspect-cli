@@ -431,7 +431,7 @@ def _select_word(state: dict, col: int, row: int) -> bool:
             break
         last = i
     word = "".join([c for _, _, c in cells[first:last + 1]])
-    cols = state.get("cols", 80)
+    cols = state["cols"]
     state["select"] = {"from": (cells[first][0], row), "to": (cells[last][1] - 1, row), "dragged": True, "done": True, "bounds": (0, cols), "rows": (0, 1 << 30)}
     say_note(state, "%s %d character%s" % (copy_text(state, word), len(word), "" if len(word) == 1 else "s"))
     return True
@@ -452,7 +452,7 @@ def mouse_key(state: dict, key: str) -> bool:
         # Where the pointer is, for `render` to light the link under it.
         state["hover"] = (col, row)
         return True
-    cols = state.get("cols", 80)
+    cols = state["cols"]
     if kind == "mouse-press":
         # A second press on the cell within `_DOUBLE_CLICK_MS`: the word
         # under it, selected and copied.

@@ -610,7 +610,7 @@ def _actions_tests(ctx):
     measured = dict(final, ran = 5705, local = 2836, disk = 300, remote = 12, internal = 33, failed = 4, other = 0, done = 8890, total = 8890, disk_on = True, remote_on = True)
     _eq("at 100 columns: a group on its row, the rest after", [_visible(r) for r in action_results(measured, 89, 2)], ["ran 5,709: █ 5,705 ok · ╳ 4 failed", "cache hits 3,148: ▒ 2,836 local action cache · ▓ 300 disk · 12 remote"])
     _eq("under 100, local", [_visible(r) for r in action_results(measured, 79, 3, short = True)], ["ran 5,709: █ 5,705 ok · ╳ 4 failed", "cache hits 3,148: ▒ 2,836 local · ▓ 300 disk · 12 remote", "░ 33 internal"])
-    _eq("at 60: the hits' parts under their header", [_visible(r) for r in action_results(measured, 49, 3, short = True, stack = True)], ["ran 5,709: █ 5,705 ok · ╳ 4 failed", "cache hits 3,148:", "  ▒ 2,836 local · ▓ 300 disk · 12 remote"])
+    _eq("at 60: the hits' parts under their header", [_visible(r) for r in action_results(measured, 49, 3, short = True)], ["ran 5,709: █ 5,705 ok · ╳ 4 failed", "cache hits 3,148:", "  ▒ 2,836 local · ▓ 300 disk · 12 remote"])
     _eq("in Results at 100 columns: every group under its header, as many parts to a row as fit", [_visible(r) for r in action_results(measured, 26, 6, short = True)], ["ran 5,709:", "  █ 5,705 ok · ╳ 4 failed", "cache hits 3,148:", "  ▒ 2,836 local", "  ▓ 300 disk · 12 remote", "░ 33 internal"])
     _eq("short of rows, the hits become their total", [_visible(r) for r in action_results(measured, 26, 4, short = True)], ["ran 5,709:", "  █ 5,705 ok · ╳ 4 failed", "▒ 3,148 hits"])
     _eq("one part to a row where narrower", [_visible(r) for r in action_results(measured, 18, 8, short = True)], ["ran 5,709:", "  █ 5,705 ok", "  ╳ 4 failed", "cache hits 3,148:", "  ▒ 2,836 local", "  ▓ 300 disk", "  12 remote", "░ 33 internal"])
@@ -622,21 +622,21 @@ def _actions_tests(ctx):
     # whole parts; ran, failed, skipped, the hits' total and what is not
     # done stay, and nothing is cut in half.
     jammed = dict(measured, ran = 30, local = 0, disk = 0, remote = 0, failed = 5, not_run = 10, internal = 1, done = 46, total = 46)
-    got = [_visible(r) for r in action_results(jammed, 17, 5, short = True, stack = True)]
+    got = [_visible(r) for r in action_results(jammed, 17, 5, short = True)]
 
     # Short terminals: the drop order, failed last.
     probe = dict(done = 0, total = 0, more = False, counted = True, known = True, final = True, estimated = False, ran = 0, local = 0, disk = 0, remote = 0, internal = 0, other = 0, failed = 0, not_run = 0, unreported = 0, failed_build = True, running = False, running_now = 0, disk_on = True, remote_on = False, published = True)
     zero = dict(probe, done = 32, total = 32, failed = 16, not_run = 15, internal = 1)
     big9 = dict(probe, done = 9301, total = 9301, ran = 5705, local = 2836, disk = 300, failed = 4, not_run = 411, internal = 33)
-    for split, room, rows, stack, want in [
-        (zero, 13, 2, True, ["╳ 16 failed", "○ 15 skipped"]),
-        (zero, 30, 1, False, ["╳ 16 failed · ○ 15 skipped"]),
-        (zero, 60, 1, False, ["╳ 16 failed · ○ 15 skipped · ░ 1 internal"]),
-        (big9, 13, 2, True, ["╳ 4 failed", "○ 411 skipped"]),
-        (big9, 30, 1, False, ["╳ 4 failed · ○ 411 skipped"]),
-        (big9, 35, 2, False, ["ran 5,709: █ 5,705 ok · ╳ 4 failed", "▒ 3,136 hits · ○ 411 skipped"]),
+    for split, room, rows, want in [
+        (zero, 13, 2, ["╳ 16 failed", "○ 15 skipped"]),
+        (zero, 30, 1, ["╳ 16 failed · ○ 15 skipped"]),
+        (zero, 60, 1, ["╳ 16 failed · ○ 15 skipped · ░ 1 internal"]),
+        (big9, 13, 2, ["╳ 4 failed", "○ 411 skipped"]),
+        (big9, 30, 1, ["╳ 4 failed · ○ 411 skipped"]),
+        (big9, 35, 2, ["ran 5,709: █ 5,705 ok · ╳ 4 failed", "▒ 3,136 hits · ○ 411 skipped"]),
     ]:
-        _eq("drop order at %d cells, %d rows" % (room, rows), [_visible(r) for r in action_results(split, room, rows, short = room < 60, stack = stack)], want)
+        _eq("drop order at %d cells, %d rows" % (room, rows), [_visible(r) for r in action_results(split, room, rows, short = room < 60)], want)
 
     # Live, with the build's `memory`: a part gone stays gone while the
     # pane's size holds, and one kept doesn't go for a digit (r51m_live60:
@@ -659,13 +659,13 @@ def _actions_tests(ctx):
     _eq("a short terminal keeps failed over a hit", [_visible(r) for r in action_results(live_short, 40, 1)], ["ran 212: █ 210 ok · ╳ 2 failed"])
 
     _eq("a group's parts under its header; what counts nothing goes first", got, ["ran 35:", "  █ 30 ok", "  ╳ 5 failed", "○ 10 skipped", "░ 1 internal"])
-    _eq("then the hit-less caches before internal", [_visible(r) for r in action_results(dict(jammed, disk_on = True, remote_on = True), 17, 5, short = True, stack = True)], ["ran 35:", "  █ 30 ok", "  ╳ 5 failed", "○ 10 skipped", "░ 1 internal"])
-    _eq("then internal", [_visible(r) for r in action_results(jammed, 17, 4, short = True, stack = True)], ["ran 35:", "  █ 30 ok", "  ╳ 5 failed", "○ 10 skipped"])
-    _eq("a lone hit's meaning in fewer words where narrow", [_visible(r) for r in action_results(dict(jammed, local = 1234), 12, 6, short = True, stack = True)], ["ran 35:", "  █ 30 ok", "  ╳ 5 failed", "▒ 1.2k local", "○ 10 skipped"])
-    _eq("no label with no hit left", any(["hits" in _visible(r) for r in action_results(dict(jammed, final = False, local = 0, estimated = True), 17, 5, short = True, stack = True)]), False)
+    _eq("then the hit-less caches before internal", [_visible(r) for r in action_results(dict(jammed, disk_on = True, remote_on = True), 17, 5, short = True)], ["ran 35:", "  █ 30 ok", "  ╳ 5 failed", "○ 10 skipped", "░ 1 internal"])
+    _eq("then internal", [_visible(r) for r in action_results(jammed, 17, 4, short = True)], ["ran 35:", "  █ 30 ok", "  ╳ 5 failed", "○ 10 skipped"])
+    _eq("a lone hit's meaning in fewer words where narrow", [_visible(r) for r in action_results(dict(jammed, local = 1234), 12, 6, short = True)], ["ran 35:", "  █ 30 ok", "  ╳ 5 failed", "▒ 1.2k local", "○ 10 skipped"])
+    _eq("no label with no hit left", any(["hits" in _visible(r) for r in action_results(dict(jammed, final = False, local = 0, estimated = True), 17, 5, short = True)]), False)
     _eq("never cut in half", [("…" in r, text_width(r) <= 17) for r in got], [(False, True)] * len(got))
     live_jam = dict(jammed, final = False, running = True, running_now = 4, total = 62, internal = 1, unreported = 2, local = 0, estimated = True, not_run = 0, disk_on = False, remote_on = False)
-    got = [_visible(r) for r in action_results(live_jam, 17, 5, short = True, stack = True)]
+    got = [_visible(r) for r in action_results(live_jam, 17, 5, short = True)]
     _eq("live: running and unreported stay, pending goes first", ["─ 4 running" in " ".join(got), "12 pending" in " ".join(got), "? 2 unreported" in " ".join(got), any(["…" in r or text_width(r) > 17 for r in got])], [True, False, True, False])
 
     _eq("a configured cache with no hits, dimmed at the end", _visible(action_results(dict(measured, remote = 0), 89, 3)[1]).endswith("▓ 300 disk · 0 remote"), True)

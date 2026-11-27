@@ -340,18 +340,26 @@ def _header(state: dict, cols: int, bar: bool) -> str:
     pad = " " * max(0, room - text_width(right))
     return _c("status_bar") + title + pad + right + _RESET
 
-# The screen widths the Results pane changes at: from `_WIDEST_FROM_COLS`
-# it is widest; under `_SHORT_UNDER_COLS` its Actions rows use short words,
-# and under `_STACKED_UNDER_COLS` they stack a group's parts under its
-# header.
+# The Results pane's widths by the screen's (`_results_width`): `_WIDEST`
+# from `_WIDEST_FROM_COLS` columns, else at most `_WIDE`; at least
+# `_ROOMY` from `_ROOMY_FROM_COLS` columns, `_NARROW` from
+# `_NARROW_FROM_COLS`, half the screen under that. Under
+# `_SHORT_UNDER_COLS` columns its Actions rows use short words.
 _WIDEST_FROM_COLS = 140
+_WIDEST = 46
+_WIDE = 44
+_ROOMY_FROM_COLS = 80
+_ROOMY = 39
+_NARROW_FROM_COLS = 70
+_NARROW = 32
 _SHORT_UNDER_COLS = 100
-_STACKED_UNDER_COLS = 70
 
 def _results_width(cols: int) -> int:
     """The Results pane's width on a screen `cols` wide: a third of it,
     within bounds that let its rows fit."""
-    return min(46 if cols >= _WIDEST_FROM_COLS else 44, max(cols // 3, 39 if cols >= 80 else (32 if cols >= _STACKED_UNDER_COLS else cols // 2)))
+    most = _WIDEST if cols >= _WIDEST_FROM_COLS else _WIDE
+    least = _ROOMY if cols >= _ROOMY_FROM_COLS else (_NARROW if cols >= _NARROW_FROM_COLS else cols // 2)
+    return min(most, max(cols // 3, least))
 
 def _top(state: dict, cols: int, rows: int) -> list:
     """The rows above the console: the header (`_header`), then, unless
@@ -469,7 +477,7 @@ def _top(state: dict, cols: int, rows: int) -> list:
     for _ in range(most + 4):
         room_now = right_w - 5 if apart else right_w - 4 - len(lead)
         rows_now = max(1, most - 1) if apart else most
-        actions_rows = action_results(split, room_now, rows_now, short = cols < _SHORT_UNDER_COLS, stack = cols < _STACKED_UNDER_COLS, memory = None if split["final"] else _actions_memory(state, room_now, rows_now, pane))
+        actions_rows = action_results(split, room_now, rows_now, short = cols < _SHORT_UNDER_COLS, memory = None if split["final"] else _actions_memory(state, room_now, rows_now, pane))
         if apart and actions_rows:
             actions_rows = [""] + actions_rows
         wanted = len(summary) + len(actions_rows) + len(tests_rows) + len([r for r in (critical, failed_row) if r != None])

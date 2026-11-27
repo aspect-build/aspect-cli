@@ -972,7 +972,7 @@ def _drop(parts: list, k: int) -> list:
             out = [p for p in out if p[2] != what]
     return out
 
-def action_results(split: dict, room: int, rows = 3, short = False, stack = False, memory = None) -> list:
+def action_results(split: dict, room: int, rows = 3, short = False, memory = None) -> list:
     """The Actions rows, `room` cells wide past their `Actions` lead, at
     most `rows` (`action_parts`): the groups, then the rest, which add up
     to the actions. A group's header says its total (`ran 5,698:`,
@@ -985,8 +985,7 @@ def action_results(split: dict, room: int, rows = 3, short = False, stack = Fals
     hits`). Not run, internal, other, unreported, then what runs and is
     pending (`─ 2 running · 4 pending`) go as many to a row as fit. The
     local action cache is `local` where `short` (a screen under 100
-    columns) or the whole words fit no `rows`; `stack` says nothing apart
-    now that a group has its rows to itself. Where nothing
+    columns) or the whole words fit no `rows`. Where nothing
     fits, the caches with no hits go, then internal; then parts go in
     `_DROP_ORDER` (a zero count, internal, other, pending, then the hits
     as their header's total alone, then that, running, unreported, what

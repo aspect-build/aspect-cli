@@ -590,7 +590,7 @@ def help_rows(state: dict, width = 0) -> list:
             continue
         rows.append(group)
         rows += ["  " + fit(k.help[0], 20) + " " + k.help[1] for k in entries]
-    return rows + _actions_key(width, state.get("all_actions", True)) + _key_rows("Tests", _TESTS_KEY, width)
+    return rows + _actions_key(width) + _key_rows("Tests", _TESTS_KEY, width)
 
 # What the bar's and the Actions rows' glyphs and words are, for the `?`
 # overlay, a line each.
@@ -611,11 +611,10 @@ _ACTIONS_KEY = [
     "The groups and parts don't overlap: they add up to the total actions.",
 ]
 
-def _actions_key(width: int, published = True) -> list:
+def _actions_key(width: int) -> list:
     """The `?` overlay's rows saying what the actions' glyphs and words
     are: a heading, then a line each, wrapped to `width` cells (whole
-    without a width). `published` (every action's events, or not) says
-    nothing apart now; kept for the callers."""
+    without a width)."""
     rows = ["Actions"]
     for part in _ACTIONS_KEY:
         lines = [""]

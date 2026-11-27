@@ -363,7 +363,6 @@ def _index_headers(headers: list) -> dict:
     referenced by` names, the text before the first `: `, and the output a
     `declared output` names."""
     by = {"status": {}, "target": {}, "message": {}, "plain": {}, "reason": {}, "failed": {}, "referrer": {}, "prefix": {}, "declared": {}}
-    by = {"status": {}, "target": {}, "message": {}, "plain": {}, "reason": {}, "failed": {}, "referrer": {}, "prefix": {}, "declared": {}}
     for k, h in enumerate(headers):
         message = h["message"]
         what, failed, reason = message.partition(_BAZEL.failed)
