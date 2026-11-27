@@ -364,6 +364,8 @@ impl Kept {
                 })
                 .collect();
             if let Some(notes) = &self.notes {
+                // Bazel's events spell a non-ASCII label as Latin-1.
+                let label = crate::bes::repaired(label).unwrap_or_else(|| label.to_string());
                 for (stream, path) in &streams {
                     notes.push(format!("INFO: {label} {mnemonic} {stream}: {path}").into_bytes());
                 }
@@ -869,6 +871,42 @@ mod tests {
             "{got:?}"
         );
         assert!(got[0].ends_with("Genrule-1.stderr"), "{got:?}");
+    }
+
+    /// The note spells a label as meant, not as Bazel's events do (a
+    /// non-ASCII label's UTF-8 bytes read as Latin-1).
+    #[test]
+    fn a_kept_logs_note_repairs_its_label() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(src.join("stderr-1"), "broke\n").unwrap();
+        let mut kept = Kept::new(
+            Keep {
+                actions: ActionLogs::Failed,
+                tests: TestLogs::None,
+            },
+            tmp.path().join("history"),
+        );
+        let notes = crate::console::forward::Notes::default();
+        kept.notes = Some(notes.clone());
+        let latin1: String = "//uni:café".bytes().map(char::from).collect();
+        kept.event(&action_event(
+            &latin1,
+            "Genrule",
+            false,
+            None,
+            Some(uri_file("stderr", &src.join("stderr-1"))),
+        ));
+        let got: Vec<String> = notes
+            .take()
+            .into_iter()
+            .map(|n| String::from_utf8(n).unwrap())
+            .collect();
+        assert!(
+            got[0].starts_with("INFO: //uni:café Genrule stderr: "),
+            "{got:?}"
+        );
     }
 
     /// Each kept action is published by its primary output as it is kept,
