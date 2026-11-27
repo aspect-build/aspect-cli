@@ -2077,6 +2077,18 @@ def _impl(ctx: TaskContext) -> int:
     analysed = dict(kinds, fails = [{"kind": "target", "label": "//anal:broken", "detail": "analysis", "description": "in genrule rule //anal:broken: missing srcs", "pattern": False, "files": [("error", ("in genrule rule //anal:broken: missing srcs", False))], "output": "", "success": False}], counts = new_counts(), root_causes = {})
     _eq("analysis failed", [_visible(l) for l in failure_summary(analysed, "t-9", False)][:3], ["── Failures (1) ──", "✗ //anal:broken  analysis", "  │ in genrule rule //anal:broken: missing srcs"])
 
+    # ] and [ step over the Failures list's rows in its order, Bazel's other
+    # errors among them, round to the first again.
+    other = "\x1b[31m\x1b[1mERROR: \x1b[0msyntax/BUILD.bazel:2:1: syntax error at 'newline'\n"
+    stepping = _screen(ctx, ["x"], fails = [{"kind": "action", "label": "//s:a", "detail": "Genrule", "files": [], "output": "o", "success": False}], building = False, ended = True, ansi = ctx.std.re.compile(ANSI), bazel_errors = {"blocks": [{"kind": "error", "text": other}], "not_kept": 0, "stdout": False})
+    seen = []
+    for _ in range(3):
+        on_key(stepping, "]", 10)
+        seen.append(stepping["view"]["title"])
+    _eq("] steps over every row, an other error's too", seen, ["//s:a · Genrule", "Other error from Bazel", "//s:a · Genrule"])
+    on_key(stepping, "[", 10)
+    _eq("[ steps back", stepping["view"]["title"], "Other error from Bazel")
+
     # Bazel's events carry UTF-8 as Latin-1: decoded back; other text kept.
     _eq("decoded", repaired("//ar2:usesl\u00d0\u00b5"), "//ar2:usesl\u0435")
     _eq("ASCII as it is", repaired("//a:b"), "//a:b")
@@ -2812,9 +2824,10 @@ def _impl(ctx: TaskContext) -> int:
     _eq("a crumb's click goes back to it", crumbs(tri), ["//t:a ▹ attempt 1/2"])
     open_peek(tri, src, 3)
     on_key(tri, "]", 10)
-    _eq("] steps sideways, through each attempt, the peek gone", crumbs(tri), ["//t:a ▹ attempt 2/2"])
+    _eq("] steps sideways to the next row, the peek gone", crumbs(tri), ["//t:b"])
+    on_key(tri, "[", 10)
+    _eq("[ back to the row's attempt the summary quotes", crumbs(tri), ["//t:a ▹ attempt 2/2"])
     on_key(tri, "]", 10)
-    _eq("] to the next target", crumbs(tri), ["//t:b"])
     narrow = _visible(render(tri, 30, 20)).split("\n")
     top = [r for r in narrow if "//t:b" in r]
     _eq("narrow: the deepest crumb kept", len(top) >= 1, True)
@@ -2851,8 +2864,8 @@ def _impl(ctx: TaskContext) -> int:
         seen.append(crumbs(runs)[-1])
     _eq("} steps each run, round to the first", seen, ["//t:r ▹ run 2/3", "//t:r ▹ run 3/3", "//t:r ▹ run 1/3", "//t:r ▹ run 2/3"])
 
-    # ] [ } { with the pick on a target without a log (past the logged
-    # records): the last logged one stands in. } with the open log's target
+    # ] [ with the pick on a target without a log (past the logged
+    # records) open that row; } { the last logged one stands in. } with the open log's target
     # no longer listed (a newer build's failures): the chosen one's.
     unlogged = _screen(ctx, ["x"], fails = [_attempt("//t:a", 1)], fs = ctx.std.fs, syntax = None, page_h = 10, env = ctx.std.env, read = lambda p, c: None, ansi = ctx.std.re.compile(ANSI), controls = ctx.std.re.compile(CONTROLS), test_counts = {}, spread = {}, last_attempts = {})
     count_aborted(unlogged["counts"], "//b:b", "analysis_failure")
@@ -2862,7 +2875,7 @@ def _impl(ctx: TaskContext) -> int:
         on_key(unlogged, "J", 10)
         _eq("%s: the pick past the logged records" % key, unlogged["selected"], 1)
         on_key(unlogged, key, 10)
-        _eq("%s on a target without a log" % key, crumbs(unlogged), ["//t:a"])
+        _eq("%s on a target without a log" % key, crumbs(unlogged), ["//b:b"] if key in ("]", "[") else ["//t:a"])
 
     # } { step from the record shown, not the one chosen; one shown from a
     # list it is no longer in opens its target's first record here, unstepped.

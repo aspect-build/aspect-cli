@@ -5446,6 +5446,9 @@ def _over_actions(state):
 def _has_items(state):
     return bool(_items(state))
 
+def _has_rows(state):
+    return bool(_items(state)) or (state.get("list") != "actions" and _failure_total(state) > 0)
+
 def _has_other_list(state):
     return bool(state.get("outputs")) or state.get("list") == "actions"
 
@@ -5548,17 +5551,37 @@ def _k_list(state, key, page):
     return False
 
 def _k_step_record(state, key, page):
-    # The chosen record first, unless it is the one the Failures tab shows:
-    # then a step. The pick may be past the logged records (on a target
-    # without a log): the last of them stands in.
+    # The chosen record's log first (or the chosen row's), unless the
+    # Failures tab shows it already: then a step. Over the failures, the Failures list's rows in its order
+    # (`listed_failures`, then `_tab_extras`: a blocked target, Bazel's
+    # other errors), so a step from any row goes to its neighbour.
     items = _items(state)
-    if not items:
+    if state.get("list") == "actions":
+        if not items:
+            return False
+        chosen = min(state.get(_pick(state), 0), len(items) - 1)
+        show_tab(state, "failures")
+        step = 1 if key == "]" else -1
+        shown = _shown_record(state) == items[chosen]
+        _open_failure(state, (chosen + step) % len(items) if shown else chosen)
         return False
-    chosen = min(state.get(_pick(state), 0), len(items) - 1)
+    listed = listed_failures(state)
+    order = listed + [len(items) + k for k in range(len(_tab_extras(state)))]
+    if not order:
+        return False
+    chosen = state.get("selected", 0)
+    at = min(_listed_position(state, listed, chosen), len(order) - 1)
+    if chosen < len(items):
+        shown = _shown_record(state) == items[chosen]
+    else:
+        shown = state.get("stepped") == chosen and state["view"] != None
     show_tab(state, "failures")
-    step = 1 if key == "]" else -1
-    shown = _shown_record(state) == items[chosen]
-    _open_failure(state, (chosen + step) % len(items) if shown else chosen)
+    target = order[(at + (1 if key == "]" else -1)) % len(order)] if shown else chosen
+    state["stepped"] = target
+    if target >= len(items):
+        _open_unlogged(state, target)
+    else:
+        _open_failure(state, target)
     return False
 
 def _k_step_attempt(state, key, page):
@@ -5783,7 +5806,7 @@ KEYS = [
     _key(["esc"], _always, _k_esc, help = ("Esc", "back a crumb: a file to the log it was opened from, a log to its tab; a tab to the console"), group = "Leave", row = lambda s: ["Esc back"] if s["view"] != None else []),
     _key(["a"], _has_other_list, _k_other_list, help = ("a", "the list: failures, or actions that wrote output"), group = "Failures", row = _row_other_list, said = lambda s: "actions that wrote output listed · a lists the failures" if s.get("list") == "actions" else "failures listed · a lists the actions that wrote output"),
     _key(["up", "k", "wheel-up", "down", "j", "wheel-down", "K", "home", "J", "end", "enter"], _failures_focused, _k_list, help = ("Enter", "in the list: show the chosen log"), group = "Failures", row = lambda s: ["↑↓ choose", "Enter show its log", "Tab next tab", "Esc back"], shown = lambda s: _failure_total(s) > 0 or bool(_items(s))),
-    _key(["]", "["], _has_items, _k_step_record, help = ("]  [  }  {", "the next or previous failure, its log in Failures; } { its next attempt or shard"), group = "Failures", row = _row_step),
+    _key(["]", "["], _has_rows, _k_step_record, help = ("]  [  }  {", "the next or previous failure, its log in Failures; } { its next attempt or shard"), group = "Failures", row = _row_step),
     _key(["}", "{"], _has_items, _k_step_attempt),
     _key(["ctrl-f", "/"], _always, _k_find, help = ("/  ^F", "find: jumps to the newest match; n the next one down, N the previous, round the ends"), group = "Search", row = lambda s: ["/ find"]),
     _documented("  Tab", "in the bar: filter to the matches instead, and back", "Search"),
