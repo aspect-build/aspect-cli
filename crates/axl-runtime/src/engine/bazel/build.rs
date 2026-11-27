@@ -1570,9 +1570,23 @@ impl Build {
             && !bazel::bes::sink::downstream::asks_for_all_actions(&flags, verb);
         let trim_downstream = cli_publishes_all_actions && rc_visible;
 
+        // Reserve the BEP path now, before `cmd.spawn()`, so it can go on the
+        // command line; bazel creates the file. The reader is started later,
+        // once the spawned child's pid is in hand and every subscriber is bound.
+        let bes_file = build_events.then(BuildEventStream::reserve);
+
         let mut cmd = super::runner::CancellableRunner(&signals).command();
         cmd.args(startup_flags);
         cmd.arg(verb);
+        // The BEP flags go before the caller's too: Bazel 7 and 8 stop at a
+        // flag they do not know and write no stream for one after it, so a
+        // build refused for a bad flag still has its events. They go again
+        // after, where they outrank a caller's own.
+        if let Some(file) = &bes_file {
+            cmd.arg("--build_event_binary_file_upload_mode=fully_async")
+                .arg(bazel::bes::binary_file::FLAG)
+                .arg(file.path());
+        }
         cmd.args(flags);
 
         if let Some(directory) = directory {
@@ -1613,25 +1627,17 @@ impl Build {
             ));
         }
 
-        // Reserve the BEP path now, before `cmd.spawn()`, so it can go on the
-        // command line; bazel creates the file. The reader is started later,
-        // once the spawned child's pid is in hand and every subscriber is bound.
-        //
         // Bazel's default action publishing (failed actions only) is left
         // alone, per-action data coming from the execution log, unless the
         // CLI's own readers need every action (above).
-        let bes_file = if build_events {
-            let file = BuildEventStream::reserve();
+        if let Some(file) = &bes_file {
             cmd.arg("--build_event_binary_file_upload_mode=fully_async")
                 .arg(bazel::bes::binary_file::FLAG)
                 .arg(file.path());
             if cli_publishes_all_actions {
                 cmd.arg(bazel::bes::sink::downstream::PUBLISH_ALL_ACTIONS);
             }
-            Some(file)
-        } else {
-            None
-        };
+        }
 
         // Bazel writes the profile into the history, where it stays, as the
         // execution log does below; a profile the caller asked for is copied
@@ -4988,6 +4994,75 @@ Test = task(implementation = _impl)
             compact_entry_count(&asked),
             SCENARIO_ENTRIES,
             "this build's log"
+        );
+    }
+
+    /// The CLI's BEP flags come before the caller's as well as after: Bazel 7
+    /// and 8 stop parsing at a flag they do not know and write no stream for
+    /// a BEP flag after it, so a build refused for a bad flag would have no
+    /// events. The copy after still outranks a caller's own BEP flag.
+    #[cfg(unix)]
+    #[test]
+    fn the_bep_flags_come_before_the_callers_flags_too() {
+        let dir = tempfile::tempdir().unwrap();
+        let argv_log = dir.path().join("argv.log");
+        let marker = format!("--aspect_argv_marker_{}", uuid::Uuid::new_v4().simple());
+        let script = format!(
+            r#"
+def _impl(ctx):
+    build = ctx.bazel.build(
+        flags = ["--scenario=success", {marker:?}],
+        build_events = True,
+        stderr = None,
+    )
+    status = build.wait()
+    return 0 if status.success else 1
+
+Test = task(implementation = _impl)
+"#,
+        );
+        let exit = with_daemon_stand_in(|| {
+            // SAFETY: process-wide, but `with_daemon_stand_in` holds the lock that
+            // serializes the basil tests for the whole closure.
+            unsafe {
+                std::env::set_var("BASIL_ARGV_LOG", &argv_log);
+            }
+            let out = crate::test::eval(&script).with_fake_bazel().run_task(0);
+            unsafe {
+                std::env::remove_var("BASIL_ARGV_LOG");
+            }
+            out
+        });
+        assert_eq!(
+            exit.expect("run_task"),
+            Some(0),
+            "the build should have run"
+        );
+        let recorded = std::fs::read_to_string(&argv_log).expect("basil should have logged argv");
+        let line = recorded
+            .lines()
+            .find(|line| line.contains(&marker))
+            .unwrap_or_else(|| panic!("no build invocation in:\n{recorded}"));
+        let args: Vec<&str> = line.split_whitespace().collect();
+        let at = |flag: &str| {
+            args.iter()
+                .position(|a| *a == flag || a.starts_with(&format!("{flag}=")))
+        };
+        let mine = args
+            .iter()
+            .position(|a| *a == marker)
+            .expect("the caller's flag");
+        let first = at(bazel::bes::binary_file::FLAG).expect("a BEP flag");
+        let last = args
+            .iter()
+            .rposition(|a| {
+                *a == bazel::bes::binary_file::FLAG
+                    || a.starts_with(&format!("{}=", bazel::bes::binary_file::FLAG))
+            })
+            .expect("a BEP flag");
+        assert!(
+            first < mine && mine < last,
+            "the BEP flag before and after the caller's: {line}"
         );
     }
 
