@@ -292,7 +292,7 @@ def _build_suggestion_comments(ctx, run_id, task_key, relevant_diagnostics, pend
     comments = []
     diag_by_anchor = diagnostics_by_anchor(relevant_diagnostics)
     for entry in pending_patches:
-        content = ctx.std.fs.try_read_to_string_capped(entry["path"], 64 * 1024 * 1024)
+        content = ctx.std.fs.read_to_string(entry["path"])
         if not content:
             continue
         tool = patch_linter(entry["name"])

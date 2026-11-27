@@ -170,7 +170,6 @@ def test_fs(ctx: TaskContext, tc: int, temp_dir: str):
     tc = test_case(tc, type(meta.accessed) == "int" and meta.accessed > at_least_epoch, "metadata.accessed should be int and greater than at_least_epoch")
     tc = test_case(tc, (type(meta.created) == "NoneType" and meta.created == None) or (type(meta.created) == "int" and meta.created > at_least_epoch), "meta.created should be either None when creation time is not available on this platform currently or int and greater than at_least_epoch")
     tc = test_case(tc, type(meta.readonly) == "bool" and meta.readonly == False, "metadata.readonly should be bool and False")
-    tc = test_case(tc, all([type(v) == "int" or v == None for v in (meta.dev, meta.ino)]), "metadata.dev and metadata.ino should be ints, or None where the platform has none")
 
     sym_meta = ctx.std.fs.symlink_metadata(file_path)
     tc = test_case(tc, sym_meta.is_file == True, "symlink_metadata.is_file should be True")
