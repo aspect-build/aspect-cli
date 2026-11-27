@@ -677,6 +677,19 @@ def _actions_tests(ctx):
     _eq("in Results at 100 columns: the hits wrap after their label", [_visible(r) for r in action_results(greg, 26, 4, short = True)], ["█ 5,705 ran · ╳ 4 failed", "cache hits 3,148:", "▒ 2,836 local · ▓ 300 disk", "12 remote · ░ 33 internal"])
     for room in range(26, 90):
         _eq("no row wider than %d" % room, [text_width(_visible(r)) <= room for r in action_results(greg, room, 4, short = room < 80)], [True for r in action_results(greg, room, 4, short = room < 80)])
+
+    # Out of room (Results at 60 columns, 17 cells, five rows): internal
+    # goes first, then a cache with no hits, then counts in thousands, then
+    # whole parts; ran, failed, blocked, the hits' total and what is not
+    # done stay, and nothing is cut in half.
+    jammed = dict(greg, ran = 30, local = 0, disk = 0, remote = 0, failed = 5, blocked = 10, internal = 1, done = 46, total = 46)
+    got = [_visible(r) for r in action_results(jammed, 17, 5, short = True, stack = True)]
+    _eq("internal and the hit-less caches go", got, ["█ 30 ran", "╳ 5 failed", "cache hits 0:", "▒ 0 local", "○ 10 blocked"])
+    _eq("never cut in half", [("…" in r, text_width(r) <= 17) for r in got], [(False, True)] * len(got))
+    live_jam = dict(jammed, final = False, running = True, running_now = 4, total = 62, internal = 1, unreported = 2, local = 0, estimated = True, blocked = 0, disk_on = False, remote_on = False)
+    got = [_visible(r) for r in action_results(live_jam, 17, 5, short = True, stack = True)]
+    _eq("live: running, pending and unreported stay", ["─ 4 running" in " ".join(got), "12 pending" in " ".join(got), "? 2 unreported" in " ".join(got), any(["…" in r or text_width(r) > 17 for r in got])], [True, True, True, False])
+
     _eq("a configured cache with no hits, dimmed at the end", _visible(action_results(dict(greg, remote = 0), 89, 2)[0]).endswith("▓ 300 disk · 0 remote"), True)
     _eq("dimmed", (_role("muted") + "0 remote") in action_results(dict(greg, remote = 0), 89, 2)[0], True)
     _eq("an unconfigured one hidden", "remote" in _visible(action_results(dict(greg, remote = 0, remote_on = False), 89, 2)[0]), False)
@@ -742,6 +755,8 @@ def _actions_tests(ctx):
     for height in [20, 24, 26, 30]:
         rows = [r.partition("││ ")[2].rstrip(" │\r") for r in _visible(render(short, 80, height)).split("\n") if "││ " in r]
         _eq("Failed kept at %d rows" % height, any([r.startswith("Failed") or r.startswith("✗4 ") for r in rows]), True)
+    for cols in [140, 100, 60]:
+        _eq("no Tests row without test targets at %d" % cols, any([("Tests " in r) for r in _visible(render(greg_screen, cols, 30)).split("\n") if "││" in r or "┃│" in r]), False)
     _eq("the tests' cached count, Bazel's word", "1,400 (9 cached)" in _visible(render(short, 140, 30)), True)
 
     # The Tests row's running and pending, live: beside its counts where

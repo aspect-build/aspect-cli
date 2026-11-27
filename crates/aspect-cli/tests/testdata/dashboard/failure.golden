@@ -2,8 +2,8 @@
 ┌─ Running (0) ─────────────────────────────────────────────┐┌─ Results ───────────────────────────┐
 │                                                           ││ Targets  0 configured               │
 │                                                           ││          0 built, 0 failed          │
-│                                                           ││ Tests    0 passed                   │
 │                                                           ││ Failed   ✗ 1                        │
+│                                                           ││                                     │
 │                                                           ││                                     │
 │                                                           ││                                     │
 │                                                           ││                                     │

@@ -2,7 +2,7 @@
 ┌─ Running (2) ─────────────────────────────────────────────┐┌─ Results ───────────────────────────┐
 │ Compiling src/a.cc; 3s                                    ││ Targets  0 configured               │
 │ Linking //app:bin; 1s                                     ││          0 built, 0 failed          │
-│                                                           ││ Tests    0 passed                   │
+│                                                           ││ Actions  ─ 2 running · 4 pending    │
 └───────────────────────────────────────────────────────────┘└─────────────────────────────────────┘
 ┌─ Console  Failures  Metrics  Invocation  Tips ─────────────────────────────────────── following ─┐
 │ Building...                                                                                      ┃

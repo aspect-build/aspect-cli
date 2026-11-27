@@ -3160,6 +3160,10 @@ def running_count(state: dict) -> int:
     progress = state.get("progress") or []
     return max(len(running_actions(progress)), action_counts(progress)[0])
 
+def _has_tests(c: dict) -> bool:
+    """Whether the build has test targets (configured, or with a result)."""
+    return bool(c.get("test_targets") or c["tests_passed"] or c["tests_failed"] or c.get("tests_flaky") or c.get("tests_skipped"))
+
 def _tests_words(c: dict) -> str:
     """The Tests row's counts in words, a part there is none of left out
     (`7 passed (5 cached), 1 failed`), `0 passed` where there is nothing."""
@@ -3608,24 +3612,26 @@ def action_results(split: dict, room: int, rows = 3, short = False, stack = Fals
     """The Actions rows, `room` cells wide past their `Actions` lead, at
     most `rows`: `█ ran`, then `cache hits N:` and the hits after it
     (`action_parts`), failed, blocked, internal, other, then what runs and
-    is pending (`─ 2 running · 4 pending`, on one row where they fit), what follows the
-    hits a row after them. Where the hits do not fit beside ran they get
-    a row of their own, after ran and failed, as they do where `stack`
-    (a screen under 70 columns), and wrap after their label where they
-    are wider than a row, what follows going on with the last of them. The local action cache is `local`
-    where `short` (a screen under 100 columns) or nothing else fits; a
-    row still too wide has its every count `short_count`, and what fits
-    no `rows` has its last row cut where it is drawn."""
+    is pending (`─ 2 running · 4 pending`, on one row where they fit),
+    what follows the hits a row after them. Where the hits do not fit
+    beside ran they get a row of their own, after ran and failed, as they
+    do where `stack` (a screen under 70 columns), and wrap after their
+    label where they are wider than a row, what follows going on with the
+    last of them. The local action cache is `local` where `short` (a
+    screen under 100 columns) or the whole words fit no `rows`. Where
+    nothing fits, parts go by priority: internal first, then the caches
+    with no hits, then every count is `short_count`; then whole parts from
+    the end, never ran, failed, blocked, the hits' total, unreported,
+    running or pending while another can go, and never a part cut in
+    half."""
     parts = action_parts(split)
     if not parts:
         return []
-    hits = [p for p in parts if p[2] in _HITS]
-    others = [p for p in parts if p[2] not in _HITS]
-    lead = [("one", [p]) for p in others if p[2] == "ran"]
-    failed = [("one", [p]) for p in others if p[2] == "failed"]
-    tail = [("one", [p]) for p in others if p[2] not in ("ran", "failed", "running", "pending")]
-    undone = [p for p in others if p[2] in ("running", "pending") and p[1]]
-    rest = tail + ([("one", undone)] if undone and text_width(" · ".join([_part_text(p, 2)[0] for p in undone])) <= room else [("one", [p]) for p in undone])
+    hits_all = [p for p in parts if p[2] in _HITS]
+    total = 0
+    for p in hits_all:
+        total += p[1]
+    approx = "~" if [p for p in hits_all if p[4] == "estimate"] else ""
 
     def text(unit, level):
         # `(plain, drawn)` of a unit: its parts joined, the hits after
@@ -3635,10 +3641,6 @@ def action_results(split: dict, room: int, rows = 3, short = False, stack = Fals
         drawn = " · ".join([t[1] for t in texts])
         if unit[0] != "hits":
             return (plain, drawn)
-        total = 0
-        for p in hits:
-            total += p[1]
-        approx = "~" if [p for p in hits if p[4] == "estimate"] else ""
         label = "cache hits %s%s:" % (approx, _thousands(total) if level < 2 else short_count(total))
         if not unit[1]:
             return (label, _c("muted") + label + _RESET)
@@ -3647,16 +3649,20 @@ def action_results(split: dict, room: int, rows = 3, short = False, stack = Fals
     def width_of(row, level):
         return text_width(" · ".join([text(u, level)[0] for u in row]))
 
-    packed = []
-    best = None
-    for level, fit in [(0, 0), (1, 1), (1, 2)]:
-        if short and level == 0:
-            continue
+    def pack(parts, level, fit):
+        # The units of `parts` on rows `fit` measures, or None past `rows`.
+        hits = [p for p in parts if p[2] in _HITS]
+        others = [p for p in parts if p[2] not in _HITS]
+        lead = [("one", [p]) for p in others if p[2] == "ran"]
+        failed = [("one", [p]) for p in others if p[2] == "failed"]
+        tail = [("one", [p]) for p in others if p[2] not in ("ran", "failed", "running", "pending")]
+        undone = [p for p in others if p[2] in ("running", "pending") and p[1]]
+        rest = tail + ([("one", undone)] if undone and text_width(" · ".join([_part_text(p, fit)[0] for p in undone])) <= room else [("one", [p]) for p in undone])
 
         # The hits on as few rows as they fit: their label with as many as
         # fit after it, the rest after them.
         group = []
-        if hits:
+        if hits_all:
             k = len(hits)
             for _ in range(len(hits)):
                 if k == 0 or width_of([("hits", hits[:k])], fit) <= room:
@@ -3670,18 +3676,51 @@ def action_results(split: dict, room: int, rows = 3, short = False, stack = Fals
             if packed[-1] and ((not beside and unit[0] == "hits") or (after and unit[0] != "hit") or width_of(packed[-1] + [unit], fit) > room):
                 packed.append([])
             packed[-1].append(unit)
+        return packed
 
-        # The fewest rows that fit, the wholest words among them.
-        if len(packed) <= rows and all([width_of(r, fit) <= room for r in packed]) and (best == None or len(packed) < len(best[1])):
-            best = (level, packed)
-    if best != None:
-        level, packed = best
-    if len(packed) > rows:
-        packed = packed[:rows - 1] + [[u for r in packed[rows - 1:] for u in r]]
+    def fits(packed, fit):
+        return len(packed) <= rows and all([width_of(r, fit) <= room for r in packed])
+
+    # Whole counts with every part, then with fewer, then in thousands;
+    # the fewest rows that fit, the wholest words among them.
+    no_internal = [p for p in parts if p[2] != "internal"]
+    stages = [(parts, [(0, 0), (1, 1)]), (no_internal, [(0, 0), (1, 1)]), ([p for p in no_internal if p[4] != "dim"], [(0, 0), (1, 1), (1, 2)])]
+    best = None
+    for kept, levels in stages:
+        for level, fit in levels:
+            if short and level == 0:
+                continue
+            packed = pack(kept, level, fit)
+            if fits(packed, fit) and (best == None or len(packed) < len(best[1])):
+                best = (fit, packed)
+        if best != None:
+            break
+    if best == None:
+        # Whole parts from the end until what is left fits, the ones that
+        # say what happened last to go.
+        keep = ("ran", "failed", "blocked", "unreported", "running", "pending")
+        kept = [p for p in no_internal if p[4] != "dim"]
+        names = [p[2] for p in kept]
+        order = [n for n in reversed(names) if n not in keep] + [n for n in reversed(names) if n in keep]
+        for name in order:
+            if fits(pack(kept, 1, 2), 2) or len(kept) == 1:
+                break
+            kept = [p for p in kept if p[2] != name]
+        packed = pack(kept, 1, 2)
+        best = (2, packed[:rows])
+    fit, packed = best
     out = []
     for row in packed:
-        drawn = level if width_of(row, level) <= room else 2
-        out.append(" · ".join([text(u, drawn)[1] for u in row]))
+        drawn = fit if width_of(row, fit) <= room else 2
+        line = ""
+        for u in row:
+            piece = text(u, drawn)
+
+            # A part wider than the row is drawn alone, cut at the box.
+            if line and text_width(_plain(line) + " · " + piece[0]) > room:
+                break
+            line += (" · " if line else "") + piece[1]
+        out.append(line)
     return out
 
 def build_outcome(inv: dict) -> str:
@@ -3868,20 +3907,20 @@ def _top(state: dict, cols: int, rows: int) -> list:
     summary = [
         _counts("Targets  %d configured", c["configured"]),
         _counts("         %s%d built%s, %s%d failed%s%s", (_c("success"), built_n, _RESET, failed, targets_failed, _RESET, blocked_text_)),
-        "Tests    " + _tests_words(c),
-    ]
+    ] + (["Tests    " + _tests_words(c)] if _has_tests(c) else [])
     wide = max([text_width(_plain(r)) for r in summary]) <= right_w - 4
     if not wide:
         # Narrow: the failures first, as what matters is what failed.
         summary = [
             _counts("Targets %s✗%d%s %s✓%d%s%s/%d", (failed, targets_failed, _RESET, _c("success"), built_n, _RESET, (_counts(" ○%d", targets_blocked)) if targets_blocked else "", c["configured"])),
+        ] + ([
             "Tests   " + " ".join([p for p in [
                 _counts("%s✗%d%s", (tests_failed, c["tests_failed"], _RESET)) if c["tests_failed"] else "",
                 _counts("%s✓%d%s%s", (_c("success"), c["tests_passed"], _RESET, tests_cached_text(c))) if c["tests_passed"] or not (c["tests_failed"] or c.get("tests_flaky") or c.get("tests_skipped")) else "",
                 _counts("%s~%d%s", (_c("warning"), c["tests_flaky"], _RESET)) if c.get("tests_flaky") else "",
                 _counts("⊘%d", c["tests_skipped"]) if c.get("tests_skipped") else "",
             ] if p]),
-        ]
+        ] if _has_tests(c) else [])
 
     # As tall as the most Results rows there can be, for the whole build;
     # the list scrolls in it (`actions_scroll`, the wheel over it), and

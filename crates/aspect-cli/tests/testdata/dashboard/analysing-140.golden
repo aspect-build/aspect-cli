@@ -3,9 +3,9 @@
 ┌─ Running (15 of 16 started) ───────────────────────────────────────────────────────────────┐┌─ Results ──────────────────────────────────┐
 │ Compiling src/a.cc; 3s                                                                     ││ Targets  3 configured                      │
 │ Linking //app:bin; 1s                                                                      ││          0 built, 0 failed                 │
-│ … and 13 more                                                                              ││ Tests    0 passed                          │
-│                                                                                            ││ Actions  3,830 other                       │
+│ … and 13 more                                                                              ││ Actions  3,830 other                       │
 │                                                                                            ││          ─ 15 running · 4,718 pending      │
+│                                                                                            ││                                            │
 │                                                                                            ││                                            │
 │                                                                                            ││                                            │
 │                                                                                            ││                                            │
