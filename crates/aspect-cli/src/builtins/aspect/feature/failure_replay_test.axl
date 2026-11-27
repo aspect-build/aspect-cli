@@ -17,7 +17,7 @@ so the goldens hold no path of this machine. `--update` rewrites the
 goldens; review the diff.
 """
 
-load("@aspect//feature/dashboard.axl", "ANSI", "collect_event", "failure_entries", "failure_rows", "failure_summary", "summary_state")
+load("@aspect//feature/dashboard.axl", "ANSI", "action_split", "collect_event", "failure_entries", "failure_rows", "failure_summary", "summary_state")
 
 _FIXTURES = "crates/aspect-cli/tests/testdata/failures"
 
@@ -52,7 +52,7 @@ def _value(name: str, value):
         return [_value(name, v) for v in value]
     if type(value) == "string" and name in _ENUM_FIELDS:
         return value.lower()
-    if type(value) == "string" and name.endswith(_INT64_SUFFIXES) and value.lstrip("-").isdigit():
+    if type(value) == "string" and (name.endswith(_INT64_SUFFIXES) or name == "count") and value.lstrip("-").isdigit():
         return int(value)
     return value
 
@@ -149,7 +149,31 @@ def _replay(ctx: TaskContext, case: str, prefix: str) -> str:
         fail("%s/%s: the summary lists %d of Bazel's other errors, the tab %d" % (case, prefix, others, flagged))
     if code == 0 and (title or tabbed):
         fail("%s/%s: a passing build has failures" % (case, prefix))
+
+    # The actions' parts add up to Bazel's exact done count (its graph's
+    # action keys built and cleaned), which the known parts never pass.
+    split = action_split(dict(state, building = False))
+    if split["final"]:
+        parts = 0
+        for key in ("ran", "local", "memory", "disk", "remote", "internal", "failed", "other", "not_run", "unreported"):
+            parts += split[key]
+        graph = getattr(getattr(state["inv"].get("build_metrics"), "build_graph_metrics", None), "built_values", None)
+        if parts != split["done"]:
+            fail("%s/%s: the actions' parts add up to %d of %d" % (case, prefix, parts, split["done"]))
+        if graph != None and split["done"] != _exact_done(state):
+            fail("%s/%s: the known parts pass Bazel's done count: %d of %d" % (case, prefix, split["done"], _exact_done(state)))
     return "\n".join(out) + "\n"
+
+def _exact_done(state: dict) -> int:
+    """Bazel's done count, exact: its graph's `ACTION_EXECUTION` keys built
+    and cleaned."""
+    graph = getattr(state["inv"].get("build_metrics"), "build_graph_metrics", None)
+    n = 0
+    for field in ("built_values", "cleaned_values"):
+        for stat in getattr(graph, field, None) or []:
+            if getattr(stat, "skyfunction_name", "") == "ACTION_EXECUTION":
+                n += getattr(stat, "count", 0) or 0
+    return n
 
 def _prefixes(names: list) -> list:
     """The recordings of a case's files: `9.3.3`, `9.3.3.noall`, …"""
