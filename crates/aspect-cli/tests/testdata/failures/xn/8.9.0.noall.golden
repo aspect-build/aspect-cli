@@ -1,0 +1,28 @@
+exit 1
+── Failures (4) ──
+✗ //xn:c  Check · exit 5
+  │ error: CCC alone
+  log ${OUTPUT_BASE}/execroot/_main/bazel-out/_tmp/actions/stderr-5
+
+✗ //xn:a  Check · exit 3
+  │ error: AAA mismatch in a
+  log ${OUTPUT_BASE}/execroot/_main/bazel-out/_tmp/actions/stderr-3
+
+✗ //xn:d  Check
+  │ /bin/bash: $@: ambiguous redirect
+  log ${OUTPUT_BASE}/execroot/_main/bazel-out/_tmp/actions/stderr-4
+
+✗ //xn:b  Check · exit 3
+  │ error: BBB mismatch in b
+  log ${OUTPUT_BASE}/execroot/_main/bazel-out/_tmp/actions/stderr-2
+0 built, 4 failed · 0 tests passed, 0 failed · Bazel's raw log: ${FIXTURE}/8.9.0.noall.console
+All of it: aspect history show t-replay
+--- Failures tab
+✗ //xn:c  Check · exit 5
+  │ error: CCC alone
+✗ //xn:a  Check · exit 3
+  │ error: AAA mismatch in a
+✗ //xn:d  Check
+  │ /bin/bash: $@: ambiguous redirect
+✗ //xn:b  Check · exit 3
+  │ error: BBB mismatch in b

@@ -1,0 +1,36 @@
+exit 1
+── Failures (4) ──
+✗ //xt:c  Proc · exit 4
+  │ proc 1.0 starting
+  │ error: CCC1 broke in c1.dat
+  log ${OUTPUT_BASE}/execroot/_main/bazel-out/_tmp/actions/stderr-5
+
+✗ //xt:a  Proc · exit 3
+  │ proc 1.0 starting
+  │ error: AAA broke in a.dat
+  log ${OUTPUT_BASE}/execroot/_main/bazel-out/_tmp/actions/stderr-2
+
+✗ //xt:b  Proc · exit 4
+  │ proc 1.0 starting
+  │ error: BBB broke in b.dat
+  log ${OUTPUT_BASE}/execroot/_main/bazel-out/_tmp/actions/stderr-3
+
+✗ //xt:c  Proc · exit 3
+  │ proc 1.0 starting
+  │ error: CCC0 broke in c0.dat
+  log ${OUTPUT_BASE}/execroot/_main/bazel-out/_tmp/actions/stderr-4
+0 built, 3 failed · 0 tests passed, 0 failed · Bazel's raw log: ${FIXTURE}/7.7.3.console
+All of it: aspect history show t-replay
+--- Failures tab
+✗ //xt:c  Proc · exit 4
+  │ proc 1.0 starting
+  │ error: CCC1 broke in c1.dat
+✗ //xt:a  Proc · exit 3
+  │ proc 1.0 starting
+  │ error: AAA broke in a.dat
+✗ //xt:b  Proc · exit 4
+  │ proc 1.0 starting
+  │ error: BBB broke in b.dat
+✗ //xt:c  Proc · exit 3
+  │ proc 1.0 starting
+  │ error: CCC0 broke in c0.dat

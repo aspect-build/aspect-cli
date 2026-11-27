@@ -1,0 +1,31 @@
+exit 1
+── Failures (6) ──
+✗ //lc:n3  Check
+
+✗ //lc:n5  Check
+
+✗ //lc:n2  Check · exit 3
+  │ n2 broke
+  log ${OUTPUT_BASE}/execroot/_main/bazel-out/_tmp/actions/stderr-2
+
+✗ //lc:n4  Check · exit 5
+  │ n4 broke
+  log ${OUTPUT_BASE}/execroot/_main/bazel-out/_tmp/actions/stderr-3
+
+✗ //lc:n0  Check · exit 1
+  │ n0 broke
+  log ${OUTPUT_BASE}/execroot/_main/bazel-out/_tmp/actions/stderr-6
+
+✗ //lc:n1  Check
+0 built, 6 failed · 0 tests passed, 0 failed · Bazel's raw log: ${FIXTURE}/9.3.3.console
+All of it: aspect history show t-replay
+--- Failures tab
+✗ //lc:n3  Check
+✗ //lc:n5  Check
+✗ //lc:n2  Check · exit 3
+  │ n2 broke
+✗ //lc:n4  Check · exit 5
+  │ n4 broke
+✗ //lc:n0  Check · exit 1
+  │ n0 broke
+✗ //lc:n1  Check

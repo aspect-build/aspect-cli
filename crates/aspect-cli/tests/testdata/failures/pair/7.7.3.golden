@@ -1,0 +1,46 @@
+exit 1
+── Failures (8) ──
+✗ //pair:crlf  Gen · exit 3
+  │ crlf two broke
+  log ${OUTPUT_BASE}/execroot/_main/bazel-out/_tmp/actions/stderr-7
+
+✗ //pair:same  Gen · exit 3
+  │ identical text
+  log ${OUTPUT_BASE}/execroot/_main/bazel-out/_tmp/actions/stderr-9
+
+✗ //pair:plain  Gen · exit 2
+  │ plain one broke
+  log ${OUTPUT_BASE}/execroot/_main/bazel-out/_tmp/actions/stderr-2
+
+✗ //pair:ansi  Gen · exit 3
+  │ error: ansi two broke
+  log ${OUTPUT_BASE}/execroot/_main/bazel-out/_tmp/actions/stderr-3
+
+✗ //pair:ansi  Gen · exit 2
+  │ error: ansi one broke
+  log ${OUTPUT_BASE}/execroot/_main/bazel-out/_tmp/actions/stderr-5
+
+✗ //pair:crlf  Gen · exit 2
+
+✗ //pair:same  Gen · exit 2
+
+✗ //pair:plain  Gen · exit 3
+0 built, 4 failed · 0 tests passed, 0 failed · Bazel's raw log: ${FIXTURE}/7.7.3.console
+All of it: aspect history show t-replay
+--- Failures tab
+✗ //pair:crlf  Gen · exit 3
+  │ crlf two broke
+✗ //pair:same  Gen · exit 3
+  │ identical text
+✗ //pair:plain  Gen · exit 2
+  │ plain one broke
+✗ //pair:ansi  Gen · exit 3
+  │ error: ansi two broke
+✗ //pair:ansi  Gen · exit 2
+  │ error: ansi one broke
+✗ //pair:crlf  Gen · exit 2
+  │ crlf one broke
+✗ //pair:same  Gen · exit 2
+  │ identical text
+✗ //pair:plain  Gen · exit 3
+  │ plain two broke

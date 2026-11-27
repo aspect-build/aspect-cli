@@ -1,0 +1,20 @@
+exit 1
+── Failures (2) ──
+✗ //ci:info  Genrule · exit 1
+  │ INFO: tool says hello
+  │ ERROR: tool says it broke
+  │ detail line
+  log ${OUTPUT_BASE}/execroot/_main/bazel-out/_tmp/actions/stderr-3
+
+✗ //ci:plain  Genrule · exit 2
+  │ plain broke
+  log ${OUTPUT_BASE}/execroot/_main/bazel-out/_tmp/actions/stderr-2
+0 built, 2 failed · 0 tests passed, 0 failed · Bazel's raw log: ${FIXTURE}/8.9.0.console
+All of it: aspect history show t-replay
+--- Failures tab
+✗ //ci:info  Genrule · exit 1
+  │ INFO: tool says hello
+  │ ERROR: tool says it broke
+  │ detail line
+✗ //ci:plain  Genrule · exit 2
+  │ plain broke

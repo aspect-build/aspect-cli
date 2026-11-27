@@ -1,0 +1,27 @@
+exit 1
+── Failures (2) ──
+✗ //dep/rf:x  analysis
+  │ in r rule //dep/rf:x: 
+  │ Traceback (most recent call last):
+  │         File "${WORKSPACE}/dep/rf/defs.bzl", line 2, column 9, in _impl
+  │                 fail("impl refuses " + ctx.label.name)
+  │ Error in fail: impl refuses x
+  ○ blocked: //dep:top
+
+✗ //dep:bad  Genrule · exit 1
+  │ bad broke
+  log ${OUTPUT_BASE}/execroot/_main/bazel-out/_tmp/actions/stderr-2
+  ○ blocked: //dep:mid
+0 built, 1 failed, 2 blocked · 0 tests passed, 0 failed · Bazel's raw log: ${FIXTURE}/7.7.3.console
+All of it: aspect history show t-replay
+--- Failures tab
+✗ //dep/rf:x  analysis failed
+  │ in r rule //dep/rf:x:
+  │ Traceback (most recent call last):
+  │         File "${WORKSPACE}/dep/rf/defs.bzl", line 2, column 9, in _impl
+  │                 fail("impl refuses " + ctx.label.name)
+  │ Error in fail: impl refuses x
+✗ //dep:bad  Genrule · exit 1
+  │ bad broke
+○ //dep:mid  blocked by :bad
+○ //dep:top  blocked by //dep/rf:x

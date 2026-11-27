@@ -1,0 +1,33 @@
+exit 1
+── Failures (4) ──
+✗ //ms2:shared_missing.txt  analysis
+  │ its package has an error
+  ○ blocked: //ms2:b, //ms2:a
+
+✗ //ms2:mine_missing.txt  analysis
+  │ its package has an error
+  ○ blocked: //ms2:d, //ms2:f
+
+✗ //other:file.txt  analysis
+  │ its package has an error
+  ○ blocked: //ms2:c
+
+✗ //ms2:e  Genrule · exit 3
+  │ e broke
+  log ${OUTPUT_BASE}/execroot/_main/bazel-out/_tmp/actions/stderr-2
+0 built, 1 failed, 5 blocked · 0 tests passed, 0 failed · Bazel's raw log: ${FIXTURE}/9.3.3.console
+All of it: aspect history show t-replay
+--- Failures tab
+✗ //ms2:e  Genrule · exit 3
+  │ e broke
+✗ //ms2:shared_missing.txt  analysis failed
+  │ its package has an error
+✗ //ms2:mine_missing.txt  analysis failed
+  │ its package has an error
+✗ //other:file.txt  analysis failed
+  │ its package has an error
+○ //ms2:c  blocked by //other:file.txt
+○ //ms2:b  blocked by :shared_missing.txt
+○ //ms2:a  blocked by :shared_missing.txt
+○ //ms2:d  blocked by :mine_missing.txt
+○ //ms2:f  blocked by :mine_missing.txt

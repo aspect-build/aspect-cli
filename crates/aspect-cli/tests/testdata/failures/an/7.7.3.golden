@@ -1,0 +1,22 @@
+exit 1
+── Failures (2) ──
+✗ //nowhere:x  analysis
+  │ no such package 'nowhere': BUILD file not found in any of the following directories. Add a
+  │   BUILD file to a directory to mark it as a package.
+  │  - ${WORKSPACE}/nowhere
+  ○ blocked: //an:badlabel
+
+✗ //an:nope.txt  analysis
+  │ its package has an error
+  ○ blocked: //an:missing, //an:dep
+0 built, 1 failed, 3 blocked · 0 tests passed, 0 failed · Bazel's raw log: ${FIXTURE}/7.7.3.console
+All of it: aspect history show t-replay
+--- Failures tab
+✗ //nowhere:x  analysis failed
+  │ no such package 'nowhere': BUILD file not found in any of the following directories. Add a BUILD file to a director…
+  │  - ${WORKSPACE}/nowhere
+✗ //an:nope.txt  analysis failed
+  │ its package has an error
+○ //an:badlabel  blocked by //nowhere:x
+○ //an:missing  blocked by :nope.txt
+○ //an:dep  blocked by :nope.txt

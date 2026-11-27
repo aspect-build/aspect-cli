@@ -1,0 +1,13 @@
+exit 1
+── Failures (3) ──
+✗ //mc:d0  Check
+
+✗ //mc:d1  Check
+
+✗ //mc:e  Check
+0 built, 3 failed · 0 tests passed, 0 failed · Bazel's raw log: ${FIXTURE}/7.7.3.console
+All of it: aspect history show t-replay
+--- Failures tab
+✗ //mc:d0  Check
+✗ //mc:d1  Check
+✗ //mc:e  Check

@@ -1,0 +1,14 @@
+exit 1
+── Failures (1) ──
+✗ //nowhere2:tool  analysis
+  │ no such package 'nowhere2': BUILD file not found in any of the following directories. Add a
+  │   BUILD file to a directory to mark it as a package.
+  │  - nowhere2
+  ○ blocked: //ad:x
+0 built, 1 failed, 1 blocked · 0 tests passed, 0 failed · Bazel's raw log: ${FIXTURE}/9.3.3.console
+All of it: aspect history show t-replay
+--- Failures tab
+✗ //nowhere2:tool  analysis failed
+  │ no such package 'nowhere2': BUILD file not found in any of the following directories. Add a BUILD file to a directo…
+  │  - nowhere2
+○ //ad:x  blocked by //nowhere2:tool

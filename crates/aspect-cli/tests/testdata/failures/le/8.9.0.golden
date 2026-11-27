@@ -1,0 +1,18 @@
+exit 1
+── Failures (2) ──
+✗ //le/sub:nothere  analysis
+  │ its package has an error
+  ○ blocked: //q:on_sub
+
+✗ //le:x  analysis
+  │ its package has an error
+  ○ blocked: //q:on_le
+0 built, 0 failed, 2 blocked · 0 tests passed, 0 failed · Bazel's raw log: ${FIXTURE}/8.9.0.console
+All of it: aspect history show t-replay
+--- Failures tab
+✗ //le/sub:nothere  analysis failed
+  │ its package has an error
+✗ //le:x  analysis failed
+  │ its package has an error
+○ //q:on_sub  blocked by //le/sub:nothere
+○ //q:on_le  blocked by //le:x

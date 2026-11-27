@@ -12,6 +12,7 @@ load("@aspect//feature/buildkite_annotations.axl", "BuildkiteAnnotations")
 load("@aspect//feature/circleci_test_results.axl", "CircleCITestResults")
 load("@aspect//feature/dashboard_test.axl", "dashboard_tests")
 load("@aspect//feature/deployment.axl", "Deployment")
+load("@aspect//feature/failure_replay_test.axl", "failure_replay_tests")
 load("@aspect//feature/github_status_checks.axl", "GithubStatusChecks")
 load("@aspect//format.axl", "format")
 load("@aspect//gc_test.axl", "gc_tests")
@@ -631,6 +632,10 @@ def config(ctx: ConfigContext):
 
     # Run with: aspect dev test-dashboard
     ctx.tasks.add(dashboard_tests)
+
+    # Recorded Bazel failures through the failure summary and the Failures tab.
+    # Run with: aspect dev test-failure-replay
+    ctx.tasks.add(failure_replay_tests)
 
     # aspect_endpoint_auth.axl: host parsing, suffix matching, credential gate.
     # Run with: aspect dev test-aspect-endpoint-auth

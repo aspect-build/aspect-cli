@@ -1,0 +1,38 @@
+exit 1
+── Failures (6) ──
+✗ //ov:d  Proc · exit 2
+  │ same line
+  log ${OUTPUT_BASE}/execroot/_main/bazel-out/_tmp/actions/stderr-2
+
+✗ //ov:c  Proc · exit 1
+  │ error: x
+  log ${OUTPUT_BASE}/execroot/_main/bazel-out/_tmp/actions/stderr-5
+
+✗ //ov:g1  Genrule · exit 1
+  │ error: shared
+  log ${OUTPUT_BASE}/execroot/_main/bazel-out/_tmp/actions/stderr-7
+
+✗ //ov:g2  Genrule · exit 1
+  │ error: shared
+  log ${OUTPUT_BASE}/execroot/_main/bazel-out/_tmp/actions/stderr-6
+
+✗ //ov:c  Proc · exit 1
+  │ error: x is bad
+  log ${OUTPUT_BASE}/execroot/_main/bazel-out/_tmp/actions/stderr-3
+
+✗ //ov:d  Proc · exit 2
+0 built, 4 failed · 0 tests passed, 0 failed · Bazel's raw log: ${FIXTURE}/9.3.3.console
+All of it: aspect history show t-replay
+--- Failures tab
+✗ //ov:d  Proc · exit 2
+  │ same line
+✗ //ov:c  Proc · exit 1
+  │ error: x
+✗ //ov:g1  Genrule · exit 1
+  │ error: shared
+✗ //ov:g2  Genrule · exit 1
+  │ error: shared
+✗ //ov:c  Proc · exit 1
+  │ error: x is bad
+✗ //ov:d  Proc · exit 2
+  │ same line

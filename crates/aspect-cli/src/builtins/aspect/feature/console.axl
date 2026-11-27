@@ -224,7 +224,7 @@ task starts.
 
 load("@aspect//bazel/console.axl", "PROFILES", "RECAP_MAX", "STAGE_NAMES", "console_tip_rules", "default_stages", "emit_tips", "tip_stages")
 load("@aspect//bazel.axl", "BazelTrait")
-load("@aspect//feature/dashboard.axl", "ANSI", "count_event", "failure_summary", "note_blocked", "note_event", "summary_state")
+load("@aspect//feature/dashboard.axl", "ANSI", "collect_event", "failure_summary", "summary_state")
 load("@aspect//tips.axl", "TipsTrait")
 load("../private/lib/agent.axl", "under_agent")
 load("../private/lib/environment.axl", "warn")
@@ -288,12 +288,7 @@ def _console_impl(ctx: FeatureContext):
         if state["read"] == None:
             state["read"] = task_ctx.std.fs.try_read_tail
             state["env"] = task_ctx.std.env
-        payload = event.payload
-        if kind in ("build_started", "build_finished", "options_parsed"):
-            state["inv"][kind] = payload
-        count_event(state["counts"], kind, event.id, payload)
-        note_event(state, kind, event.id, payload, type(payload) == "aborted")
-        note_blocked(state, event)
+        collect_event(state, event)
 
     def _summarize(task_ctx, build):
         if trait.output_display == "none":

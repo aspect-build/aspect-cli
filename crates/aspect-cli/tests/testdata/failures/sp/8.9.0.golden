@@ -1,0 +1,22 @@
+exit 1
+── Failures (4) ──
+✗ //sp:api  Check · exit 2
+  │ api broke
+  log ${OUTPUT_BASE}/execroot/_main/bazel-out/_tmp/actions/stderr-3
+
+✗ //sp:docs  Check
+
+✗ //sp:after  Check
+
+✗ //sp:gen  Genrule · exit 3
+  │ gen broke
+  log ${OUTPUT_BASE}/execroot/_main/bazel-out/_tmp/actions/stderr-4
+0 built, 4 failed · 0 tests passed, 0 failed · Bazel's raw log: ${FIXTURE}/8.9.0.console
+All of it: aspect history show t-replay
+--- Failures tab
+✗ //sp:api  Check · exit 2
+  │ api broke
+✗ //sp:docs  Check
+✗ //sp:after  Check
+✗ //sp:gen  Genrule · exit 3
+  │ gen broke

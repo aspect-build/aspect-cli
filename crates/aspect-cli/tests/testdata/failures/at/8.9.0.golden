@@ -1,0 +1,14 @@
+exit 1
+── Failures (2) ──
+✗ //at:ok  analysis
+  │ its package has an error
+
+✗ //at:t  analysis
+  │ its package has an error
+0 built, 2 failed · 0 tests passed, 0 failed · Bazel's raw log: ${FIXTURE}/8.9.0.console
+All of it: aspect history show t-replay
+--- Failures tab
+✗ //at:ok  analysis failed
+  │ its package has an error
+✗ //at:t  analysis failed
+  │ its package has an error

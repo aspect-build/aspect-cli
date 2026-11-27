@@ -1,0 +1,170 @@
+"""Replays recorded Bazel failures through the failure summary and the
+Dashboard's Failures tab, and compares each with its golden.
+
+Run with:
+  aspect dev test-failure-replay [--update] [--case=<name>]
+
+Each case in crates/aspect-cli/tests/testdata/failures (its README says how
+they are recorded) holds, per Bazel version and variant, the JSON build
+event stream, the console as a pty got it and the logs the events name.
+Every event goes through `collect_event` as the build event hooks see it,
+then `failure_summary` reads the console and the logs as it reads the
+history's copies, and `failure_rows` draws the Failures tab with every
+row's excerpt. Placeholders stand for the recording's paths: `${FIXTURE}`
+for the case's folder and `${OUTPUT_BASE}` for the files the events name,
+so the goldens hold no path of this machine. `--update` rewrites the
+goldens; review the diff.
+"""
+
+load("@aspect//feature/dashboard.axl", "ANSI", "collect_event", "failure_rows", "failure_summary", "summary_state")
+
+_FIXTURES = "crates/aspect-cli/tests/testdata/failures"
+
+# The fields Bazel's JSON gives as an enum's name, which the build event
+# hooks read as the runtime gives them: in lower case.
+_ENUM_FIELDS = ["status", "overall_status", "reason", "code"]
+
+# The suffixes of the int64 fields Bazel's JSON gives as a string of digits
+# (`"testAttemptDurationMillis": "209"`), which the runtime gives as an int.
+_INT64_SUFFIXES = ("_millis", "_ms", "_bytes", "_count", "_executed", "_created", "_size", "_nanos", "seconds", "_hits", "_misses", "_total", "_number")
+
+def _snake(name: str) -> str:
+    """`primaryOutput` as the runtime names it: `primary_output`."""
+    out = ""
+    for i in range(len(name)):
+        c = name[i]
+        if c.isupper():
+            out += "_" + c.lower()
+        else:
+            out += c
+    return out
+
+def _value(name: str, value):
+    """A JSON value as the runtime gives a proto field of it."""
+    if type(value) == "dict":
+        return _message(value, name)
+    if type(value) == "list":
+        return [_value(name, v) for v in value]
+    if type(value) == "string" and name in _ENUM_FIELDS:
+        return value.lower()
+    if type(value) == "string" and name.endswith(_INT64_SUFFIXES) and value.lstrip("-").isdigit():
+        return int(value)
+    return value
+
+def _message(fields: dict, name: str = ""):
+    """A JSON message as the runtime gives it: its fields by their snake
+    case names; a `File`'s `uri` also as its `file` oneof, a
+    `FailureDetail`'s category (`spawn`, `execution`, …) as `category`."""
+    out = {}
+    for k, v in fields.items():
+        out[_snake(k)] = _value(_snake(k), v)
+    if "uri" in out:
+        out["file"] = out["uri"]
+    if name == "failure_detail":
+        out["category"] = ([v for k, v in out.items() if k != "message"] + [None])[0]
+    return struct(**out)
+
+def _event(line: str):
+    """One line of Bazel's JSON build event stream as the build event hooks
+    get it: its id's kind, its id, its payload, its children and, as the
+    runtime tells it by the payload's type, whether that is Aborted."""
+    fields = json.decode(line)
+    kind = list(fields["id"].keys())[0]
+    body = [k for k in fields.keys() if k not in ("id", "children", "lastMessage")]
+    return struct(
+        kind = _snake(kind),
+        id = _message(fields["id"][kind]),
+        payload = _message(fields[body[0]]) if body else None,
+        payload_kind = "aborted" if body and body[0] == "aborted" else (body[0] if body else ""),
+        children = [struct(id = _message(list(c.values())[0])) for c in fields.get("children", [])],
+    )
+
+def _plain(ansi, text: str) -> str:
+    """`text` without its escape sequences."""
+    return ansi.replace(text, "")
+
+def _replay(ctx: TaskContext, case: str, prefix: str) -> str:
+    """What the summary and the Failures tab say of one recording."""
+    fs = ctx.std.fs
+    folder = "%s/%s/%s" % (ctx.std.env.aspect_root_dir(), _FIXTURES, case)
+
+    def resolve(path):
+        if path.startswith("${FIXTURE}/"):
+            return folder + "/" + path[len("${FIXTURE}/"):]
+        if path.startswith("${OUTPUT_BASE}/"):
+            return "%s/%s.files/%s" % (folder, prefix, path[len("${OUTPUT_BASE}/"):])
+        return path
+
+    def read(path, n):
+        return fs.try_read_tail(resolve(path), n)
+
+    ansi = ctx.std.re.compile(ANSI)
+    state = summary_state(read, ctx.std.env, ansi)
+    bep = folder + "/" + prefix + ".bep.json"
+    if fs.exists(bep):
+        for line in fs.read_to_string(bep).split("\n"):
+            if line.strip():
+                collect_event(state, _event(line))
+    exit = fs.read_to_string(folder + "/" + prefix + ".exit").strip()
+    code = int(exit) if exit.isdigit() else None
+    state.update(building = False, ended = True)
+    console = "${FIXTURE}/" + prefix + ".console"
+    out = ["exit " + exit]
+    out += [_plain(ansi, l) for l in failure_summary(state, None, "t-replay", False, console, None, ctx.std.excerpt, 100, code)]
+    out.append("--- Failures tab")
+    tab = dict(state, focus = "console", selected = 0, expand_failures = True, excerpts = {}, listed_cache = None)
+    out += [_plain(ansi, r).rstrip() for r in failure_rows(tab, 400, 120)]
+    return "\n".join(out) + "\n"
+
+def _prefixes(names: list) -> list:
+    """The recordings of a case's files: `9.3.3`, `9.3.3.noall`, …"""
+    return sorted([n[:-len(".exit")] for n in names if n.endswith(".exit")])
+
+def _glyphs(text: str) -> str:
+    """`text` as the `mono` theme draws it, so a golden compares under any
+    theme."""
+    return text.replace("✗", "x").replace("│", "|")
+
+def _impl(ctx: TaskContext) -> int:
+    fs = ctx.std.fs
+    root = "%s/%s" % (ctx.std.env.aspect_root_dir(), _FIXTURES)
+    stale = []
+    count = 0
+    for entry in sorted([e.path for e in fs.read_dir(root) if e.is_dir]):
+        if ctx.args.case and entry != ctx.args.case:
+            continue
+        names = [e.path for e in fs.read_dir(root + "/" + entry)]
+        for prefix in _prefixes(names):
+            count += 1
+            got = _replay(ctx, entry, prefix)
+            path = "%s/%s/%s.golden" % (root, entry, prefix)
+            if ctx.args.update:
+                fs.write(path, got)
+                continue
+            want = fs.read_to_string(path) if fs.exists(path) else None
+            if want == None or _glyphs(got) != _glyphs(want):
+                stale.append((entry + "/" + prefix, got, want))
+    for name, got, want in stale:
+        print("replay %s differs (aspect dev test-failure-replay --update rewrites it):" % name)
+        g, w = got.split("\n"), (want or "").split("\n")
+        for i in range(max(len(g), len(w))):
+            a = g[i] if i < len(g) else "<none>"
+            b = w[i] if i < len(w) else "<none>"
+            if _glyphs(a) != _glyphs(b):
+                print("  line %d\n    got:  %r\n    want: %r" % (i, a, b))
+                break
+    if stale:
+        fail("%d of %d replay golden(s) differ: %s" % (len(stale), count, ", ".join([s[0] for s in stale])))
+    print("failure_replay_test.axl: %s %d recordings" % ("wrote" if ctx.args.update else "OK", count))
+    return 0
+
+failure_replay_tests = task(
+    summary = "Replay the recorded Bazel failures through the failure summary and the Failures tab.",
+    kind = "test-failure-replay",
+    group = ["dev"],
+    implementation = _impl,
+    args = {
+        "update": args.boolean(default = False),
+        "case": args.string(default = ""),
+    },
+)

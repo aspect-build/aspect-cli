@@ -1,0 +1,38 @@
+exit 1
+── Failures (5) ──
+✗ //at2:t1  analysis
+  │ its package has an error
+
+✗ //at2:t2  analysis
+  │ its package has an error
+  ○ blocked: //q3:u2
+
+✗ //at2:ok  analysis
+  │ its package has an error
+  ○ blocked: //q2:u, //q3:u1
+
+✗ //at2:ok2  analysis
+  │ its package has an error
+  ○ blocked: //q3:u3
+
+✗ //at:ok  analysis
+  │ its package has an error
+  ○ blocked: //q:on_at
+0 built, 4 failed, 5 blocked · 0 tests passed, 0 failed · Bazel's raw log: ${FIXTURE}/7.7.3.console
+All of it: aspect history show t-replay
+--- Failures tab
+✗ //at2:t1  analysis failed
+  │ its package has an error
+✗ //at2:t2  analysis failed
+  │ its package has an error
+✗ //at2:ok  analysis failed
+  │ its package has an error
+✗ //at2:ok2  analysis failed
+  │ its package has an error
+✗ //at:ok  analysis failed
+  │ its package has an error
+○ //q2:u  blocked by //at2:ok
+○ //q3:u3  blocked by //at2:ok2
+○ //q3:u1  blocked by //at2:ok
+○ //q:on_at  blocked by //at:ok
+○ //q3:u2  blocked by //at2:t2
