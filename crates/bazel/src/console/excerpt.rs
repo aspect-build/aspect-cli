@@ -8,7 +8,8 @@
 //! first error is usually the cause of the rest, and a traceback's error
 //! comes after its frames. Output with no such line is shown by its tail.
 //! A line Bazel adds about how to debug a failure (`--sandbox_debug`) is
-//! never the anchor.
+//! never the anchor. A Starlark traceback has a cut of its own
+//! ([`traceback`]): its BUILD file's frame and its error.
 
 use std::ops::Range;
 
@@ -103,6 +104,48 @@ pub fn select<S: AsRef<str>>(lines: &[S], shape: Shape) -> Vec<Range<usize>> {
         return vec![start..end];
     }
     vec![start..end, tail_start..n]
+}
+
+/// What a Starlark traceback's first line says, or ends with when it says
+/// more before it (`package contains errors: mf: Traceback (most recent
+/// call last):`).
+const TRACEBACK: &str = "Traceback (most recent call last):";
+
+/// Which of `lines` a Starlark traceback's excerpt keeps, in order, when they
+/// hold one that starts on the first line or the next (after a line saying
+/// what failed, `in r rule //rf:x: `) and has an `Error in …:` line after
+/// that: the lines up to its start, its first frame at a BUILD file (`File
+/// "nm/BUILD.bazel", line 2`) and that frame's code line, and its last
+/// `Error in` line. None for any other lines. The console's recap and
+/// `std.excerpt(traceback = True)` both cut a traceback so.
+pub fn traceback<S: AsRef<str>>(lines: &[S]) -> Option<Vec<usize>> {
+    let start = lines
+        .iter()
+        .take(2)
+        .position(|l| l.as_ref().trim().ends_with(TRACEBACK))?;
+    let error = lines
+        .iter()
+        .rposition(|l| l.as_ref().trim_start().starts_with("Error in "))?;
+    if error <= start {
+        return None;
+    }
+    let mut kept: Vec<usize> = (0..=start).collect();
+    if let Some(b) = (start..error).find(|&k| is_build_frame(lines[k].as_ref())) {
+        kept.push(b);
+        if b + 1 < error {
+            kept.push(b + 1);
+        }
+    }
+    kept.push(error);
+    kept.dedup();
+    Some(kept)
+}
+
+/// Whether `line` is a traceback's frame at a BUILD file.
+fn is_build_frame(line: &str) -> bool {
+    let t = line.trim_start();
+    t.starts_with("File \"")
+        && (t.contains("/BUILD\"") || t.contains("/BUILD.bazel\"") || t.starts_with("File \"BUILD"))
 }
 
 /// `text` as the lines an excerpt is chosen from: escapes removed, a line
@@ -203,6 +246,49 @@ mod tests {
         lines[3] = "src/a.cc:3:4: error: no member named 'x'".into();
         lines[29] = "1 error generated.".into();
         assert_eq!(select(&lines, Shape::RECAP), vec![2..6, 29..30]);
+    }
+
+    /// The recorded tracebacks' excerpts: a frame line at a BUILD file and
+    /// its code line kept, the start's line with what it says before it,
+    /// and a line saying what failed before the start.
+    #[test]
+    fn a_traceback_keeps_its_start_build_frame_and_error() {
+        let nm = [
+            "package contains errors: nm: Traceback (most recent call last):",
+            "\tFile \"nm/BUILD.bazel\", line 2, column 6, in <toplevel>",
+            "\t\touter(name = \"m\")",
+            "\tFile \"nm/defs.bzl\", line 4, column 10, in outer",
+            "\t\tinner(name = name + \"_i\")",
+            "Error in fail: inner refuses m_i",
+        ];
+        assert_eq!(traceback(&nm), Some(vec![0, 1, 2, 5]));
+        let rf = [
+            "in r rule //rf:x: ",
+            "Traceback (most recent call last):",
+            "\tFile \"/ws/rf/defs.bzl\", line 2, column 9, in _impl",
+            "\t\tfail(\"impl refuses \" + ctx.label.name)",
+            "Error in fail: impl refuses x",
+            "after",
+        ];
+        assert_eq!(traceback(&rf), Some(vec![0, 1, 4]));
+    }
+
+    /// No traceback: none at the start, or no `Error in` line after it.
+    #[test]
+    fn other_lines_are_no_traceback() {
+        assert_eq!(
+            traceback(&["a", "b", "Traceback (most recent call last):", "Error in x"]),
+            None
+        );
+        assert_eq!(
+            traceback(&["Traceback (most recent call last):", "  File \"a.py\""]),
+            None
+        );
+        assert_eq!(
+            traceback(&["Error in x", "Traceback (most recent call last):"]),
+            None
+        );
+        assert_eq!(traceback::<&str>(&[]), None);
     }
 
     #[test]

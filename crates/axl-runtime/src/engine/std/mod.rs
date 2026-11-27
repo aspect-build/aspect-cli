@@ -135,12 +135,19 @@ pub(crate) fn std_methods(registry: &mut MethodsBuilder) {
     /// an error, with `before` and `after` lines around it, and the last
     /// `tail` lines, at most `max_lines` in all; with no such line, the last
     /// `max_lines`. `text` is cleaned first (escapes removed, a line redrawn
-    /// in place only as last drawn, a run of the same line once).
+    /// in place only as last drawn, a run of the same line once). With
+    /// `traceback = True`, a Starlark traceback in it (one starting on its
+    /// first line or the next, with an `Error in …:` line after) is cut as
+    /// the recap cuts one instead, whatever `max_lines` says: the lines up to
+    /// its start, its first frame at a BUILD file and that frame's code line,
+    /// and its last `Error in` line, every other run of lines a gap.
     ///
-    /// Returns `{"lines": [...], "cut_head": bool, "cut_tail": bool,
-    /// "cut_between": bool}`: at most `max_lines` lines of the output, plus a
-    /// `… N more lines` line where lines between two spans are left out; and
-    /// whether lines before the first, after the last, or between are.
+    /// Returns `{"lines": [...], "gaps": [[index, n], ...], "cut_head":
+    /// bool, "cut_tail": bool, "cut_between": bool}`: the lines shown, with a
+    /// `… N more lines` line where lines between two shown ones are left
+    /// out (and, for a traceback, after the last); `gaps`, where in `lines`
+    /// each of those sits and how many lines it stands for; and whether
+    /// lines before the first, after the last, or between are left out.
     fn excerpt<'v>(
         #[allow(unused)] this: values::Value<'v>,
         #[starlark(require = pos)] text: &str,
@@ -148,37 +155,55 @@ pub(crate) fn std_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = named, default = 4)] before: u32,
         #[starlark(require = named, default = 10)] after: u32,
         #[starlark(require = named, default = 5)] tail: u32,
+        #[starlark(require = named, default = false)] traceback: bool,
         heap: values::Heap<'v>,
     ) -> anyhow::Result<values::Value<'v>> {
         use bazel::console::excerpt;
         let lines = excerpt::clean_lines(text.as_bytes());
-        let spans = excerpt::select(
-            &lines,
-            excerpt::Shape {
-                max_lines: max_lines as usize,
-                before: before as usize,
-                after: after as usize,
-                tail: tail as usize,
-            },
-        );
+        let kept = if traceback {
+            excerpt::traceback(&lines)
+        } else {
+            None
+        };
+        let spans = match &kept {
+            Some(kept) => kept.iter().map(|&k| k..k + 1).collect(),
+            None => excerpt::select(
+                &lines,
+                excerpt::Shape {
+                    max_lines: max_lines as usize,
+                    before: before as usize,
+                    after: after as usize,
+                    tail: tail as usize,
+                },
+            ),
+        };
         let mut out: Vec<String> = Vec::new();
+        let mut gaps: Vec<(usize, usize)> = Vec::new();
+        fn gap(out: &mut Vec<String>, gaps: &mut Vec<(usize, usize)>, n: usize) {
+            let s = if n == 1 { "" } else { "s" };
+            gaps.push((out.len(), n));
+            out.push(format!("… {n} more line{s}"));
+        }
         let mut at = None;
         for span in &spans {
             if let Some(end) = at
                 && span.start > end
             {
-                let n = span.start - end;
-                let s = if n == 1 { "" } else { "s" };
-                out.push(format!("… {n} more line{s}"));
+                gap(&mut out, &mut gaps, span.start - end);
             }
             out.extend(lines[span.clone()].iter().cloned());
             at = Some(span.end);
         }
         let cut_head = spans.first().is_some_and(|s| s.start > 0);
         let cut_tail = spans.last().is_some_and(|s| s.end < lines.len());
-        let cut_between = spans.len() > 1;
+        let cut_between = !gaps.is_empty();
+        if kept.is_some() && cut_tail {
+            gap(&mut out, &mut gaps, lines.len() - at.unwrap_or(0));
+        }
+        let gaps: Vec<Vec<usize>> = gaps.into_iter().map(|(i, n)| vec![i, n]).collect();
         Ok(heap.alloc(starlark::values::dict::AllocDict([
             ("lines", heap.alloc(starlark::values::list::AllocList(out))),
+            ("gaps", heap.alloc(gaps)),
             ("cut_head", heap.alloc(cut_head)),
             ("cut_tail", heap.alloc(cut_tail)),
             ("cut_between", heap.alloc(cut_between)),
@@ -247,4 +272,69 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
     // `std.fs` is a module (the `fs.watch` event types live here); the
     // filesystem value type stays `std.FileSystem`.
     globals.namespace("fs", |g| g.namespace("watch", register_watch_types));
+}
+
+#[cfg(test)]
+mod tests {
+    /// Run `body` as a task's implementation; its exit code.
+    fn run(body: &str) -> Option<u8> {
+        let script = format!(
+            "def _impl(ctx):\n{body}\n    return 0\n\nTest = task(implementation = _impl)\n"
+        );
+        crate::test::eval(&script).run_task(0).expect("run_task")
+    }
+
+    /// A gap between two spans is a line of `lines` and an entry of
+    /// `gaps`; the head and the tail left out are only flags.
+    #[test]
+    fn excerpt_gives_its_gaps() {
+        let exit = run(r#"
+    text = "\n".join(["ok %d" % i for i in range(5)] + ["error: bad"] + ["ok"] * 0 + ["ok %d" % i for i in range(6, 40)])
+    got = ctx.std.excerpt(text, max_lines = 6, before = 1, after = 2, tail = 2)
+    want = {"lines": ["ok 4", "error: bad", "ok 6", "ok 7", "… 30 more lines", "ok 38", "ok 39"], "gaps": [[4, 30]], "cut_head": True, "cut_tail": False, "cut_between": True}
+    if got != want:
+        fail("got %r" % got)
+    whole = ctx.std.excerpt("a\nb")
+    if whole != {"lines": ["a", "b"], "gaps": [], "cut_head": False, "cut_tail": False, "cut_between": False}:
+        fail("whole: %r" % whole)"#);
+        assert_eq!(exit, Some(0));
+    }
+
+    /// `traceback = True` cuts a Starlark traceback as the recap does, every
+    /// run left out a gap, the one after its error too; other text as
+    /// without it.
+    #[test]
+    fn excerpt_cuts_a_traceback() {
+        let exit = run(r#"
+    text = "\n".join([
+        "package contains errors: nm: Traceback (most recent call last):",
+        "\tFile \"nm/BUILD.bazel\", line 2, column 6, in <toplevel>",
+        "\t\touter(name = \"m\")",
+        "\tFile \"nm/defs.bzl\", line 4, column 10, in outer",
+        "\t\tinner(name = name + \"_i\")",
+        "Error in fail: inner refuses m_i",
+        "after",
+    ])
+    got = ctx.std.excerpt(text, traceback = True)
+    want = {
+        "lines": [
+            "package contains errors: nm: Traceback (most recent call last):",
+            "\tFile \"nm/BUILD.bazel\", line 2, column 6, in <toplevel>",
+            "\t\touter(name = \"m\")",
+            "… 2 more lines",
+            "Error in fail: inner refuses m_i",
+            "… 1 more line",
+        ],
+        "gaps": [[3, 2], [5, 1]],
+        "cut_head": False,
+        "cut_tail": True,
+        "cut_between": True,
+    }
+    if got != want:
+        fail("got %r" % got)
+    plain = ctx.std.excerpt("a\nb", traceback = True)
+    if plain["lines"] != ["a", "b"] or plain["gaps"] != []:
+        fail("plain: %r" % plain)"#);
+        assert_eq!(exit, Some(0));
+    }
 }

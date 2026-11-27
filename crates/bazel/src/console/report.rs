@@ -743,48 +743,27 @@ impl Recapped {
 }
 
 impl Recapped {
-    /// A Starlark `Traceback`'s excerpt: the first frame at a BUILD file
-    /// (`File "nm/BUILD.bazel", line 2`) and its code line, then the last
-    /// `Error in …:` line, what is between a gap; None for another body.
+    /// A Starlark `Traceback`'s excerpt ([`excerpt::traceback`], of the
+    /// header and the body): what it keeps of the body, what is between a
+    /// gap; None for another body, or one the recap did not hold whole.
     fn traceback<'a>(&self, held: &[&'a (String, LineLinks)]) -> Option<Vec<Part<'a>>> {
-        let traceback = self.header.0.contains("Traceback (most recent call last):")
-            || held
-                .first()
-                .is_some_and(|(t, _)| t.trim() == "Traceback (most recent call last):");
-        let error = held
-            .iter()
-            .rposition(|(t, _)| t.trim_start().starts_with("Error in "))?;
-        if !traceback || self.dropped > 0 {
+        if self.dropped > 0 {
             return None;
         }
-        let build = held[..error].iter().position(|(t, _)| {
-            let t = t.trim_start();
-            t.starts_with("File \"")
-                && (t.contains("/BUILD\"")
-                    || t.contains("/BUILD.bazel\"")
-                    || t.starts_with("File \"BUILD"))
-        });
+        let lines: Vec<&str> = std::iter::once(self.header.0.as_str())
+            .chain(held.iter().map(|(t, _)| t.as_str()))
+            .collect();
         let mut parts = vec![];
-        let mut at = 0;
-        let keep = |i: usize, parts: &mut Vec<Part<'a>>, at: &mut usize| {
-            if i > *at {
-                parts.push(Part::Gap(i - *at));
+        let mut at = 1;
+        for k in excerpt::traceback(&lines)?.into_iter().filter(|&k| k > 0) {
+            if k > at {
+                parts.push(Part::Gap(k - at));
             }
-            parts.push(Part::Line(held[i]));
-            *at = i + 1;
-        };
-        if held[0].0.trim() == "Traceback (most recent call last):" {
-            keep(0, &mut parts, &mut at);
+            parts.push(Part::Line(held[k - 1]));
+            at = k + 1;
         }
-        if let Some(b) = build {
-            keep(b, &mut parts, &mut at);
-            if b + 1 < error {
-                keep(b + 1, &mut parts, &mut at);
-            }
-        }
-        keep(error, &mut parts, &mut at);
-        if at < held.len() {
-            parts.push(Part::Gap(held.len() - at));
+        if at < lines.len() {
+            parts.push(Part::Gap(lines.len() - at));
         }
         Some(parts)
     }
