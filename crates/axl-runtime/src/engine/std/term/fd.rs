@@ -79,20 +79,19 @@ pub(super) fn tty_readable(fd: RawFd, timeout: Duration) -> bool {
 /// forwarder to a pipe nobody reads, blocked in one, would hold up the take,
 /// and every stream fed to the screen with it. A `select` that fails rather
 /// than waits (not a descriptor it can watch) gets the write anyway, after a
-/// backoff that grows to 100ms, which says why.
+/// backoff that grows to [`BACKOFF_MAX`], which says why.
 pub(crate) fn write_when_writable(fd: RawFd, mut bytes: &[u8]) -> std::io::Result<()> {
-    let wait = Duration::from_millis(100);
     let mut failed_fast = 0u32;
     while !bytes.is_empty() {
         let asked = std::time::Instant::now();
-        if !writable(fd, wait) {
-            if asked.elapsed() >= wait {
+        if !writable(fd, WRITABLE_WAIT) {
+            if asked.elapsed() >= WRITABLE_WAIT {
                 continue;
             }
             // `select` failed rather than waited: back off, then the write
             // says why (or goes through).
             failed_fast += 1;
-            std::thread::sleep(Duration::from_millis(u64::from(failed_fast.min(10)) * 10));
+            std::thread::sleep((BACKOFF_STEP * failed_fast).min(BACKOFF_MAX));
         }
         let chunk = &bytes[..bytes.len().min(WRITE_CHUNK)];
         // SAFETY: a write from a live slice to a descriptor the caller names.
@@ -113,6 +112,17 @@ pub(crate) fn write_when_writable(fd: RawFd, mut bytes: &[u8]) -> std::io::Resul
     }
     Ok(())
 }
+
+/// How long [`write_when_writable`] waits at once for its descriptor to take
+/// a write before it looks again.
+const WRITABLE_WAIT: Duration = Duration::from_millis(100);
+
+/// How much longer [`write_when_writable`] backs off after each `select`
+/// that failed rather than waited.
+const BACKOFF_STEP: Duration = Duration::from_millis(10);
+
+/// The longest [`write_when_writable`] backs off before a write.
+const BACKOFF_MAX: Duration = Duration::from_millis(100);
 
 /// Whether `fd` takes a write within `timeout`; a descriptor `select` cannot
 /// watch is written to anyway.

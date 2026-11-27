@@ -6,7 +6,7 @@ use nix::sys::termios::Termios;
 
 use super::capture::Order;
 use super::replies::wheel_restore;
-use super::{HELD, leave_sequence, release};
+use super::{HELD, LEAVE, release};
 
 /// What a crash handler needs to give the terminal back, without allocating
 /// or locking: set while a screen is held. One for the process, its three
@@ -102,8 +102,7 @@ pub fn restore_terminal_after_crash() {
     unsafe {
         let s = &*state;
         libc::tcsetattr(s.tty, libc::TCSANOW, &s.termios);
-        let leave = leave_sequence();
-        libc::write(s.tty, leave.as_ptr().cast(), leave.len());
+        libc::write(s.tty, LEAVE.as_ptr().cast(), LEAVE.len());
         let wheel = wheel_restore();
         libc::write(s.tty, wheel.as_ptr().cast(), wheel.len());
         libc::dup2(s.stdout, 1);

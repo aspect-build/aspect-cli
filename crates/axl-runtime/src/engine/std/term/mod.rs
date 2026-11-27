@@ -53,8 +53,8 @@ use starlark::values::none::{NoneOr, NoneType};
 use starlark::values::{self, NoSerialize, ProvidesStaticType, ValueLike, starlark_value};
 
 use capture::{
-    MAX_CAPTURED_BYTES, OUTPUT_ORDER, Order, Redirect, SINK, SWITCH_WAIT, give_back_descriptors,
-    lock_until, mark_captured, same_file, set_sink,
+    LOCK_RETRY, MAX_CAPTURED_BYTES, OUTPUT_ORDER, Order, Redirect, SINK, SWITCH_WAIT,
+    give_back_descriptors, lock_until, mark_captured, same_file, set_sink,
 };
 use crash::{CRASH, install_panic_hook, remember_for_crash};
 use dump::{
@@ -64,8 +64,9 @@ use dump::{
 use fd::{hung_up, in_foreground, size_of, tty_readable};
 use keys::{KEY_SLICE, Keys};
 use replies::{
-    BACKGROUND_WAIT, WHEEL, WHEEL_ASKED, WHEEL_UNTOUCHED, WHEEL_WAS_OFF, WHEEL_WAS_ON,
-    alternate_scroll, drop_answers_due, query_background, wheel_restore,
+    BACKGROUND_WAIT, WHEEL, WHEEL_ASKED, WHEEL_KEYS_OFF, WHEEL_KEYS_ON, WHEEL_UNTOUCHED,
+    WHEEL_WAS_OFF, WHEEL_WAS_ON, alternate_scroll, drop_answers_due, query_background,
+    wheel_restore,
 };
 
 pub use capture::route_cli_output;
@@ -209,8 +210,7 @@ fn take() -> anyhow::Result<u64> {
     drop(moving);
 
     let mut tty = tty;
-    let enter: &[u8] = b"\x1b[?1049h\x1b[?7l\x1b[?25l\x1b[?2004h\x1b[2J\x1b[H";
-    if let Err(e) = tty.write_all(enter).and_then(|()| tty.flush()) {
+    if let Err(e) = tty.write_all(ENTER).and_then(|()| tty.flush()) {
         stderr.restore();
         stdout.restore();
         forget_tty();
@@ -258,18 +258,23 @@ fn take() -> anyhow::Result<u64> {
     Ok(generation)
 }
 
+/// How long a forced release waits for the output order's locks and the
+/// screen's, and a suspend for the output order's: one replaying to a
+/// stalled stdout holds them, and the exit, or Ctrl+Z, must not wait it out.
+const LOCK_WAIT: Duration = Duration::from_millis(500);
+
 /// Put back a screen still held: the terminal's modes, the main screen, the
 /// process's stdout and stderr, and then what was captured from each,
 /// written to it. A no-op when none is held. Whether one was.
 ///
 /// Bounded unless the terminal itself stops taking output (the leave sequence
 /// and the mode restore wait on it), so the forced exit ends: the lock is
-/// waited on for 500ms,
+/// waited on for [`LOCK_WAIT`],
 /// and the replay, run without it, gives up on a destination that takes
 /// nothing for `STALL_LIMIT`. A frame still holding the lock after that (stuck
 /// in a write) gets the crash path's restore instead, with nothing replayed.
 pub fn release_all() -> bool {
-    let deadline = std::time::Instant::now() + Duration::from_millis(500);
+    let deadline = std::time::Instant::now() + LOCK_WAIT;
     // No forwarder writes into the replay (see [`OUTPUT_ORDER`]), unless one
     // holds a lock past the deadline.
     let mut order = Order {
@@ -288,7 +293,7 @@ pub fn release_all() -> bool {
                 return release_dumping(p.into_inner().take(), &mut order);
             }
             Err(std::sync::TryLockError::WouldBlock) if std::time::Instant::now() < deadline => {
-                std::thread::sleep(Duration::from_millis(10));
+                std::thread::sleep(LOCK_RETRY);
             }
             Err(std::sync::TryLockError::WouldBlock) => {
                 restore_terminal_after_crash();
@@ -314,7 +319,7 @@ pub(crate) fn suspend() -> bool {
     {
         // Bounded, as a release's: one replaying to a stalled stdout holds
         // these, and Ctrl+Z must not wait it out.
-        let deadline = std::time::Instant::now() + Duration::from_millis(500);
+        let deadline = std::time::Instant::now() + LOCK_WAIT;
         let _order = Order {
             _out: lock_until(&OUTPUT_ORDER[0], deadline),
             err: lock_until(&OUTPUT_ORDER[1], deadline),
@@ -332,8 +337,8 @@ pub(crate) fn suspend() -> bool {
         // The child gets a quiet terminal: no answer meant for the screen
         // in its input, no frame left on the screen it leaves.
         drop_answers_due(&mut h.tty);
-        let _ = h.tty.write_all(b"\x1b[2J\x1b[H");
-        let _ = h.tty.write_all(leave_sequence());
+        let _ = h.tty.write_all(CLEAR);
+        let _ = h.tty.write_all(LEAVE);
         let _ = h.tty.write_all(wheel_restore());
         let _ = h.tty.flush();
         let _ = termios::tcsetattr(&h.tty, SetArg::TCSANOW, &h.saved_termios);
@@ -489,9 +494,9 @@ pub(crate) fn resume() {
     // not the screen's first key.
     let _ = termios::tcflush(&h.tty, termios::FlushArg::TCIFLUSH);
     let _ = termios::tcsetattr(&h.tty, SetArg::TCSANOW, &h.cbreak);
-    let mut enter = b"\x1b[?1049h\x1b[?7l\x1b[?25l\x1b[?2004h\x1b[2J\x1b[H".to_vec();
+    let mut enter = ENTER.to_vec();
     if h.mouse_on {
-        enter.extend_from_slice(b"\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h");
+        enter.extend_from_slice(MOUSE_ON);
     }
     // The last frame only at the size it was drawn for; else the screen
     // stays clear until its next frame, which reads the size anew.
@@ -565,7 +570,7 @@ fn release(
     // Both descriptors back first, so a crash during the replays below
     // reports to the terminal.
     let moving = give_back_descriptors([held.stdout.as_mut(), held.stderr.as_mut()]);
-    let _ = held.tty.write_all(leave_sequence());
+    let _ = held.tty.write_all(LEAVE);
     let _ = held.tty.write_all(wheel_restore());
     let _ = held.tty.flush();
     WHEEL.store(WHEEL_UNTOUCHED, Ordering::SeqCst);
@@ -605,22 +610,43 @@ fn release(
     held.capture.drain().colours
 }
 
-/// `frame` as one synchronized update (DEC mode 2026): the terminal holds
-/// what it draws until the end, so a frame never shows half drawn.
-fn synchronized(frame: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(frame.len() + 16);
-    out.extend_from_slice(b"\x1b[?2026h");
-    out.extend_from_slice(frame);
-    out.extend_from_slice(b"\x1b[?2026l");
-    out
-}
+/// What takes the terminal for the screen: the alternate screen
+/// (`?1049h`), no wrapping (`?7l`), the cursor hidden (`?25l`), bracketed
+/// paste (`?2004h`), cleared, the cursor at the top left.
+const ENTER: &[u8] = b"\x1b[?1049h\x1b[?7l\x1b[?25l\x1b[?2004h\x1b[2J\x1b[H";
 
 /// What gives the terminal back its cursor, the mouse (`mouse(True)`), a
 /// synchronized update a frame cut short left open (`?2026`), bracketed
 /// paste, wrapping and the main screen; its wheel (`wheel_keys`) is put back
 /// as it was apart ([`wheel_restore`]).
-fn leave_sequence() -> &'static [u8] {
-    b"\x1b[?2026l\x1b[?1006l\x1b[?1003l\x1b[?1002l\x1b[?1000l\x1b[?2004l\x1b[?7h\x1b[?25h\x1b[?1049l"
+const LEAVE: &[u8] =
+    b"\x1b[?2026l\x1b[?1006l\x1b[?1003l\x1b[?1002l\x1b[?1000l\x1b[?2004l\x1b[?7h\x1b[?25h\x1b[?1049l";
+
+/// Clear the screen and put the cursor at the top left.
+const CLEAR: &[u8] = b"\x1b[2J\x1b[H";
+
+/// Report the mouse: presses, drags with a button held and moves without
+/// one (`?1000h`, `?1002h`, `?1003h`), in SGR's encoding (`?1006h`).
+const MOUSE_ON: &[u8] = b"\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h";
+
+/// Leave the mouse to the terminal again: [`MOUSE_ON`] undone.
+const MOUSE_OFF: &[u8] = b"\x1b[?1006l\x1b[?1003l\x1b[?1002l\x1b[?1000l";
+
+/// Begin a synchronized update (DEC mode 2026): the terminal holds what it
+/// draws until [`SYNC_END`].
+const SYNC_BEGIN: &[u8] = b"\x1b[?2026h";
+
+/// End a synchronized update: the terminal shows what it held.
+const SYNC_END: &[u8] = b"\x1b[?2026l";
+
+/// `frame` as one synchronized update ([`SYNC_BEGIN`]): the terminal holds
+/// what it draws until the end, so a frame never shows half drawn.
+fn synchronized(frame: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(frame.len() + SYNC_BEGIN.len() + SYNC_END.len());
+    out.extend_from_slice(SYNC_BEGIN);
+    out.extend_from_slice(frame);
+    out.extend_from_slice(SYNC_END);
+    out
 }
 
 /// What a feed drained, as `[line, links, coloured]` a line: what
@@ -973,9 +999,9 @@ fn screen_methods(registry: &mut MethodsBuilder) {
             gone_is_fine(
                 h.tty
                     .write_all(if enabled {
-                        b"\x1b[?1007h"
+                        WHEEL_KEYS_ON
                     } else {
-                        b"\x1b[?1007l"
+                        WHEEL_KEYS_OFF
                     })
                     .and_then(|()| h.tty.flush()),
             )
@@ -998,11 +1024,7 @@ fn screen_methods(registry: &mut MethodsBuilder) {
             if h.suspended {
                 return Ok(NoneType);
             }
-            let set: &[u8] = if enabled {
-                b"\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h"
-            } else {
-                b"\x1b[?1006l\x1b[?1003l\x1b[?1002l\x1b[?1000l"
-            };
+            let set = if enabled { MOUSE_ON } else { MOUSE_OFF };
             gone_is_fine(h.tty.write_all(set).and_then(|()| h.tty.flush()))
         })
     }
@@ -1069,6 +1091,6 @@ mod tests {
     fn a_frame_is_one_synchronized_update() {
         assert_eq!(synchronized(b"ab"), b"\x1b[?2026hab\x1b[?2026l");
         // One cut short is closed when the terminal is given back.
-        assert!(leave_sequence().starts_with(b"\x1b[?2026l"));
+        assert!(LEAVE.starts_with(SYNC_END));
     }
 }

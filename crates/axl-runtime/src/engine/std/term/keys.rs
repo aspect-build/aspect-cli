@@ -5,7 +5,9 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use super::fd::{hung_up, tty_readable};
-use super::replies::{ANSWER_DUE, da1_reply, late_background_answer, late_wheel_answer};
+use super::replies::{
+    ANSWER_DUE, BEL, OSC11_REPLY, ST, da1_reply, late_background_answer, late_wheel_answer,
+};
 
 /// What has been read from the terminal and not yet handed out as keys.
 #[derive(Debug, Default)]
@@ -114,7 +116,7 @@ impl Keys {
             return Ok(paste_chunk(&mut self.pending, &mut self.in_paste));
         }
         // A late background answer still coming: held until it is whole.
-        if self.pending.starts_with(b"\x1b]11;") && unfinished(&self.pending) {
+        if self.pending.starts_with(OSC11_REPLY) && unfinished(&self.pending) {
             let since = *self
                 .answer_since
                 .get_or_insert_with(std::time::Instant::now);
@@ -186,9 +188,20 @@ const ANSWER_WAIT: Duration = Duration::from_secs(1);
 /// How long [`Keys::next`] waits for the rest of a key between reads.
 const ESCAPE_WAIT: Duration = Duration::from_millis(30);
 
-/// Bracketed paste's markers around pasted text (`take()` turns it on).
+/// Bracketed paste's start marker, before pasted text (`take()` turns
+/// bracketed paste on).
 const PASTE_START: &[u8] = b"\x1b[200~";
+
+/// Bracketed paste's end marker, after pasted text.
 const PASTE_END: &[u8] = b"\x1b[201~";
+
+/// Escape, which starts every sequence a key, a mouse report or an answer
+/// arrives as.
+const ESC: u8 = 0x1b;
+
+/// The most of a background answer held for its end: past it, what came is
+/// taken as keys.
+const MAX_ANSWER: usize = 64;
 
 /// The most of a paste waited for at once; what came is handed out, and
 /// the rest follows as more of it.
@@ -202,15 +215,15 @@ pub(super) fn unfinished(bytes: &[u8]) -> bool {
         return find(bytes, PASTE_END).is_none() && bytes.len() < MAX_PASTE;
     }
     // The background query's answer (`take`), whole before it is dropped.
-    if bytes.starts_with(b"\x1b]11;") {
-        return !bytes.contains(&0x07) && find(bytes, b"\x1b\\").is_none() && bytes.len() < 64;
+    if bytes.starts_with(OSC11_REPLY) {
+        return !bytes.contains(&BEL) && find(bytes, ST).is_none() && bytes.len() < MAX_ANSWER;
     }
     match bytes {
-        [0x1b] | [0x1b, b'O'] | [0x1b, b'O', b'2'] => true,
-        [0x1b, b']'] | [0x1b, b']', b'1'] | [0x1b, b']', b'1', b'1'] => true,
+        [ESC] | [ESC, b'O'] | [ESC, b'O', b'2'] => true,
+        [ESC, b']'] | [ESC, b']', b'1'] | [ESC, b']', b'1', b'1'] => true,
         // A legacy mouse report: three raw bytes after `ESC [ M`.
-        [0x1b, b'[', b'M', rest @ ..] => rest.len() < 3,
-        [0x1b, b'[', rest @ ..] => {
+        [ESC, b'[', b'M', rest @ ..] => rest.len() < 3,
+        [ESC, b'[', rest @ ..] => {
             !rest.iter().any(|b| (0x40..=0x7e).contains(b)) || PASTE_START.starts_with(bytes)
         }
         [lead, ..] => utf8_len(*lead).is_some_and(|n| bytes.len() < n),
@@ -302,16 +315,16 @@ fn parse_key(bytes: &[u8]) -> (Option<String>, usize) {
                 used,
             )
         }
-        [0x1b, b'[', b'A', ..] | [0x1b, b'O', b'A', ..] => named("up", 3),
-        [0x1b, b'[', b'B', ..] | [0x1b, b'O', b'B', ..] => named("down", 3),
-        [0x1b, b'[', b'C', ..] | [0x1b, b'O', b'C', ..] => named("right", 3),
-        [0x1b, b'[', b'D', ..] | [0x1b, b'O', b'D', ..] => named("left", 3),
-        [0x1b, b'[', b'H', ..] | [0x1b, b'O', b'H', ..] => named("home", 3),
-        [0x1b, b'[', b'Z', ..] => named("shift-tab", 3),
-        [0x1b, b'[', b'F', ..] | [0x1b, b'O', b'F', ..] => named("end", 3),
+        [ESC, b'[', b'A', ..] | [ESC, b'O', b'A', ..] => named("up", 3),
+        [ESC, b'[', b'B', ..] | [ESC, b'O', b'B', ..] => named("down", 3),
+        [ESC, b'[', b'C', ..] | [ESC, b'O', b'C', ..] => named("right", 3),
+        [ESC, b'[', b'D', ..] | [ESC, b'O', b'D', ..] => named("left", 3),
+        [ESC, b'[', b'H', ..] | [ESC, b'O', b'H', ..] => named("home", 3),
+        [ESC, b'[', b'Z', ..] => named("shift-tab", 3),
+        [ESC, b'[', b'F', ..] | [ESC, b'O', b'F', ..] => named("end", 3),
         // xterm's modified arrows: `ESC [ 1 ; <mod> <dir>`, 2 for Shift.
         [
-            0x1b,
+            ESC,
             b'[',
             b'1',
             b';',
@@ -322,7 +335,7 @@ fn parse_key(bytes: &[u8]) -> (Option<String>, usize) {
         // Alt (Option) with an arrow: xterm's `ESC [ 1 ; 3 <dir>`, and an ESC
         // before the arrow where Option is Meta (the macOS Terminal).
         [
-            0x1b,
+            ESC,
             b'[',
             b'1',
             b';',
@@ -330,28 +343,28 @@ fn parse_key(bytes: &[u8]) -> (Option<String>, usize) {
             d @ (b'A' | b'B' | b'C' | b'D'),
             ..,
         ] => (Some(format!("alt-{}", arrow(*d))), 6),
-        [0x1b, 0x1b, b'[' | b'O', d @ (b'A' | b'B' | b'C' | b'D'), ..] => {
+        [ESC, ESC, b'[' | b'O', d @ (b'A' | b'B' | b'C' | b'D'), ..] => {
             (Some(format!("alt-{}", arrow(*d))), 4)
         }
         // Shift+arrows as other terminals send them: older xterm's
         // `ESC [ 2 <dir>` and `ESC O 2 <dir>`, rxvt's `ESC [ a`…`d`.
-        [0x1b, b'[' | b'O', b'2', d @ (b'A' | b'B' | b'C' | b'D'), ..] => {
+        [ESC, b'[' | b'O', b'2', d @ (b'A' | b'B' | b'C' | b'D'), ..] => {
             (Some(format!("shift-{}", arrow(*d))), 4)
         }
-        [0x1b, b'[', d @ (b'a' | b'b' | b'c' | b'd'), ..] => {
+        [ESC, b'[', d @ (b'a' | b'b' | b'c' | b'd'), ..] => {
             (Some(format!("shift-{}", arrow(d.to_ascii_uppercase()))), 3)
         }
         // SS3 (`ESC O x`), F1-F4 among them: three bytes, unnamed unless
         // above.
-        [0x1b, b'O', _, ..] => (None, 3),
-        [0x1b, b'[', b'1' | b'7', b'~', ..] => named("home", 4),
-        [0x1b, b'[', b'4' | b'8', b'~', ..] => named("end", 4),
-        [0x1b, b'[', b'5', b'~', ..] => named("pageup", 4),
-        [0x1b, b'[', b'6', b'~', ..] => named("pagedown", 4),
+        [ESC, b'O', _, ..] => (None, 3),
+        [ESC, b'[', b'1' | b'7', b'~', ..] => named("home", 4),
+        [ESC, b'[', b'4' | b'8', b'~', ..] => named("end", 4),
+        [ESC, b'[', b'5', b'~', ..] => named("pageup", 4),
+        [ESC, b'[', b'6', b'~', ..] => named("pagedown", 4),
         // A mouse report (`mouse(True)`): SGR's `ESC [ < b ; x ; y M` (or
         // `m`, a release), or the legacy `ESC [ M` and three bytes, each
         // offset by 32, from a terminal without SGR ([`mouse_key`]).
-        [0x1b, b'[', b'<', rest @ ..] => {
+        [ESC, b'[', b'<', rest @ ..] => {
             let Some(end) = rest.iter().position(|b| (0x40..=0x7e).contains(b)) else {
                 return (None, bytes.len());
             };
@@ -365,20 +378,20 @@ fn parse_key(bytes: &[u8]) -> (Option<String>, usize) {
             };
             (name, end + 4)
         }
-        [0x1b, b'[', b'M', b, x, y, ..] => {
+        [ESC, b'[', b'M', b, x, y, ..] => {
             let field = |v: u8| u32::from(v.wrapping_sub(32));
             (mouse_key(field(*b), field(*x), field(*y), false), 6)
         }
-        [0x1b, b'[', rest @ ..] => {
+        [ESC, b'[', rest @ ..] => {
             // Some other sequence: skip it whole, to its final byte.
             let end = rest.iter().position(|b| (0x40..=0x7e).contains(b));
             (None, end.map_or(bytes.len(), |i| i + 3))
         }
         // Alt (Option, where the terminal sends it as Meta) with a key: ESC
         // then the key, read together.
-        [0x1b, c @ 0x20..=0x7e, ..] => (Some(format!("alt-{}", *c as char)), 2),
-        [0x1b, 0x7f | 0x08, ..] => named("alt-backspace", 2),
-        [0x1b, ..] => named("esc", 1),
+        [ESC, c @ 0x20..=0x7e, ..] => (Some(format!("alt-{}", *c as char)), 2),
+        [ESC, 0x7f | 0x08, ..] => named("alt-backspace", 2),
+        [ESC, ..] => named("esc", 1),
         [b'\r', ..] | [b'\n', ..] => named("enter", 1),
         [b'\t', ..] => named("tab", 1),
         [0x7f, ..] | [0x08, ..] => named("backspace", 1),

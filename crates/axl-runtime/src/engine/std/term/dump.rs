@@ -38,6 +38,14 @@ pub(super) fn set_dump_mark() {
     DUMPED.store(false, Ordering::SeqCst);
 }
 
+/// How long a dump that takes stderr's turn itself waits for a writer that
+/// left stderr mid-line to end its line.
+const LINE_END_WAIT: Duration = Duration::from_millis(200);
+
+/// How long a dump waits for the terminal to take writes before it flushes
+/// std's stdout into it: one stopped (Ctrl+S) is not flushed into.
+const FLUSH_WAIT: Duration = Duration::from_millis(200);
+
 /// The most lines a dump writes, the older counted on a line before them.
 pub(crate) const DUMP_LINES: usize = 20000;
 
@@ -128,8 +136,8 @@ pub(super) fn dump_output_turned(max_lines: usize, older: &str, held: bool) -> b
     // Bounded as the replay is.
     // SAFETY: fd 2 stays open; ManuallyDrop never closes it.
     let mut err = std::mem::ManuallyDrop::new(unsafe { File::from_raw_fd(2) });
-    let turn = (!held)
-        .then(|| axl_types::terminal::turn_at_line_end(2, STALL_LIMIT, Duration::from_millis(200)));
+    let turn =
+        (!held).then(|| axl_types::terminal::turn_at_line_end(2, STALL_LIMIT, LINE_END_WAIT));
     let turned = held || turn.as_ref().is_some_and(|t| t.is_some());
     // What std's stdout holds of an unended line goes out first where it
     // shares the terminal, so it is not left to surface after everything.
@@ -140,7 +148,7 @@ pub(super) fn dump_output_turned(max_lines: usize, older: &str, held: bool) -> b
     if turned
         && unsafe { libc::isatty(1) } == 1
         && axl_types::terminal::one_target(1, 2)
-        && writable(1, Duration::from_millis(200))
+        && writable(1, FLUSH_WAIT)
     {
         use std::io::Write as _;
         let _ = std::io::stdout().lock().flush();

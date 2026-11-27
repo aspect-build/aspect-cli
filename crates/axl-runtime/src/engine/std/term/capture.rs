@@ -71,7 +71,7 @@ impl Redirect {
                         let wait = if stopping {
                             Duration::ZERO
                         } else {
-                            Duration::from_millis(20)
+                            CAPTURE_POLL
                         };
                         if !pipe_readable(file.as_raw_fd(), wait) {
                             if stopping {
@@ -86,7 +86,7 @@ impl Redirect {
                             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
                             // Read again after a pause: stopping reading would
                             // fill the pipe and block every writer to it.
-                            Err(_) => std::thread::sleep(Duration::from_millis(10)),
+                            Err(_) => std::thread::sleep(READ_RETRY),
                             Ok(n) => {
                                 keep(&mut written.lock().unwrap(), &buf[..n]);
                                 if copies {
@@ -205,6 +205,17 @@ impl Redirect {
 /// How long a stopped capture reads what is left before handing the pipe on.
 const DRAIN_BUDGET: Duration = Duration::from_millis(100);
 
+/// How long a capture's reader waits for bytes before it looks again
+/// whether it was stopped.
+const CAPTURE_POLL: Duration = Duration::from_millis(20);
+
+/// How long a capture's reader pauses after a failed read before it reads
+/// again.
+const READ_RETRY: Duration = Duration::from_millis(10);
+
+/// How long a wait for a lock held elsewhere sleeps between tries.
+pub(super) const LOCK_RETRY: Duration = Duration::from_millis(10);
+
 /// How long moving fds 1 and 2 in or out of a capture waits for a writer to
 /// finish its unit: one writing does in far less, and one stalled on a
 /// destination nobody reads is not waited on.
@@ -311,7 +322,7 @@ pub(super) fn lock_until(
             Ok(g) => return Some(g),
             Err(std::sync::TryLockError::Poisoned(p)) => return Some(p.into_inner()),
             Err(std::sync::TryLockError::WouldBlock) if std::time::Instant::now() < deadline => {
-                std::thread::sleep(Duration::from_millis(10));
+                std::thread::sleep(LOCK_RETRY);
             }
             Err(std::sync::TryLockError::WouldBlock) => return None,
         }

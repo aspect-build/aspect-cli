@@ -12,13 +12,45 @@ use super::keys::{Keys, find};
 /// How long the screen waits for the terminal to say its background.
 pub(super) const BACKGROUND_WAIT: Duration = Duration::from_millis(150);
 
+/// The background query: OSC 11 asking the background colour, then a DA1
+/// request (`ESC [ c`), which every terminal answers.
+const BACKGROUND_QUERY: &[u8] = b"\x1b]11;?\x1b\\\x1b[c";
+
+/// An OSC 11 answer's start, its colour and BEL or ST after it.
+pub(super) const OSC11_REPLY: &[u8] = b"\x1b]11;";
+
+/// A DA1 answer's start, its parameters and `c` after it.
+const DA1_REPLY: &[u8] = b"\x1b[?";
+
+/// BEL, which ends an OSC answer as ST does.
+pub(super) const BEL: u8 = 0x07;
+
+/// String Terminator (`ESC \`), which ends an OSC answer.
+pub(super) const ST: &[u8] = b"\x1b\\";
+
+/// DECRQM asking for alternate scroll's state (`?1007`).
+const WHEEL_QUERY: &[u8] = b"\x1b[?1007$p";
+
+/// The DECRQM answer's start for alternate scroll, its state after it.
+const WHEEL_REPLY: &[u8] = b"\x1b[?1007;";
+
+/// What ends a DECRQM answer.
+const DECRQM_END: &[u8] = b"$y";
+
+/// Alternate scroll on: the wheel arrives as up and down keys on the
+/// alternate screen.
+pub(super) const WHEEL_KEYS_ON: &[u8] = b"\x1b[?1007h";
+
+/// Alternate scroll off: the wheel scrolls as the terminal has it.
+pub(super) const WHEEL_KEYS_OFF: &[u8] = b"\x1b[?1007l";
+
 /// The terminal's background as it answers an OSC 11 query (`Some(true)`
 /// when dark), with what else arrived meanwhile, for the keys. A DA1
 /// request follows the query: every terminal answers it, so one that
 /// ignores OSC 11 ends the wait at once rather than at `wait`.
 pub(super) fn query_background(tty: &mut File, wait: Duration) -> (Option<bool>, Vec<u8>) {
     if tty
-        .write_all(b"\x1b]11;?\x1b\\\x1b[c")
+        .write_all(BACKGROUND_QUERY)
         .and_then(|()| tty.flush())
         .is_err()
     {
@@ -70,7 +102,7 @@ pub(super) fn drop_answers_due(tty: &mut File) {
     let mut buf = [0u8; 256];
     let due = |got: &[u8]| {
         (ANSWER_DUE.load(Ordering::SeqCst) && da1_reply(got).is_none())
-            || (WHEEL.load(Ordering::SeqCst) == WHEEL_ASKED && find(got, b"$y").is_none())
+            || (WHEEL.load(Ordering::SeqCst) == WHEEL_ASKED && find(got, DECRQM_END).is_none())
     };
     while due(&got) {
         let left = deadline.saturating_duration_since(std::time::Instant::now());
@@ -86,7 +118,7 @@ pub(super) fn drop_answers_due(tty: &mut File) {
         ANSWER_DUE.store(false, Ordering::SeqCst);
     }
     // A wheel answer read here still says what release puts back.
-    if let Some(at) = find(&got, b"\x1b[?1007;") {
+    if let Some(at) = find(&got, WHEEL_REPLY) {
         let _ = late_wheel_answer(&got[at..]);
     }
     let _ = termios::tcflush(&*tty, termios::FlushArg::TCIFLUSH);
@@ -94,21 +126,22 @@ pub(super) fn drop_answers_due(tty: &mut File) {
 
 /// Where a DA1 answer (`ESC [ ? ... c`) is in `bytes`.
 pub(super) fn da1_reply(bytes: &[u8]) -> Option<std::ops::Range<usize>> {
-    let start = bytes.windows(3).position(|w| w == b"\x1b[?")?;
-    let end = bytes[start + 3..]
+    let start = find(bytes, DA1_REPLY)?;
+    let params = start + DA1_REPLY.len();
+    let end = bytes[params..]
         .iter()
         .position(|&b| !(b.is_ascii_digit() || b == b';'))?;
-    (bytes[start + 3 + end] == b'c').then(|| start..start + 3 + end + 1)
+    (bytes[params + end] == b'c').then(|| start..params + end + 1)
 }
 
 /// Where an OSC 11 answer (`ESC ] 11 ; rgb:R/G/B`, ended by BEL or ST) is
 /// in `bytes`, and whether its colour is dark (None for one unread).
 fn osc11_reply(bytes: &[u8]) -> Option<(std::ops::Range<usize>, Option<bool>)> {
-    let start = bytes.windows(5).position(|w| w == b"\x1b]11;")?;
-    let body = &bytes[start + 5..];
+    let start = find(bytes, OSC11_REPLY)?;
+    let body = &bytes[start + OSC11_REPLY.len()..];
     let (len, end) = body.iter().enumerate().find_map(|(i, &b)| match b {
-        0x07 => Some((i, 1)),
-        0x1b if body.get(i + 1) == Some(&b'\\') => Some((i, 2)),
+        BEL => Some((i, 1)),
+        _ if body[i..].starts_with(ST) => Some((i, ST.len())),
         _ => None,
     })?;
     let text = std::str::from_utf8(&body[..len]).ok();
@@ -121,7 +154,7 @@ fn osc11_reply(bytes: &[u8]) -> Option<(std::ops::Range<usize>, Option<bool>)> {
         let (r, g, b) = (parts.next()??, parts.next()??, parts.next()??);
         Some(0.2126 * r + 0.7152 * g + 0.0722 * b < 0.5)
     });
-    Some((start..start + 5 + len + end, dark))
+    Some((start..start + OSC11_REPLY.len() + len + end, dark))
 }
 
 /// What a screen's `wheel_keys` did to the terminal's alternate scroll
@@ -142,8 +175,8 @@ pub(super) const WHEEL_ASKED: u8 = 3;
 /// default and in one that did not answer the query.
 pub(super) fn wheel_restore() -> &'static [u8] {
     match WHEEL.load(Ordering::SeqCst) {
-        WHEEL_WAS_ON => b"\x1b[?1007h",
-        WHEEL_WAS_OFF | WHEEL_ASKED => b"\x1b[?1007l",
+        WHEEL_WAS_ON => WHEEL_KEYS_ON,
+        WHEEL_WAS_OFF | WHEEL_ASKED => WHEEL_KEYS_OFF,
         _ => b"",
     }
 }
@@ -153,15 +186,14 @@ pub(super) fn wheel_restore() -> &'static [u8] {
 /// does not. What arrives meanwhile is kept for `key()`, the answer among
 /// it (an unknown sequence there, skipped).
 pub(super) fn alternate_scroll(tty: &mut File, keys: &mut Keys) -> Option<bool> {
-    tty.write_all(b"\x1b[?1007$p").ok()?;
+    tty.write_all(WHEEL_QUERY).ok()?;
     tty.flush().ok()?;
     let deadline = std::time::Instant::now() + WHEEL_QUERY_WAIT;
     let from = keys.pending.len();
     loop {
-        let reply = b"\x1b[?1007;";
-        if let Some(at) = find(&keys.pending[from..], reply) {
-            let rest = &keys.pending[from + at + reply.len()..];
-            if let Some(end) = find(rest, b"$y") {
+        if let Some(at) = find(&keys.pending[from..], WHEEL_REPLY) {
+            let rest = &keys.pending[from + at + WHEEL_REPLY.len()..];
+            if let Some(end) = find(rest, DECRQM_END) {
                 return match &rest[..end] {
                     b"1" | b"3" => Some(true),
                     b"2" | b"4" => Some(false),
@@ -200,8 +232,8 @@ pub(super) fn late_background_answer(pending: &[u8]) -> Option<usize> {
 /// back is then what the terminal had (1 or 3 set), not off. Its length,
 /// or None when `pending` does not start with one.
 pub(super) fn late_wheel_answer(pending: &[u8]) -> Option<usize> {
-    let rest = pending.strip_prefix(b"\x1b[?1007;")?;
-    let end = find(rest, b"$y")?;
+    let rest = pending.strip_prefix(WHEEL_REPLY)?;
+    let end = find(rest, DECRQM_END)?;
     let n = std::str::from_utf8(&rest[..end]).ok()?.parse::<u8>().ok()?;
     let _ = WHEEL.compare_exchange(
         WHEEL_ASKED,
@@ -213,7 +245,7 @@ pub(super) fn late_wheel_answer(pending: &[u8]) -> Option<usize> {
         Ordering::SeqCst,
         Ordering::SeqCst,
     );
-    Some(b"\x1b[?1007;".len() + end + 2)
+    Some(WHEEL_REPLY.len() + end + DECRQM_END.len())
 }
 
 #[cfg(test)]
