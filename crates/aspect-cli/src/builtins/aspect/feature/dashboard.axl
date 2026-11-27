@@ -1484,8 +1484,9 @@ def _open_unlogged(state: dict, i: int):
         lines = item["lines"]
         title = "Other error from Bazel"
     else:
-        lines = ["(" + _NO_REASON + ")"]
-        title = item
+        said = entry_text(state, item)
+        lines = said["lines"] if item.get("exited") != None else ["(" + _NO_REASON + ")"]
+        title = item["label"] or said["kind"]
     _show_failure_view(state, {"title": title, "lines": lines, "cut": False, "record": None})
 
 # The entries of the failure summary with their excerpt, the lines of each,
@@ -1543,6 +1544,12 @@ def failure_rows(state: dict, room: int, width: int) -> list:
             if pos == at and state["focus"] == "failures":
                 return _c("active") + fit(text, width) + _RESET
             return _c("warning") + "!" + _RESET + _c("muted") + text[1:] + _RESET
+        if what == "entry":
+            said = entry_text(state, label)
+            text = _middle("✗ " + " · ".join(([label["label"]] if label["label"] else []) + ([said["kind"]] if said["kind"] else []) + said["details"]) + ("" if label.get("exited") != None else "  no log"), width)
+            if pos == at and state["focus"] == "failures":
+                return _c("active") + fit(text, width) + _RESET
+            return _c("error") + "✗" + _RESET + text[1:]
         roots = blocked.get(label)
         text = _middle(("○ " + label + "  " + blocked_text(label, roots)) if roots else ("✗ " + label + "  no log"), width)
         if pos == at and state["focus"] == "failures":
@@ -4457,7 +4464,7 @@ def target_counts(state: dict):
     found = failure_entries(state)
     failed = {}
     for e in found["entries"]:
-        if e["group"] != 2 and not e["pattern"]:
+        if e["group"] != 2 and not e["pattern"] and e["label"]:
             failed[e["label"]] = True
     return (state["counts"]["built"], len(failed), len(blocked_targets(state)))
 
@@ -6385,14 +6392,16 @@ def failure_entries(state: dict) -> dict:
     missing source file's), then the failed actions, then the tests (the
     attempt `test_group` picks; a flaky one marked `flaky`), each in
     Bazel's order; then a failed target none of those is about and no root
-    cause blocks (`_NO_REASON`). Each blocked target (`blocked_targets`)
+    cause blocks (`_NO_REASON`); with none of those nor any of Bazel's other
+    errors (`console_ties`) once a build Bazel failed has ended
+    (`bazel_exit`), its exit code (`exited`). Each blocked target (`blocked_targets`)
     goes under the first entry of its first root cause (`blocked`); a root
     with no entry keeps its blocked targets in `unlisted`. An entry's
     heading and excerpt are `entry_text`'s. Cached until the failures, the
     root causes or the failed targets change."""
     fails = state["fails"]
     causes = state.get("root_causes") or {}
-    key = (len(fails), len(causes), len(state["counts"]["failed_labels"]))
+    key = (len(fails), len(causes), len(state["counts"]["failed_labels"]), state.get("bazel_exit"), bool(state.get("building")))
     cached = state.get("entries_cache")
     if cached != None and cached[0] == key:
         return cached[1]
@@ -6421,6 +6430,12 @@ def failure_entries(state: dict) -> dict:
     for label in state["counts"]["failures"]:
         if label not in own and label not in blocked:
             entries.append({"index": None, "group": 0, "label": label, "flaky": False, "pattern": False, "blocked": []})
+
+    # A failed build always says why: with nothing else to list, an entry of
+    # Bazel's exit code (`entry_text`: its raw log's last lines).
+    code = state.get("bazel_exit")
+    if not entries and code not in (None, 0) and not state.get("building") and not console_ties(state)["others"]:
+        entries.append({"index": None, "group": 0, "label": "", "exited": code, "flaky": False, "pattern": False, "blocked": []})
     first = {}
     for e in entries:
         if e["label"] not in first:
@@ -6455,7 +6470,9 @@ def entry_text(state: dict, e: dict) -> dict:
       names as its own root cause with none says its package has an error;
       one that failed with no action of its own, what its `failure_detail`
       says (`missing input file '//a:b'`);
-    - a failed target no event says more of: `_NO_REASON`.
+    - a failed target no event says more of: `_NO_REASON`;
+    - Bazel's exit code: its raw log's last `ERROR:` lines, else, a crashed
+      server's, its last lines but progress (`_last_words`).
 
     Once the build has ended, what Bazel's console ties to it
     (`console_ties`): its location, an action's status (`killed`) and the
@@ -6471,7 +6488,9 @@ def entry_text(state: dict, e: dict) -> dict:
     fails = state["fails"]
     rec = fails[e["index"]] if e["index"] != None else None
     out = {"kind": "", "details": [], "lines": [], "log": "", "extra": [], "more": 0}
-    if rec == None:
+    if e.get("exited") != None:
+        out.update(kind = "Bazel exited %d" % e["exited"], lines = _last_words(state), log = state.get("log_path", ""))
+    elif rec == None:
         out["lines"] = [_NO_REASON]
     elif rec["kind"] == "action":
         details, lines, log = own_excerpt(state, rec, state.get("excerpt"))
@@ -6844,11 +6863,11 @@ def console_ties(state: dict) -> dict:
     # A line naming a listed target as what failed (`Executing genrule
     # //an:missing failed: 1 input file(s) do not exist`, `Analysis of
     # target '//vis:vis' (config: 2d89340) failed`) is that entry's.
-    for e in failure_entries(state)["entries"]:
-        for k in by["failed"].get(e["label"], []):
+    for label in _own_labels(state).keys():
+        for k in by["failed"].get(label, []):
             claimed[k] = True
         for k, h in enumerate(headers):
-            if h["said"].startswith("Analysis of target '%s' " % e["label"]) and h["said"].endswith(" failed"):
+            if h["said"].startswith("Analysis of target '%s' " % label) and h["said"].endswith(" failed"):
                 claimed[k] = True
     result["others"] = _other_errors(state, text, headers, claimed, spans)
     state["ties_cache"] = (key, result)
@@ -6892,16 +6911,27 @@ def _other_errors(state: dict, text: str, headers: list, claimed: dict, spans: l
 def _tab_extras(state: dict) -> list:
     """The Failures list's rows of no record of their own, after the
     records' (`listed_failures`), `(what, item)`: an entry of none
-    (`("entry", label)`), each blocked target (`("blocked", label)`),
+    (`("entry", entry)`: a failed target no event says more of, Bazel's
+    exit code), each blocked target (`("blocked", label)`),
     then, once the build has ended, each of Bazel's other errors
     (`("other", block)`, `console_ties`)."""
     found = failure_entries(state)
-    out = [("entry", e["label"]) for e in found["entries"] if e["index"] == None]
+    out = [("entry", e) for e in found["entries"] if e["index"] == None]
     for label in blocked_targets(state).keys():
         out.append(("blocked", label))
     for block in console_ties(state)["others"] if not state.get("building") else []:
         out.append(("other", block))
     return out
+
+def _last_words(state: dict) -> list:
+    """What Bazel's raw log (`log_path`) says last: its last `ERROR:` lines,
+    else, a crashed server's, its last lines but progress (`Server
+    terminated abruptly`, `FATAL: …`), at most `_EXCERPT_LINES`."""
+    tail = [l for l in _plain_text(state, _tail_text(state, state.get("log_path", "")) or "").split("\n") if l.strip()]
+    said = [l[len("ERROR: "):] for l in tail if l.startswith("ERROR: ")]
+    if not said:
+        said = [l for l in tail if not l.startswith(("[", "INFO: ", "WARNING: ", "Loading", "Analyzing", "Computing", "Starting local Bazel server", "Extracting Bazel installation", "  "))]
+    return said[-_EXCERPT_LINES:]
 
 def failure_summary(state: dict, task_id: str, tty: bool, log_path: str = "", linked = None, excerpt = None, width = 100, bazel_exit = None) -> list:
     """The end of a build's console, the same with the Dashboard or
@@ -6939,7 +6969,7 @@ def failure_summary(state: dict, task_id: str, tty: bool, log_path: str = "", li
     ascii = theme.info()["name"] == "mono"
     cross = "x" if ascii else "✗"
     bar = "|" if ascii else "│"
-    state = dict(state, log_path = log_path or state.get("log_path", ""), building = False, excerpt = excerpt or state.get("excerpt"), excerpts = {}, entries_cache = None, blocked_cache = None, own_cache = None)
+    state = dict(state, log_path = log_path or state.get("log_path", ""), building = False, excerpt = excerpt or state.get("excerpt"), excerpts = {}, entries_cache = None, blocked_cache = None, own_cache = None, bazel_exit = bazel_exit if bazel_exit != None else state.get("bazel_exit"))
     found = failure_entries(state)
     entries = [e for e in found["entries"] if not e["flaky"]]
 
@@ -6952,19 +6982,6 @@ def failure_summary(state: dict, task_id: str, tty: bool, log_path: str = "", li
         text = entry_text(state, e)
         rows, gaps = excerpt_rows(text["lines"])
         shown.append(dict(text, label = e["label"], rows = rows, more = text["more"] + gaps, blocked = e["blocked"]))
-
-    # A failed build always says why: with nothing else to list, Bazel's
-    # last `ERROR:` lines in its raw log.
-    if not shown and not console_ties(state)["others"] and bazel_exit not in (None, 0):
-        tail = [l for l in _plain_text(state, _tail_text(state, log_path) or "").split("\n") if l.strip()]
-        said = [l[len("ERROR: "):] for l in tail if l.startswith("ERROR: ")]
-
-        # No `ERROR:` (the server crashed): Bazel's last lines but its
-        # progress (`Server terminated abruptly`, `FATAL: …`).
-        if not said:
-            said = [l for l in tail if not l.startswith(("[", "INFO: ", "WARNING: ", "Loading", "Analyzing", "Computing", "Starting local Bazel server", "Extracting Bazel installation", "  "))]
-        rows, gaps = excerpt_rows(said[-_EXCERPT_LINES:])
-        shown.append({"label": "", "kind": "Bazel exited %d" % bazel_exit, "details": [], "rows": rows, "more": gaps, "log": log_path, "extra": [], "blocked": []})
 
     out = []
     if shown:

@@ -16,7 +16,7 @@ so the goldens hold no path of this machine. `--update` rewrites the
 goldens; review the diff.
 """
 
-load("@aspect//feature/dashboard.axl", "ANSI", "collect_event", "failure_rows", "failure_summary", "summary_state")
+load("@aspect//feature/dashboard.axl", "ANSI", "collect_event", "failure_entries", "failure_rows", "failure_summary", "summary_state")
 
 _FIXTURES = "crates/aspect-cli/tests/testdata/failures"
 
@@ -121,10 +121,21 @@ def _replay(ctx: TaskContext, case: str, prefix: str) -> str:
         for b in (state["bazel_errors"] or {}).get("blocks") or []:
             print("%s/%s %s %r" % (case, prefix, b["kind"], b["text"][:1500]))
     out = ["exit " + exit]
-    out += [_plain(ansi, l) for l in failure_summary(state, "t-replay", False, console, None, ctx.std.excerpt, 100, code)]
+    summary = [_plain(ansi, l) for l in failure_summary(state, "t-replay", False, console, None, ctx.std.excerpt, 100, code)]
+    out += summary
     out.append("--- Failures tab")
-    tab = dict(state, log_path = console, focus = "console", selected = 0, expand_failures = True, excerpts = {}, ties_cache = None, entries_cache = None)
-    out += [_plain(ansi, r).rstrip() for r in failure_rows(tab, 400, 120)]
+    tab = dict(state, log_path = console, bazel_exit = code, focus = "console", selected = 0, expand_failures = True, excerpts = {}, ties_cache = None, entries_cache = None)
+    rows = [_plain(ansi, r).rstrip() for r in failure_rows(tab, 400, 120)]
+    out += rows
+
+    # One count: the summary's heading, the Failures tab's ✗ rows and the
+    # entries Results and the tab's badge count.
+    title = [l for l in summary if l.startswith("── Failures (")]
+    said = int(title[0].rpartition(" of ")[2].partition(")")[0].rpartition("(")[2]) if title else 0
+    tabbed = len([r for r in rows if r.startswith("✗ ")])
+    counted = len([e for e in failure_entries(dict(tab, bazel_exit = code))["entries"] if not e["flaky"]])
+    if not (said == tabbed and tabbed == counted):
+        fail("%s/%s: the summary says %d, the tab has %d rows, the counts %d" % (case, prefix, said, tabbed, counted))
     return "\n".join(out) + "\n"
 
 def _prefixes(names: list) -> list:

@@ -7,3 +7,4 @@ exit 33
 0 built, 0 failed · 0 tests passed, 0 failed · Bazel's raw log: ${FIXTURE}/7.7.3.console
 All of it: aspect history show t-replay
 --- Failures tab
+✗ Bazel exited 33
