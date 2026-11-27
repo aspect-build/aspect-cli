@@ -215,6 +215,15 @@ printf 'caf\\352\\n' > tree/src/l1.txt
     _eq("a `--label` name with spaces", apply_fix_patch(ctx, root + "/label.patch", cwd = tree), None)
     _eq("applies", fs.read_to_string(tree + "/src/my file.txt"), "b\n")
 
+    # An I/O failure nothing below handles (a path longer than any host
+    # takes) refuses the patch, and the run goes on.
+    said = []
+    fs.write(root + "/deep.patch", "--- /dev/null\n+++ b/src/%sf\n@@ -0,0 +1 @@\n+x\n" % ("d/" * 2100))
+    _eq("a path too long", apply_fix_patch(ctx, root + "/deep.patch", cwd = tree, say = _noted(said)), None)
+    _eq("refused with the system's reason", [l.startswith("File name too long") for l in said], [True])
+    fs.write(root + "/next.patch", "--- a/src/kept.txt\n+++ b/src/kept.txt\n@@ -1 +1 @@\n-b\n+c\n")
+    _eq("the next patch", (apply_fix_patch(ctx, root + "/next.patch", cwd = tree), fs.read_to_string(tree + "/src/kept.txt")), (None, "c\n"))
+
 def _test_one_file_per_run(ctx: TaskContext, root: str):
     """patch is run once per file section with hunks, naming the one copy
     to change, never taking a name from the diff."""
