@@ -21,11 +21,12 @@ Examples:
   match_path("**/foo", "foo")                      → True
   match_path("a/**/b", "a/x/y/b")                  → True
 
-Implementation note: this is a pure-Starlark recursive segment matcher.
-Pattern-volume × file-volume is small in practice (≤ ~10 patterns × ≤ ~1k
-files = ≤ 10k matches per task), so the cost is invisible against the
-formatter binary's runtime. If profiling ever shows pressure we can move
-the matcher to Rust and expose via ctx; for now Starlark stays.
+Implementation note: this is a pure-Starlark segment matcher, so the work
+per match is kept small: a segment with no wildcard is compared, one that
+is `*` and a literal is a suffix check, and a `**` followed by no other
+`**` matches only the split that leaves its tail one name segment per
+pattern segment. A change of thousands of files against a dozen
+`**/<name>` patterns then costs one segment comparison per pattern each.
 """
 
 def _match_chars(pat, name):
@@ -46,6 +47,10 @@ def _match_chars(pat, name):
     11-character names both ran out of iterations and silently
     false-negative'd before reaching the match.
     """
+    if "*" not in pat and "?" not in pat:
+        return pat == name
+    if pat.startswith("*") and "*" not in pat[1:] and "?" not in pat:
+        return name.endswith(pat[1:])
     pi = 0
     ni = 0
     star_pi = -1
@@ -98,6 +103,10 @@ def _match_segments(pat_segs, name_segs):
                 # surprising; keep the "must have child" semantics
                 # documented in the module docstring).
                 return ni < nn
+            if "**" not in tail:
+                # Every other segment matches exactly one name segment.
+                k = nn - ni - len(tail)
+                return k >= 0 and _match_segments(tail, name_segs[ni + k:])
             for k in range(nn - ni + 1):
                 if _match_segments(tail, name_segs[ni + k:]):
                     return True
