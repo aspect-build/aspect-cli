@@ -2291,7 +2291,7 @@ def compute_invocation_state(data, status):
     reached a BuildFinished reads "Invocation disconnected", as the Aspect Web
     UI reads an invocation with no exit code. Otherwise, when status ==
     "failed", restricts to `_FAILURE_BUCKETS` and falls back to "Failed to
-    build" — else an analysis-phase failure (no failed_action/target) would
+    build", or an analysis-phase failure (no failed_action/target) would
     read "Successful build".
     """
 
