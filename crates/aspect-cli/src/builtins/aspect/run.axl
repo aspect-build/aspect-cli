@@ -401,7 +401,9 @@ def _run_impl(ctx: TaskContext) -> int | TaskConclusion:
         # whose title comes from `compute_invocation_state` and reads
         # "Invocation disconnected" as soon as the flag is set.
         verdict = "aborted" if data["bazel"]["aborted"] else "failed"
-        return _conclude(verdict, exit_code_of(build_status), conclusion(verdict, data))
+        code = exit_code_of(build_status)
+        text = conclusion(verdict, data, cancelled = ctx.cancellation.root.cancelled, exit_code = code)
+        return _conclude(verdict, code, text)
 
     resolved = _resolve(runs, target)
     if resolved.runnable == None:

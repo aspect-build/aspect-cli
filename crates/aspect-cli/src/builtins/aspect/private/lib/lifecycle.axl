@@ -803,7 +803,8 @@ def _update(ctx, surface, status, progress, kind = "", data = None, priority = T
                    the runtime renders as `✓/✗ ... · <conclusion>`.
         conclusion: One-line terminal summary, appended as ` · <conclusion>`.
                    Read only when `final=True`. Use each `*_results.axl`'s
-                   `conclusion(status, data)` for check-run-title consistency.
+                   `conclusion(status, data)`, which reads as the check-run
+                   title does except where its docstring says otherwise.
         exit_code: Threaded onto the `TaskConclusion` when `final=True`.
         subject:   Status-surface title subject; "" means "no change". See
                    `TaskUpdate.subject`.

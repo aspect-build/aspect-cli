@@ -614,6 +614,7 @@ data = {
   │   # Termination                                                    │
   │   "aborted":                 False,                                │
   │   "abort_reason":            "",      "abort_description":     "" │
+  │   "stream":                  "",   # "started", "finished"         │
   │ },                                                                 │
   └────────────────────────────────────────────────────────────────────┘
 

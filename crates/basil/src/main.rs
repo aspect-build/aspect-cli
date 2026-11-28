@@ -346,7 +346,7 @@ fn wait_for_interrupt(curses: bool) {
     unsafe {
         signal(2, on_sigint);
     }
-    eprintln!("basil: waiting for interrupt");
+    eprintln!("basil: waiting for interrupt, pid={}", process::id());
     if curses {
         eprintln!("\x1b[32m[0 / 1]\x1b[0m waiting");
     }
@@ -468,10 +468,14 @@ struct Scenario {
     /// line starting `stdout:` goes to stdout instead, as real bazel writes
     /// action and test output.
     stderr_lines: &'static [&'static str],
-    /// After `stderr_lines`, announce `basil: waiting for interrupt` and wait
+    /// After `stderr_lines`, announce `basil: waiting for interrupt, pid=<n>` and wait
     /// for a SIGINT, then write this line after a cleanup pause and exit 8 —
     /// what an interrupted bazel prints on its way out.
     interrupt_tail: Option<&'static str>,
+    /// Hold back the last event of the last attempt: announce `basil: waiting
+    /// for interrupt, pid=<n>`, wait for a SIGINT, then write it after the cleanup
+    /// pause, as Bazel finishes the stream of a build Ctrl-C stopped.
+    interrupt_before_last: bool,
 }
 
 /// Whether `line` is one of bazel's progress lines: `[1 / 2] …` or a phase.
@@ -526,6 +530,7 @@ impl Default for Scenario {
             workspace_corrupt: false,
             stderr_lines: &[],
             interrupt_tail: None,
+            interrupt_before_last: false,
         }
     }
 }
@@ -582,6 +587,10 @@ fn write_scenario(path: &str, scenario: &Scenario, handshake: Option<&str>) {
                 if attempt == last_attempt && i + 1 == events.len() {
                     await_pump_handshake(file);
                 }
+            }
+            if scenario.interrupt_before_last && attempt == last_attempt && i + 1 == events.len() {
+                wait_for_interrupt(false);
+                thread::sleep(INTERRUPT_CLEANUP);
             }
             write_bep_event(&mut f, ev);
         }
@@ -709,6 +718,25 @@ fn scenario(name: &str) -> Scenario {
         // captured console's drain on cancellation.
         "stderr_after_interrupt" => Scenario {
             interrupt_tail: Some("INFO: cleaned up after the interrupt"),
+            ..Default::default()
+        },
+
+        // A build Ctrl-C stops mid-way: its stream starts, and only once a
+        // SIGINT comes does it finish, with BuildFinished(INTERRUPTED), and
+        // exit 8.
+        "interrupted" => Scenario {
+            attempts: vec![vec![build_started(), build_finished(8, true)]],
+            exit: ExitBehavior::Code(8),
+            interrupt_before_last: true,
+            ..Default::default()
+        },
+
+        // A build whose server is lost mid-way: its stream starts and ends
+        // without a BuildFinished, and the client exits 37, as Bazel's does
+        // when its server dies.
+        "server_lost" => Scenario {
+            attempts: vec![vec![build_started()]],
+            exit: ExitBehavior::Code(37),
             ..Default::default()
         },
 

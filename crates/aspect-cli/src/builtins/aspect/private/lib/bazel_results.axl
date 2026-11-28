@@ -5,7 +5,7 @@ then renders a Markdown summary for GitHub check run bodies. Reusable by any
 surface reporting Bazel data (GitHub status checks, Buildkite annotations).
 
 Event kinds consumed:
-  "build_started"            — resets all state; captures invocation UUID, tool version, command, start time
+  "build_started"            — resets all state; captures invocation UUID, tool version, command, start time; marks the stream started
   "structured_command_line"  — captures bes_results_url and reconstructs full command line strings
   "build_metadata"           — captures --build_metadata / --bes_metadata key=value pairs
   "workspace_status"         — captures workspace_status key=value pairs (BUILD_USER, etc.)
@@ -17,7 +17,7 @@ Event kinds consumed:
   "test_result"              — records each attempt's run/shard/attempt, status, test.log + test.xml paths and duration
   "test_summary"             — buckets tests into failed / flaky / passed; tracks duration; settles the snippet's log path
   "build_metrics"            — captures action/target/package counts and timing
-  "build_finished"           — captures the finish time, and the exit code that decides whether the build was aborted
+  "build_finished"           — captures the finish time, and the exit code that decides whether the build was aborted; marks the stream finished
 
 Payload fields used:
   BuildStarted.uuid, .build_tool_version, .command, .start_time_millis
@@ -635,6 +635,11 @@ def init_data():
             "aborted": False,
             "abort_reason": "",  # snake_case proto enum, e.g. "user_interrupted"
             "abort_description": "",
+
+            # How far the build event stream got: "" before its BuildStarted,
+            # "started", then "finished" at its BuildFinished. See
+            # `compute_invocation_state` and `conclusion`.
+            "stream": "",
         },
     }
 
@@ -685,6 +690,7 @@ def process_event(data, event, bb_root, std = None):
         data["bazel"]["workspace_directory"] = bes_get(payload, "workspace_directory", "") or ""
         data["bazel"]["working_directory"] = bes_get(payload, "working_directory", "") or ""
         data["bazel"]["server_pid"] = bes_get(payload, "server_pid", 0) or 0
+        data["bazel"]["stream"] = "started"
 
         # True so the first metadata burst surfaces immediately, not only once
         # the first target_completed lands (several seconds in).
@@ -1118,11 +1124,14 @@ def process_event(data, event, bb_root, std = None):
         # `exit_code == INTERRUPTED` is the whole abort rule, and it is the
         # rule the Aspect Web UI applies: `useInvocationBucket` buckets an
         # invocation as ABORTED_STATE ("Invocation disconnected") on
-        # BazelExitCode.INTERRUPTED, and everything else non-zero — including
-        # OOM (33) and a remote-environment failure (32) — as FAILED_TO_BUILD.
+        # BazelExitCode.INTERRUPTED, or on no exit code at all (a stream with
+        # no BuildFinished, which `compute_invocation_state` reads off
+        # `stream`), and everything else non-zero, including OOM (33) and a
+        # remote-environment failure (32), as FAILED_TO_BUILD.
         # An `Aborted` payload's reason cannot stand in for it: under
         # `--nokeep_going` Bazel merges a Ctrl-C down to Aborted(INCOMPLETE),
         # what an ordinary red build emits, while the exit code is 8 either way.
+        data["bazel"]["stream"] = "finished"
         payload = event.payload
         if payload:
             finish_ms = bes_get(payload, "finish_time_millis", 0) or 0
@@ -1546,13 +1555,34 @@ def summary_title_state(data, status):
     `state` variable for a `title` template override."""
     return compute_invocation_state(data, status)
 
-def conclusion(status, data):
-    """Bazel build/test task's terminal bookend conclusion. Delegates
-    to `compute_invocation_state(data, status)` so the bookend reads
-    the same bucket-derived state label as `summary_title()`.
+def conclusion(status: str, data: dict, cancelled: bool = False, exit_code: int = 0) -> str:
+    """Bazel build/test task's terminal bookend conclusion, which the task
+    history keeps as the line the run ended on.
+
+    It reads the bucket-derived state label `summary_title()` does
+    (`compute_invocation_state`), except for an interrupted build. The title
+    keeps the Aspect Web UI's label for one ("Invocation disconnected", or a
+    failure label when no stream started); the bookend reads "Interrupted"
+    when Bazel's BuildFinished says INTERRUPTED (`bazel.aborted`), or when
+    the build failed without a BuildFinished and either the task was
+    cancelled or Bazel's client exited INTERRUPTED (a SIGINT that reached it
+    alone).
+
+    Args:
+        status:    the lifecycle status (`pick_status`).
+        data:      dict from init_data().
+        cancelled: whether the task's root cancellation token is cancelled
+                   (`ctx.cancellation.root.cancelled`).
+        exit_code: the Bazel client's exit code.
     """
     if status in ("running", "failing"):
         return ""
+    bz = data["bazel"]
+    if bz.get("aborted", False):
+        return "Interrupted"
+    unfinished = status == "failed" and bz.get("stream", "") != "finished"
+    if unfinished and (cancelled or exit_code == exit_codes.INTERRUPTED):
+        return "Interrupted"
     state = compute_invocation_state(data, status)
 
     # Defensive: empty if no bucket matched (running already excluded above).
@@ -2257,9 +2287,12 @@ def compute_invocation_state(data, status):
 
     Walks priority groups top-down; first group with a non-empty bucket wins
     (in-group order is the tiebreaker). "Running..." while in progress (partial
-    data isn't authoritative). When status == "failed", restricts to
-    `_FAILURE_BUCKETS` and falls back to "Failed to build" — else an
-    analysis-phase failure (no failed_action/target) would read "Successful build".
+    data isn't authoritative). A failed build whose stream started and never
+    reached a BuildFinished reads "Invocation disconnected", as the Aspect Web
+    UI reads an invocation with no exit code. Otherwise, when status ==
+    "failed", restricts to `_FAILURE_BUCKETS` and falls back to "Failed to
+    build", or an analysis-phase failure (no failed_action/target) would
+    read "Successful build".
     """
 
     # Aborted: fixed label regardless of what else ran.
@@ -2269,6 +2302,8 @@ def compute_invocation_state(data, status):
     # In-progress: always Running... regardless of mid-stream failures.
     if status in ("running", "failing"):
         return _BUCKET_INVOCATION_LABELS[_BUCKET_PENDING]
+    if status == "failed" and data["bazel"].get("stream") == "started":
+        return _BUCKET_INVOCATION_LABELS[_BUCKET_ABORTED_STATE]
     counts = _compute_bucket_counts(data)
 
     if status == "failed":
@@ -5366,7 +5401,7 @@ def _results_new(ctx, command, report_uploader = None):
         if report_uploader:
             report_uploader(data, final_status, command, targets)
 
-        bookend = conclusion(final_status, data)
+        bookend = conclusion(final_status, data, cancelled = ctx.cancellation.root.cancelled, exit_code = code)
         ph.dispatch(phases.Update(
             kind = "bazel_results",
             status = final_status,
