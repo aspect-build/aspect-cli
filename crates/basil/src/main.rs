@@ -346,7 +346,7 @@ fn wait_for_interrupt(curses: bool) {
     unsafe {
         signal(2, on_sigint);
     }
-    eprintln!("basil: waiting for interrupt");
+    eprintln!("basil: waiting for interrupt, pid={}", process::id());
     if curses {
         eprintln!("\x1b[32m[0 / 1]\x1b[0m waiting");
     }
@@ -468,12 +468,12 @@ struct Scenario {
     /// line starting `stdout:` goes to stdout instead, as real bazel writes
     /// action and test output.
     stderr_lines: &'static [&'static str],
-    /// After `stderr_lines`, announce `basil: waiting for interrupt` and wait
+    /// After `stderr_lines`, announce `basil: waiting for interrupt, pid=<n>` and wait
     /// for a SIGINT, then write this line after a cleanup pause and exit 8 —
     /// what an interrupted bazel prints on its way out.
     interrupt_tail: Option<&'static str>,
     /// Hold back the last event of the last attempt: announce `basil: waiting
-    /// for interrupt`, wait for a SIGINT, then write it after the cleanup
+    /// for interrupt, pid=<n>`, wait for a SIGINT, then write it after the cleanup
     /// pause, as Bazel finishes the stream of a build Ctrl-C stopped.
     interrupt_before_last: bool,
 }

@@ -593,36 +593,19 @@ watching = task(summary = "Test fixture.", implementation = _impl)
 fn a_bazel_client_a_signal_ends_ends_the_build_with_its_shell_code() {
     let dir = tempfile::tempdir().expect("temp dir");
     let root = dir.path();
-    std::fs::write(root.join("MODULE.bazel"), "").expect("MODULE.bazel");
-    std::fs::write(root.join("MODULE.aspect"), "").expect("MODULE.aspect");
-    std::fs::create_dir(root.join(".aspect")).expect(".aspect");
-    std::fs::write(
-        root.join(".aspect").join("config.axl"),
-        r#"load("@aspect//traits.axl", "BazelTrait")
-
-def config(ctx: ConfigContext):
-    t = ctx.traits[BazelTrait]
+    let argv = root.join("argv.log");
+    let output = build_in(
+        root,
+        r#"    t = ctx.traits[BazelTrait]
     t.extra_flags.append("--scenario=signal_killed_sigkill")
     t.build_retry = lambda code: True
     t.bazel_attempt_end.append(lambda ctx, code: print("attempt_end=%d" % code))
     t.build_end.append(lambda ctx, code: print("build_end=%d" % code))
 "#,
     )
-    .expect("config.axl");
-    let argv = root.join("argv.log");
-    let output = Command::new(aspect_cli())
-        .args(["build", "//..."])
-        .current_dir(root)
-        .env_clear()
-        .envs(base_env())
-        .env("BAZEL_REAL", basil_bin())
-        .env("BASIL_ARGV_LOG", &argv)
-        .env("ASPECT_CREDENTIALS_FILE", root.join("credentials.json"))
-        .env("HOME", root.join("home"))
-        .env("DO_NOT_TRACK", "1")
-        .stdin(Stdio::null())
-        .output()
-        .expect("running aspect build");
+    .env("BASIL_ARGV_LOG", &argv)
+    .output()
+    .expect("running aspect build");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(output.status.code(), Some(128 + 9), "{stderr}");
     assert!(!stderr.contains("Traceback"), "{stderr}");
@@ -683,20 +666,17 @@ fn a_tool_a_signal_ends_ends_the_task_with_its_shell_code() {
     assert!(!stderr.contains("Traceback"), "{stderr}");
 }
 
-/// `aspect build //...` in `root` against basil's `scenario`, with a task
-/// history of its own.
-fn build_in(root: &Path, scenario: &str) -> Command {
+/// `aspect build //...` in `root` against basil, with a task history of
+/// its own; `config` is the body of the workspace's `config(ctx)`, which
+/// picks basil's scenario.
+fn build_in(root: &Path, config: &str) -> Command {
     std::fs::write(root.join("MODULE.bazel"), "").expect("MODULE.bazel");
     std::fs::write(root.join("MODULE.aspect"), "").expect("MODULE.aspect");
     std::fs::create_dir(root.join(".aspect")).expect(".aspect");
     std::fs::write(
         root.join(".aspect").join("config.axl"),
         format!(
-            r#"load("@aspect//traits.axl", "BazelTrait")
-
-def config(ctx: ConfigContext):
-    ctx.traits[BazelTrait].extra_flags.append("--scenario={scenario}")
-"#
+            "load(\"@aspect//traits.axl\", \"BazelTrait\")\n\ndef config(ctx: ConfigContext):\n{config}"
         ),
     )
     .expect("config.axl");
@@ -714,6 +694,11 @@ def config(ctx: ConfigContext):
     cmd
 }
 
+/// The `config(ctx)` body that runs basil's `scenario`.
+fn scenario(name: &str) -> String {
+    format!("    ctx.traits[BazelTrait].extra_flags.append(\"--scenario={name}\")\n")
+}
+
 /// The record of the one run the history in `root` holds.
 fn the_record(root: &Path) -> task_record::TaskRecord {
     let runs: Vec<PathBuf> = std::fs::read_dir(root.join("history"))
@@ -725,33 +710,101 @@ fn the_record(root: &Path) -> task_record::TaskRecord {
     task_record::read(&runs[0].join(task_record::FILE_NAME)).expect("its record")
 }
 
+/// How long a build against basil gets to reach basil's prompt, and to end
+/// once signalled.
+const BUILD_DEADLINE: Duration = Duration::from_secs(60);
+
+/// A CLI whose stderr a thread of its own reads, so every wait on it has a
+/// deadline; one that misses it is killed.
+struct Watched {
+    child: Child,
+    lines: std::sync::mpsc::Receiver<String>,
+    seen: String,
+}
+
+impl Watched {
+    fn spawn(mut cmd: Command) -> Self {
+        let mut child = cmd
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn aspect-cli");
+        let stderr = BufReader::new(child.stderr.take().expect("piped stderr"));
+        let (tx, lines) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for line in stderr.lines().map_while(Result::ok) {
+                if tx.send(line).is_err() {
+                    break;
+                }
+            }
+        });
+        Self {
+            child,
+            lines,
+            seen: String::new(),
+        }
+    }
+
+    /// The first line containing `text`, within [`BUILD_DEADLINE`].
+    fn wait_for(&mut self, text: &str) -> String {
+        let deadline = Instant::now() + BUILD_DEADLINE;
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            match self.lines.recv_timeout(left) {
+                Ok(line) => {
+                    self.seen.push_str(&line);
+                    self.seen.push('\n');
+                    if line.contains(text) {
+                        return line;
+                    }
+                }
+                Err(e) => {
+                    let _ = self.child.kill();
+                    panic!("no {text:?} line ({e}):\n{}", self.seen);
+                }
+            }
+        }
+    }
+
+    fn signal(&self, signal: libc::c_int) {
+        // SAFETY: signalling a child this test spawned and has not reaped.
+        assert_eq!(
+            unsafe { libc::kill(self.child.id() as libc::pid_t, signal) },
+            0
+        );
+    }
+
+    /// Its exit within [`BUILD_DEADLINE`], and all it printed.
+    fn finish(mut self) -> (ExitStatus, String) {
+        let deadline = Instant::now() + BUILD_DEADLINE;
+        loop {
+            if let Some(status) = self.child.try_wait().expect("waiting for aspect-cli") {
+                for line in self.lines.try_iter() {
+                    self.seen.push_str(&line);
+                    self.seen.push('\n');
+                }
+                return (status, self.seen);
+            }
+            if Instant::now() >= deadline {
+                let _ = self.child.kill();
+                let _ = self.child.wait();
+                panic!("aspect-cli did not end:\n{}", self.seen);
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+}
+
 /// Ctrl+C mid-build: Bazel ends its stream with BuildFinished(INTERRUPTED)
 /// and exits 8, and the history records the run as cancelled and
 /// interrupted, not as a disconnect.
 #[test]
 fn a_build_ctrl_c_stops_is_recorded_as_interrupted() {
     let dir = tempfile::tempdir().expect("temp dir");
-    let mut child = build_in(dir.path(), "interrupted")
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn aspect-cli");
-    let mut stderr = BufReader::new(child.stderr.take().expect("piped stderr"));
-    let mut seen = String::new();
-    while !seen.contains("basil: waiting for interrupt") {
-        let mut line = String::new();
-        if stderr.read_line(&mut line).expect("reading stderr") == 0 {
-            panic!("aspect ended before basil waited:\n{seen}");
-        }
-        seen.push_str(&line);
-    }
-    // SAFETY: signalling a child this test spawned and has not reaped.
-    assert_eq!(
-        unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGINT) },
-        0
-    );
-    stderr.read_to_string(&mut seen).expect("draining stderr");
-    let status = child.wait().expect("waiting for aspect-cli");
+    let mut run = Watched::spawn(build_in(dir.path(), &scenario("interrupted")));
+    run.wait_for("basil: waiting for interrupt");
+    run.signal(libc::SIGINT);
+    let (status, seen) = run.finish();
     assert_eq!(status.code(), Some(8), "{seen}");
     let record = the_record(dir.path());
     assert_eq!(
@@ -765,16 +818,42 @@ fn a_build_ctrl_c_stops_is_recorded_as_interrupted() {
     );
 }
 
+/// A SIGINT that reaches the Bazel client alone, before its stream starts:
+/// no build event says what happened, the client's exit 8 does, and the
+/// history records the run as interrupted, though not cancelled.
+#[test]
+fn a_bazel_client_interrupted_on_its_own_is_recorded_as_interrupted() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let mut run = Watched::spawn(build_in(dir.path(), &scenario("stderr_after_interrupt")));
+    let line = run.wait_for("basil: waiting for interrupt");
+    let pid: libc::pid_t = line
+        .split("pid=")
+        .nth(1)
+        .and_then(|p| p.trim().parse().ok())
+        .unwrap_or_else(|| panic!("no pid in {line:?}"));
+    // SAFETY: signalling basil, which runs until it is signalled.
+    assert_eq!(unsafe { libc::kill(pid, libc::SIGINT) }, 0);
+    let (status, seen) = run.finish();
+    assert_eq!(status.code(), Some(8), "{seen}");
+    let record = the_record(dir.path());
+    assert_eq!(
+        (
+            record.exit_code,
+            record.cancelled,
+            record.conclusion.as_str()
+        ),
+        (Some(8), false, "Interrupted"),
+        "{seen}"
+    );
+}
+
 /// Bazel's server lost mid-build: the stream ends without a BuildFinished,
 /// and the history records the run as a disconnect.
 #[test]
 fn a_build_whose_server_is_lost_is_recorded_as_disconnected() {
     let dir = tempfile::tempdir().expect("temp dir");
-    let output = build_in(dir.path(), "server_lost")
-        .output()
-        .expect("running aspect build");
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert_eq!(output.status.code(), Some(37), "{stderr}");
+    let (status, seen) = Watched::spawn(build_in(dir.path(), &scenario("server_lost"))).finish();
+    assert_eq!(status.code(), Some(37), "{seen}");
     let record = the_record(dir.path());
     assert_eq!(
         (
@@ -783,6 +862,6 @@ fn a_build_whose_server_is_lost_is_recorded_as_disconnected() {
             record.conclusion.as_str()
         ),
         (Some(37), false, "Invocation disconnected"),
-        "{stderr}"
+        "{seen}"
     );
 }
