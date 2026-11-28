@@ -2192,6 +2192,9 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
     /// `ERROR:` is an error, across calls too); `bazel`, whether each line
     /// is one of Bazel's own: one starting as Bazel's do (`INFO:`, `ERROR:`,
     /// `Loading:`, `//`, `[`, …), not coloured as a tool colours `INFO:`;
+    /// `seqs`, each line's place in the order lines arrived, counted with
+    /// `std.term`'s `output()` (`seq`), for a screen merging both to keep
+    /// that order;
     /// `dropped`, how many older lines were let go to keep at most 10000
     /// between calls; and `progress`, the rows of Bazel's progress area as it
     /// was before its latest redraw (at most one redraw behind), its status
@@ -2212,6 +2215,7 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
             "colours": got.colours,
             "kinds": got.kinds,
             "bazel": got.bazel,
+            "seqs": got.seqs,
             "dropped": got.dropped,
             "progress": got.progress,
         })))

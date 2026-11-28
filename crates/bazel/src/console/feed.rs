@@ -17,9 +17,14 @@
 //! one of Bazel's own ([`Kinds`]), for a screen filtering or folding the
 //! console. The progress area is replaced on every redraw, so only the
 //! latest is kept.
+//!
+//! Every feed's lines are numbered from one counter as each ends
+//! ([`Drained::seqs`]): a screen that drains two (the console's and the
+//! process's own output) merges them by it, in the order they arrived.
 
 use std::collections::VecDeque;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::ansi;
 use super::links;
@@ -27,6 +32,9 @@ use super::links;
 /// A link in a drawable line: the characters `start..end` of its text, and
 /// the URL they open.
 pub type Link = (u32, u32, String);
+
+/// The number the next line to end in any feed gets ([`Drained::seqs`]).
+static ARRIVAL: AtomicU64 = AtomicU64::new(1);
 
 /// Lines kept between drains; past it the oldest go.
 pub const MAX_LINES: usize = 10_000;
@@ -72,6 +80,7 @@ struct Kept {
     coloured: String,
     kind: &'static str,
     bazel: bool,
+    seq: u64,
 }
 
 /// What [`Feed::drain`] hands over.
@@ -91,6 +100,10 @@ pub struct Drained {
     /// starts as Bazel's lines do and is not coloured as a tool colours
     /// such a line ([`Kinds::bazel`]).
     pub bazel: Vec<bool>,
+    /// Each of `lines`' place in the order lines ended in every feed of
+    /// this process, at the same index: one counter for all, so two feeds'
+    /// lines merge into the order they arrived.
+    pub seqs: Vec<u64>,
     /// Lines that were dropped for [`MAX_LINES`] since the last drain.
     pub dropped: u64,
     /// The rows of Bazel's progress area as it was before its latest redraw,
@@ -152,12 +165,14 @@ impl Feed {
         let mut colours = Vec::new();
         let mut kinds = Vec::new();
         let mut bazel = Vec::new();
+        let mut seqs = Vec::new();
         for kept in s.lines.drain(..) {
             lines.push(kept.text);
             links.push(kept.links);
             colours.push(kept.coloured);
             kinds.push(kept.kind);
             bazel.push(kept.bazel);
+            seqs.push(kept.seq);
         }
         Drained {
             lines,
@@ -165,6 +180,7 @@ impl Feed {
             colours,
             kinds,
             bazel,
+            seqs,
             dropped: std::mem::take(&mut s.dropped),
             progress: s.progress.clone(),
         }
@@ -274,6 +290,7 @@ impl State {
             coloured,
             kind,
             bazel,
+            seq: ARRIVAL.fetch_add(1, Ordering::Relaxed),
         });
     }
 }

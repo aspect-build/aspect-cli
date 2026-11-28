@@ -4,9 +4,9 @@ Off by default: `aspect build //... --dashboard`. What it shows and its keys
 are in the builtins' README.md (`Dashboard`).
 
 A pre-task hook takes the screen; an idle hook draws it until a build does.
-Each `BazelTrait.output_frame` (`frame`) reads the CLI's own lines, then
-Bazel's console (`build.output_feed()`, `add_lines`, dashboard/log.axl) and
-the keys (`on_key`, dashboard/keys.axl)
+Each `BazelTrait.output_frame` (`frame`) reads the CLI's own lines and
+Bazel's console (`build.output_feed()`) in the order they arrived
+(`add_lines`, dashboard/log.axl) and the keys (`on_key`, dashboard/keys.axl)
 and draws one frame (`render`, dashboard/render.axl); `build_event` hooks
 gather the counts and failures (`collect_event`,
 private/lib/failure_records.axl, shared with the plain console);
@@ -277,9 +277,41 @@ def _draw(state: dict, screen, frame):
     return True
 
 def _add_output(state: dict, screen):
-    # The CLI's own lines, marked as such, their links moved with them.
-    got = screen.output()
-    _add_lines(state, [line for line, _, _ in got], [links for _, links, _ in got], [coloured for _, _, coloured in got], cli = True)
+    _add_cli(state, screen.output())
+
+def _add_cli(state: dict, got: list):
+    """The CLI's own lines (`output()`'s `[line, links, coloured, seq]`),
+    marked as such, their links moved with them."""
+    _add_lines(state, [g[0] for g in got], [g[1] for g in got], [g[2] for g in got], cli = True)
+
+def _add_arrived(state: dict, cli: list, feed: dict) -> None:
+    """The CLI's own lines (`output()`) and Bazel's console's (`feed`, from
+    `output_feed()`) in the order they arrived, merged by the number each
+    was given as it ended (`seq`, `seqs`: one counter for both), as
+    `output.log` has them. A run of either's goes in at once."""
+    lines = feed["lines"]
+    seqs = feed.get("seqs") or []
+    pick = lambda key, a, b: feed[key][a:b] if feed.get(key) != None else None
+    i, j = 0, 0
+    for _ in range(len(cli) + len(lines)):
+        if i >= len(cli) and j >= len(lines):
+            break
+        if j >= len(lines) or (i < len(cli) and j < len(seqs) and cli[i][3] < seqs[j]):
+            k = i
+            for _ in range(len(cli)):
+                if k >= len(cli) or (j < len(seqs) and cli[k][3] > seqs[j]):
+                    break
+                k += 1
+            _add_cli(state, cli[i:k])
+            i = k
+        else:
+            k = j
+            for _ in range(len(lines)):
+                if k >= len(lines) or (i < len(cli) and k < len(seqs) and seqs[k] > cli[i][3]):
+                    break
+                k += 1
+            _add_lines(state, lines[j:k], pick("links", j, k), pick("colours", j, k), pick("kinds", j, k), pick("bazel", j, k))
+            j = k
 
 def _take(state: dict, task_ctx):
     """Take the terminal for the task, from its start: what it writes
@@ -292,7 +324,7 @@ def _take(state: dict, task_ctx):
     # replayed on leaving.
     early = state["screen"].earlier()
     state["seeded"] = state.get("seeded", 0) + len(early)
-    _add_lines(state, [line for line, _, _ in early], [links for _, links, _ in early], [coloured for _, _, coloured in early], cli = True)
+    _add_cli(state, early)
 
     # The mouse taken unless asked not to (`m` outlives a screen the
     # runtime took back), and its wheel as arrows while it is the
@@ -356,11 +388,9 @@ def _idle(state: dict, task_ctx):
 
 def frame(state: dict, task_ctx, build):
     """One `output_frame` of a build: its console's new lines and progress
-    (`build.output_feed()`) and the CLI's own lines, the CLI's first, since
-    each that came in the same frame (`▸ Build` before Bazel's first) was
-    written before the frame read Bazel's; then the keys and the frame
-    drawn. A build whose console is shown (its own `output =`) is left
-    alone."""
+    (`build.output_feed()`) and the CLI's own lines, in the order they
+    arrived (`_add_arrived`); then the keys and the frame drawn. A build
+    whose console is shown (its own `output =`) is left alone."""
     feed = build.output_feed()
     if feed == None:
         return
@@ -383,8 +413,7 @@ def frame(state: dict, task_ctx, build):
     screen = state["screen"]
     state["now_ms"] = now
     state["frames"] += 1
-    _add_output(state, screen)
-    _add_lines(state, feed["lines"], feed.get("links"), feed.get("colours"), feed.get("kinds"), feed.get("bazel"))
+    _add_arrived(state, screen.output(), feed)
     state["dropped"] = state.get("dropped", 0) + (feed.get("dropped", 0) or 0)
 
     # A frame that caught Bazel between drawing its progress area and

@@ -698,7 +698,8 @@ fn lines_linked_and_coloured(got: Drained) -> serde_json::Value {
             .into_iter()
             .zip(got.links)
             .zip(got.colours)
-            .map(|((line, links), coloured)| serde_json::json!([line, links, coloured]))
+            .zip(got.seqs)
+            .map(|(((line, links), coloured), seq)| serde_json::json!([line, links, coloured, seq]))
             .collect::<Vec<_>>()
     )
 }
@@ -954,12 +955,14 @@ fn screen_methods(registry: &mut MethodsBuilder) {
     }
 
     /// The lines the process wrote to its stdout and stderr since the last
-    /// call, each as `[line, links, coloured]`: `line` with its escape
+    /// call, each as `[line, links, coloured, seq]`: `line` with its escape
     /// sequences stripped, `links` its OSC 8 links (`print()` links URLs and
     /// paths) as `[start, end, url]` by character, as `output_feed()` gives
-    /// a build's, and `coloured` the same text with its colour kept. The
-    /// CLI's own lines, `print()` and diagnostics, which `release()` also
-    /// writes to the scrollback.
+    /// a build's, `coloured` the same text with its colour kept, and `seq`
+    /// its place in the order lines arrived, counted with `output_feed()`'s
+    /// `seqs`, so a screen showing both keeps that order. The CLI's own
+    /// lines, `print()` and diagnostics, which `release()` also writes to
+    /// the scrollback.
     fn output<'v>(
         this: values::Value<'v>,
         heap: values::Heap<'v>,
@@ -969,7 +972,7 @@ fn screen_methods(registry: &mut MethodsBuilder) {
     }
 
     /// What the task wrote before Bazel's console began, as `[line, links,
-    /// coloured]` like `output()`, its links made again (the banner's URL
+    /// coloured, seq]` like `output()`, its links made again (the banner's URL
     /// among them): for a screen that shows the task's output from its
     /// start, before any of Bazel's lines. Once: a second call gives none.
     fn earlier<'v>(

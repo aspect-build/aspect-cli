@@ -221,23 +221,29 @@ def _narrow_failure_rows(ctx):
 
 def _frame_order(ctx):
     """The CLI's own lines and Bazel's that one frame reads together go to
-    the console the CLI's first: `▸ Build` is written before the build that
-    prints `INFO: Analyzed …`, whichever the frame drains first."""
-    cli = ["▸ Setup", "▸ Build"]
-    bazel = ["INFO: Analyzed target //a:b (0 packages loaded, 1 target configured).", "INFO: Found 1 target..."]
-    written = []
-    screen = struct(
-        held = True,
-        output = lambda: [(line, [], line) for line in cli],
-        size = lambda: (100, 30),
-        key = lambda: None,
-        write = lambda frame: written.append(frame),
-    )
-    build = struct(output_feed = lambda: {"lines": bazel, "links": None, "colours": None, "kinds": None, "bazel": None, "progress": [], "dropped": 0})
-    st = _screen(ctx, [], building = False, screen = screen, task = "build")
-    frame(st, None, build)
-    _eq("the CLI's lines first", [l for l in st["log"] if l in cli or l in bazel], cli + bazel)
-    _eq("drawn once", len(written), 1)
+    the console in the order they arrived, by the number each line got as
+    it ended (`seq`, `seqs`), as `output.log` has them: `▸ Build` before
+    Bazel's first line, `interrupted, stopping…` after the Bazel lines
+    before it, and lines that alternate, alternating."""
+    for name, cli, bazel, want in [
+        ("the CLI's first", [("▸ Setup", 1), ("▸ Build", 2)], [("INFO: Analyzed target //a:b.", 3), ("INFO: Found 1 target...", 4)], ["▸ Setup", "▸ Build", "INFO: Analyzed target //a:b.", "INFO: Found 1 target..."]),
+        ("Bazel's first", [("aspect-cli: interrupted, stopping…", 3)], [("[17 / 41] 16 actions running", 1), ("INFO: Elapsed time: 5.6s", 2)], ["[17 / 41] 16 actions running", "INFO: Elapsed time: 5.6s", "aspect-cli: interrupted, stopping…"]),
+        ("alternating", [("▸ Build", 1), ("a hook's print", 4)], [("INFO: Analyzed target //a:b.", 2), ("INFO: Found 1 target...", 3), ("INFO: Build completed", 5)], ["▸ Build", "INFO: Analyzed target //a:b.", "INFO: Found 1 target...", "a hook's print", "INFO: Build completed"]),
+    ]:
+        written = []
+        screen = struct(
+            held = True,
+            output = lambda: [[line, [], line, seq] for line, seq in cli],
+            size = lambda: (100, 30),
+            key = lambda: None,
+            write = lambda frame: written.append(frame),
+        )
+        feed = {"lines": [l for l, _ in bazel], "seqs": [n for _, n in bazel], "links": None, "colours": None, "kinds": None, "bazel": None, "progress": [], "dropped": 0}
+        build = struct(output_feed = lambda: feed)
+        st = _screen(ctx, [], building = False, screen = screen, task = "build")
+        frame(st, None, build)
+        _eq("arrival order, %s" % name, [l for l in st["log"] if l in want], want)
+        _eq("drawn once, %s" % name, len(written), 1)
 
 def _headed(block):
     """A kept block, its `ERROR:` header read as the collector reads one
