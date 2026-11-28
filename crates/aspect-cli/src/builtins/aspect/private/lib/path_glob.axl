@@ -6,10 +6,14 @@ match is case-sensitive (POSIX path semantics) and segment-aware:
   *   matches any sequence of characters except `/`
   ?   matches exactly one character except `/`
   **  matches zero or more path segments (must be a whole segment, i.e.
-      `**` between two `/` boundaries — patterns like `a**b` are treated
-      as two single-`*` wildcards followed by literal characters)
+      `**` between two `/` boundaries: patterns like `a**b` are treated
+      as two single-`*` wildcards followed by literal characters). A
+      trailing `**` needs at least one segment: `vendor/**` does not match
+      `vendor`.
 
-A trailing slash is trimmed (`vendor/` ≡ `vendor`).
+A leading `.` is an ordinary character, so `*` matches `.bazelrc`. A
+trailing slash is trimmed (`vendor/` ≡ `vendor`). Any other empty segment
+(`/a`, `a//b`) matches an empty segment of the path literally.
 
 Examples:
   match_path("*.lock", "Cargo.lock")               → True
@@ -21,109 +25,109 @@ Examples:
   match_path("**/foo", "foo")                      → True
   match_path("a/**/b", "a/x/y/b")                  → True
 
-Implementation note: this is a pure-Starlark recursive segment matcher.
-Pattern-volume × file-volume is small in practice (≤ ~10 patterns × ≤ ~1k
-files = ≤ 10k matches per task), so the cost is invisible against the
-formatter binary's runtime. If profiling ever shows pressure we can move
-the matcher to Rust and expose via ctx; for now Starlark stays.
+Implementation note: the matcher is pure Starlark, and its work is bounded
+by pattern length times path length however many wildcards a pattern has.
 """
 
-def _match_chars(pat, name):
-    """Match a single segment-level pattern against a name (no `/`).
+def _last_star_match(pat: str | list[str], name: str | list[str], star: str, one: typing.Callable[[str, str], bool]) -> bool:
+    """Match PAT against NAME, item by item, with STAR as the wildcard.
 
-    Supports `*` (any chars except none) and `?` (exactly one char).
-    Iterative with backtracking — Starlark has no `while`, so we cap the
-    iteration count.
+    STAR matches any run of items, including none; every other pattern item
+    matches exactly one item of NAME where `one(pattern_item, item)` holds.
+    This is the standard one-star-at-a-time backtracking: on a mismatch,
+    only the last STAR seen takes one more item, which is enough because a
+    later STAR can absorb whatever an earlier one would. A STAR that ends
+    PAT matches the rest of NAME outright.
 
-    Bound rationale: this is the standard one-star-at-a-time backtracking
-    algorithm. Each backtrack increments `star_ni` (monotone, capped at
-    len(name)), and between backtracks we do at most len(pat) char
-    advances before either matching or failing. Worst case is therefore
-    O(len(pat) * len(name)) — e.g. pattern `*?` against an N-character
-    string takes ~2N iterations because each `?` advance is followed by
-    a backtrack to `star_ni + 1`. The previous bound of
-    `len(pat) + len(name) + 8` was undersized: `*?` and `*b` against
-    11-character names both ran out of iterations and silently
-    false-negative'd before reaching the match.
+    Bound: each backtrack advances `star_ni`, which never decreases and
+    never passes len(name), and between backtracks `pi` only moves forward,
+    so the loop answers within (len(pat) + 1) * (len(name) + 1) steps. The
+    cap adds slack to that bound, and running past it is a bug.
     """
+    pn = len(pat)
+    nn = len(name)
     pi = 0
     ni = 0
     star_pi = -1
     star_ni = 0
-    for _ in range(len(pat) * len(name) + len(pat) + len(name) + 8):
-        if ni < len(name) and pi < len(pat) and (pat[pi] == "?" or pat[pi] == name[ni]):
-            pi += 1
-            ni += 1
-        elif pi < len(pat) and pat[pi] == "*":
+    for _ in range(pn * nn + pn + nn + 8):
+        if pi < pn and pat[pi] == star:
             star_pi = pi
             star_ni = ni
             pi += 1
-        elif star_pi >= 0:
+            if pi == pn:
+                return True
+        elif pi < pn and ni < nn and one(pat[pi], name[ni]):
+            pi += 1
+            ni += 1
+        elif star_pi >= 0 and star_ni < nn:
             star_ni += 1
             pi = star_pi + 1
             ni = star_ni
         else:
             return False
-        if pi == len(pat) and ni == len(name):
+        if pi == pn and ni == nn:
             return True
-    return pi == len(pat) and ni == len(name)
+    fail("glob match of %r against %r ran past its bound" % (pat, name))
 
-def _match_segments(pat_segs, name_segs):
+def _one_char(pat: str, char: str) -> bool:
+    return pat == "?" or pat == char
+
+def _match_chars(pat: str, name: str) -> bool:
+    """Match a single segment-level pattern against a name (no `/`).
+
+    Supports `*` (any run of characters, including none) and `?` (exactly
+    one character). A pattern with neither is compared as a string, and
+    `*` followed by literals is a suffix check; anything else backtracks.
+    """
+    if "*" not in pat and "?" not in pat:
+        return pat == name
+    if pat.startswith("*") and "*" not in pat[1:] and "?" not in pat:
+        return name.endswith(pat[1:])
+    return _last_star_match(pat, name, "*", _one_char)
+
+def _each_matches(pat_segs: list[str], name_segs: list[str]) -> bool:
+    """True if the segments pair up one to one and each pair matches."""
+    if len(pat_segs) != len(name_segs):
+        return False
+    for i in range(len(pat_segs)):
+        if not _match_chars(pat_segs[i], name_segs[i]):
+            return False
+    return True
+
+def _match_segments(pat_segs: list[str], name_segs: list[str]) -> bool:
     """Match a list of pattern segments against a list of name segments.
 
-    `**` segments match zero or more name segments. All other segments
-    match a single name segment via _match_chars (which supports `*` and
-    `?` within a segment).
-
-    Recursive on `**` boundaries; the recursion depth is at most the
-    number of `**` segments in the pattern (typically 0-2).
+    `**` is the star over segments, and every other pattern segment matches
+    exactly one name segment via _match_chars. A trailing `**` needs at
+    least one segment, so it becomes `*` (any one segment) and then `**`.
+    The segments after the last `**` take one name segment each, so they
+    must line up with the path's last segments; only the head, up to and
+    including that `**`, backtracks. Consecutive `**` need no special
+    case: a run of stars backtracks from its last.
     """
-    pi = 0
-    ni = 0
-    pn = len(pat_segs)
-    nn = len(name_segs)
+    if pat_segs[-1] == "**":
+        pat_segs = pat_segs[:-1] + ["*", "**"]
+    if "**" not in pat_segs:
+        return _each_matches(pat_segs, name_segs)
+    tail_len = pat_segs[::-1].index("**")
+    head_len = len(pat_segs) - tail_len
+    rest = len(name_segs) - tail_len
+    return (
+        rest >= 0 and
+        _each_matches(pat_segs[head_len:], name_segs[rest:]) and
+        _last_star_match(pat_segs[:head_len], name_segs[:rest], "**", _match_chars)
+    )
 
-    # Walk in lockstep until we hit a `**` or run out.
-    for _ in range(pn + nn + 8):
-        if pi == pn:
-            return ni == nn
-        if pat_segs[pi] == "**":
-            # `**` matches zero or more name segments. Try each possible
-            # split: consume k name segments here, recurse on the rest.
-            tail = pat_segs[pi + 1:]
-            if not tail:
-                # Trailing `**` — match must include at least one name
-                # segment past this point (otherwise `**` at the end
-                # would also match the parent dir alone, which feels
-                # surprising; keep the "must have child" semantics
-                # documented in the module docstring).
-                return ni < nn
-            for k in range(nn - ni + 1):
-                if _match_segments(tail, name_segs[ni + k:]):
-                    return True
-            return False
-        if ni == nn:
-            return False
-        if not _match_chars(pat_segs[pi], name_segs[ni]):
-            return False
-        pi += 1
-        ni += 1
-    return pi == pn and ni == nn
-
-def match_path(pattern, path):
+def match_path(pattern: str, path: str) -> bool:
     """Match a single path against a glob pattern. Empty pattern → no match."""
-    if not pattern:
-        return False
-
-    # Trim trailing slash for friendliness — `vendor/` and `vendor` mean
-    # the same thing for our use case.
     if pattern.endswith("/"):
         pattern = pattern[:-1]
     if not pattern:
         return False
     return _match_segments(pattern.split("/"), path.split("/"))
 
-def match_any(patterns, path):
+def match_any(patterns: list[str], path: str) -> bool:
     """Convenience: True if PATH matches at least one of the given patterns."""
     for p in patterns:
         if match_path(p, path):

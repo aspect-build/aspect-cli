@@ -1,0 +1,265 @@
+"""Unit tests for lib/path_glob.axl.
+
+Run with:
+  aspect dev test-path-glob
+"""
+
+load("./path_glob.axl", "match_any", "match_path")
+
+def _eq(label, got, want):
+    if got != want:
+        fail("%s: got %r, want %r" % (label, got, want))
+
+def _check(cases):
+    for pattern, path, want in cases:
+        _eq("%r ~ %r" % (pattern, path), match_path(pattern, path), want)
+
+def _test_literals(_ctx):
+    _check([
+        ("foo", "foo", True),
+        ("foo", "Foo", False),
+        ("foo", "foobar", False),
+        ("a/b", "a/b", True),
+        ("a/b", "a/b/c", False),
+        ("a/b/c", "a/b", False),
+        ("foo/", "foo", True),
+        ("", "a", False),
+        ("", "", False),
+        ("/", "", False),
+    ])
+
+def _test_wildcards(_ctx):
+    # `*<suffix>` is a suffix check; the rest backtrack, long names included.
+    _check([
+        ("*", "foo", True),
+        ("*", "", True),
+        ("*", "a/foo", False),
+        ("*.lock", "Cargo.lock", True),
+        ("*.lock", "Cargo.lockfile", False),
+        ("*.lock", "subdir/Cargo.lock", False),
+        ("*.generated.go", "foo.generated.go", True),
+        ("*.generated.go", "Foo.Generated.Go", False),
+        ("*b", "b" * 11, True),
+        ("*b", "b" * 64, True),
+        ("*b", "aaaaaaaaaab", True),
+        ("?ar", "bar", True),
+        ("?ar", "ar", False),
+        ("?ar", "bar/baz", False),
+        ("?", "ab", False),
+        ("*?", "a" * 11, True),
+        ("*?", "a" * 32, True),
+        ("*?", "", False),
+        ("*?b", "a" * 32 + "b", True),
+        ("a*", "abc", True),
+        ("a*", "ba", False),
+        ("a*b?c", "aXbYc", True),
+        ("a*b?c", "abc", False),
+        ("*a*", "bab", True),
+        ("a**b", "aXYb", True),
+        ("a**b", "a/b", False),
+        ("***", "abc", True),
+        ("***", "a/b", False),
+        ("*?", "*", True),
+        ("?", "*", True),
+        ("*", "**", True),
+        ("vendor/*", "vendor/foo", True),
+        ("vendor/*", "vendor/foo/bar", False),
+    ])
+
+def _test_double_star(_ctx):
+    _check([
+        # Leading.
+        ("**/foo", "foo", True),
+        ("**/foo", "a/foo", True),
+        ("**/foo", "a/b/c/foo", True),
+        ("**/foo", "foo/bar", False),
+        ("**/*.bzl", "a/b/defs.bzl", True),
+        ("**/*.generated.go", "a/b/foo.generated.go", True),
+        ("**/BUILD", "a/BUILD.bazel", False),
+        ("**/a/*", "a", False),
+        ("**/a/*", "x/a/b", True),
+        # Trailing: at least one segment.
+        ("vendor/**", "vendor/foo", True),
+        ("vendor/**", "vendor/foo/bar/baz", True),
+        ("vendor/**", "vendor", False),
+        ("vendor/**/", "vendor/foo", True),
+        # Middle.
+        ("a/**/b", "a/b", True),
+        ("a/**/b", "a/x/b", True),
+        ("a/**/b", "a/x/y/b", True),
+        ("a/**/b", "a/x", False),
+        ("a/**/b", "b", False),
+        ("a/**/b/*.c", "a/q/b/c.c", True),
+        ("a/**/b/*.c", "a/q/b/d/c.c", False),
+        # Alone, and twice in a row.
+        ("**", "foo", True),
+        ("**", "a/b/c", True),
+        ("**/**", "a", True),
+        ("**/**/a", "a", True),
+        # Several: the head backtracks to its last `**`.
+        ("**/x/**/y", "q/x/r/s/y", True),
+        ("**/x/**/y", "x/y", True),
+        ("**/x/**/y", "q/y", False),
+        ("**/x/**/y", "y/x", False),
+        ("**/x/**/x", "x", False),
+        ("**/x/**/x", "q/x/x", True),
+        ("**/x/**/x", "x/q/x", True),
+        ("a/**/b/**/c", "a/b/c", True),
+        ("a/**/b/**/c", "a/1/b/2/3/c", True),
+        ("a/**/b/**/c", "a/c/b", False),
+        ("**/x/**", "q/x/r", True),
+        ("**/x/**", "q/x", False),
+        ("**/testdata/**/*.golden", "crates/c/tests/testdata/failures/uni/9.3.3.golden", True),
+        ("**/a**b", "x/aYb", True),
+    ])
+
+def _test_many_double_stars(_ctx):
+    # Backtracking only to the last `**` keeps these linear; trying every
+    # split of every `**` takes seconds to minutes on them. The ones ending
+    # in `**/c` match their tail, so their head has to backtrack.
+    thirty = "/".join(["a"] * 30)
+    _check([
+        ("**/a/**/a/**/a/**/a/**/b", thirty, False),
+        ("**/a/**/a/**/a/**/a/**/a/**/b", thirty, False),
+        ("**/**/**/**/**/**/**/**/b", thirty, False),
+        ("**/a/**/a/**/a/**/a/**/b", thirty + "/b", True),
+        ("**/a/**/a/**/a/**/a/**/b/**/c", thirty + "/c", False),
+        ("**/a/**/a/**/a/**/a/**/a/**/b/**/c", thirty + "/c", False),
+        ("**/**/**/**/**/**/**/**/b/**/c", thirty + "/c", False),
+        ("**/a/**/a/**/a/**/a/**/b/**", thirty + "/c", False),
+        ("**/a/**/a/**/a/**/a/**/a/**/b/**/c", thirty + "/b/c", True),
+        ("**/**/**/**/**/**/**/**/b/**/c", thirty + "/b/a/c", True),
+    ])
+
+def _test_empty_segments(_ctx):
+    _check([
+        ("a//b", "a//b", True),
+        ("a//b", "a/b", False),
+        ("/a", "/a", True),
+        ("/a", "a", False),
+        ("/**", "/a", True),
+        ("/**", "a", False),
+        ("/a/**", "/a/b", True),
+        ("**//a", "x//a", True),
+        ("**//a", "x/a", False),
+        ("*/a", "/a", True),
+        ("?/a", "/a", False),
+    ])
+
+def _test_dotfiles(_ctx):
+    _check([
+        ("*", ".bazelrc", True),
+        ("*.axl", ".axl", True),
+        (".*", ".bazelrc", True),
+        (".*", "bazelrc", False),
+        ("?bazelrc", ".bazelrc", True),
+        ("**/.bazelrc", "a/.bazelrc", True),
+        ("**/.bazelrc", "a/bazelrc", False),
+        ("**/*.bzl", ".hidden/defs.bzl", True),
+        (".github/**", ".github/workflows/ci.yaml", True),
+        ("**/.*/*.yaml", "x/.github/ci.yaml", True),
+    ])
+
+def _test_match_any(_ctx):
+    _eq("first matches", match_any(["*.lock", "vendor/**"], "Cargo.lock"), True)
+    _eq("second matches", match_any(["*.lock", "vendor/**"], "vendor/foo/bar"), True)
+    _eq("none matches", match_any(["*.lock", "vendor/**"], "src/main.rs"), False)
+    _eq("no patterns", match_any([], "anything"), False)
+    _eq("any of them", match_any(["**/BUILD", "**/*.axl"], "a/b/c.axl"), True)
+
+def _reference_chars(pat: str, name: str) -> bool:
+    """Segment match written from the definitions of `*` and `?`."""
+    if not pat:
+        return not name
+    if pat[0] == "*":
+        return _reference_chars(pat[1:], name) or (name != "" and _reference_chars(pat, name[1:]))
+    return name != "" and (pat[0] == "?" or pat[0] == name[0]) and _reference_chars(pat[1:], name[1:])
+
+def _reference_segments(pat_segs: list[str], name_segs: list[str]) -> bool:
+    """Path match written from the definition of `**`, trailing rule included."""
+    if not pat_segs:
+        return not name_segs
+    if pat_segs[0] == "**":
+        if len(pat_segs) == 1:
+            return len(name_segs) > 0
+        return _reference_segments(pat_segs[1:], name_segs) or (len(name_segs) > 0 and _reference_segments(pat_segs, name_segs[1:]))
+    return len(name_segs) > 0 and _reference_chars(pat_segs[0], name_segs[0]) and _reference_segments(pat_segs[1:], name_segs[1:])
+
+def _reference_match(pattern: str, path: str) -> bool:
+    """match_path's contract: trailing slash trimmed, empty pattern matches nothing."""
+    if pattern.endswith("/"):
+        pattern = pattern[:-1]
+    return pattern != "" and _reference_segments(pattern.split("/"), path.split("/"))
+
+def _has_empty_segment(pattern: str) -> bool:
+    if pattern.endswith("/"):
+        pattern = pattern[:-1]
+    return pattern != "" and "" in pattern.split("/")
+
+def _joins(segments: list[str], counts: list[int]) -> list[str]:
+    """Every `/`-join of `n` items of `segments`, for each `n` in `counts`."""
+    out = []
+    level = [[]]
+    for n in range(1, max(counts) + 1):
+        level = [prefix + [s] for prefix in level for s in segments]
+        if n in counts:
+            out.extend(["/".join(p) for p in level])
+    return out
+
+_PATTERN_SEGMENTS = ["", "**", "*", "?", "a", "a*", "*a", "*a*", "*.b", ".*", "?a", "a*b?", "*?"]
+_PATTERNS = (
+    _joins(_PATTERN_SEGMENTS, [1, 2]) +
+    _joins(["", "**", "*", "a"], [3]) +
+    ["**/a/**/a", "a/**/*/**", "**/*/**/.*", "**/**/a/*", "**/a/**/a/**", "*/**/a.b/**/*"]
+)
+_PATHS = (
+    _joins(["", "a", "b", ".a", "a.b", "aab", "*"], [1, 2]) +
+    _joins(["", "a", ".a"], [3]) +
+    ["a/b/a/a", "b/a/.a/a.b/a", "a/a/a/a/a", "a//a/a", "/a/a/a.b/a"]
+)
+
+def _test_agrees_with_reference(_ctx):
+    """match_path agrees with the reference on every pair of a broad table."""
+    matched = 0
+    empty_matched = 0
+    for pattern in _PATTERNS:
+        empty = _has_empty_segment(pattern)
+        for path in _PATHS:
+            got = match_path(pattern, path)
+            want = _reference_match(pattern, path)
+            if got != want:
+                fail("%r ~ %r: match_path %r, reference %r" % (pattern, path, got, want))
+            if got:
+                matched += 1
+                if empty:
+                    empty_matched += 1
+
+    # Not vacuous: a fair share of pairs match, some through an empty segment.
+    pairs = len(_PATTERNS) * len(_PATHS)
+    if matched * 20 < pairs or empty_matched == 0:
+        fail("only %d of %d pairs matched, %d through an empty segment" % (matched, pairs, empty_matched))
+
+_UNIT_TESTS = [
+    _test_literals,
+    _test_wildcards,
+    _test_double_star,
+    _test_many_double_stars,
+    _test_empty_segments,
+    _test_dotfiles,
+    _test_match_any,
+    _test_agrees_with_reference,
+]
+
+def _test_impl(ctx):
+    for t in _UNIT_TESTS:
+        t(ctx)
+    print("path_glob.axl: OK (%d tests)" % len(_UNIT_TESTS))
+    return 0
+
+path_glob_tests = task(
+    summary = "Run the path glob AXL unit tests.",
+    kind = "test-path-glob",
+    group = ["dev"],
+    implementation = _test_impl,
+    args = {},
+)

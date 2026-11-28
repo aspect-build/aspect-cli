@@ -67,6 +67,7 @@ load("@aspect//private/lib/lifecycle_test.axl", "lifecycle_tests")
 load("@aspect//private/lib/lint_comments_test.axl", "lint_comments_tests")
 load("@aspect//private/lib/lint_results_test.axl", "detect_lint_tool_tests", "lint_annotation_plan_tests", "lint_default_preset_snapshot_tests", "lint_template_snapshot_tests", "linter_rows_tests")
 load("@aspect//private/lib/log_snippet_test.axl", "log_snippet_tests")
+load("@aspect//private/lib/path_glob_test.axl", "path_glob_tests")
 load("@aspect//private/lib/path_utils_test.axl", "path_utils_tests")
 load("@aspect//private/lib/process_info_test.axl", "process_info_tests")
 load("@aspect//private/lib/random_test.axl", "random_tests")
@@ -568,6 +569,10 @@ def config(ctx: ConfigContext):
     # Repository and branch from `.git`, against real clones and worktrees.
     # Run with: aspect dev test-git-checkout
     ctx.tasks.add(git_checkout_tests)
+
+    # Path globs: `*`, `?` and `**`, checked against a reference matcher.
+    # Run with: aspect dev test-path-glob
+    ctx.tasks.add(path_glob_tests)
 
     # Path utilities: normalization, cwd rebasing, and traversal.
     # Run with: aspect dev test-path-utils
