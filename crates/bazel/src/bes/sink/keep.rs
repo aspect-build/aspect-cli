@@ -2,14 +2,16 @@
 //! stream as it arrives.
 //!
 //! An action's stdout and stderr are files Bazel writes under
-//! `bazel-out/_tmp/actions/` and names in the `ActionExecuted` event; the next
-//! build replaces them (a new file at the same name). They are hard-linked
-//! here, which costs nothing and leaves Bazel's path alone for anything that
-//! still reads it (a BES upload finishing after the client exits), and copied
-//! when a link cannot be made (another filesystem). A test's logs live in the
-//! output tree, which a later run may rewrite in place, so they are copied.
-//! A `file://` log is kept from its path and inline contents are written
-//! out. A remote cache names logs by `bytestream://` instead: a test's
+//! `bazel-out/_tmp/actions/` and names in the `ActionExecuted` event, and a
+//! test's logs are files in the output tree (`testlogs/`, an earlier
+//! attempt's under `test_attempts/`); the next build replaces each (a new
+//! file at the same name, on Bazel 7, 8 and 9, sandboxed, `local` or
+//! `standalone`), never rewriting one in place. Both are hard-linked here,
+//! which costs nothing until Bazel replaces its own and leaves Bazel's path
+//! alone for anything that still reads it (a BES upload finishing after the
+//! client exits), and copied when a link cannot be made (another
+//! filesystem). A `file://` log is kept from its path and inline contents
+//! are written out. A remote cache names logs by `bytestream://` instead: a test's
 //! `test.log` and `test.xml` are then found where Bazel's output tree has
 //! them, once the stream ends or the build is retried in it; any other such
 //! log (an action's, with a remote cache) is counted as `not_local`.
@@ -332,13 +334,7 @@ impl Kept {
             let rel = Path::new("actions")
                 .join(&base)
                 .join(format!("{stem}.{stream}"));
-            if let Some(kept) = keep_file(
-                &self.dir,
-                file,
-                &rel,
-                Placement::Link,
-                &mut self.actions_not_kept,
-            ) {
+            if let Some(kept) = keep_file(&self.dir, file, &rel, &mut self.actions_not_kept) {
                 entry[stream] = json!(kept);
             }
         }
@@ -420,13 +416,7 @@ impl Kept {
                 });
                 continue;
             }
-            if let Some(kept) = keep_file(
-                &self.dir,
-                file,
-                &rel,
-                Placement::Copy,
-                &mut self.tests_not_kept,
-            ) {
+            if let Some(kept) = keep_file(&self.dir, file, &rel, &mut self.tests_not_kept) {
                 files.insert(name.to_string(), json!(kept));
             }
         }
@@ -452,7 +442,7 @@ impl Kept {
         self.tests.push(entry);
     }
 
-    /// Copy the test logs a remote URI named from where Bazel left them, with
+    /// Keep the test logs a remote URI named from where Bazel left them, with
     /// the run and shard counts and last attempts known so far (unknown
     /// counts resolve only the first run and shard).
     fn find_remote_test_logs(&mut self) {
@@ -461,12 +451,7 @@ impl Kept {
                 self.tests_not_kept.not_local += 1;
                 continue;
             };
-            match place(
-                &Source::Path(source.clone()),
-                &self.dir,
-                &log.rel,
-                Placement::Copy,
-            ) {
+            match place(&Source::Path(source.clone()), &self.dir, &log.rel) {
                 Ok(kept) => {
                     self.tests[log.entry]["files"][log.name.as_str()] =
                         json!(kept.to_string_lossy());
@@ -554,13 +539,7 @@ impl Kept {
 
 /// Keep `file` at `rel` under `dir`; the relative path, or None when it was
 /// remote, inline or could not be kept (counted in `not_kept`).
-fn keep_file(
-    dir: &Path,
-    file: &File,
-    rel: &Path,
-    how: Placement,
-    not_kept: &mut NotKept,
-) -> Option<String> {
+fn keep_file(dir: &Path, file: &File, rel: &Path, not_kept: &mut NotKept) -> Option<String> {
     let source = match (
         crate::bes::uri_of(file).and_then(crate::bes::local_path),
         file.file.as_ref(),
@@ -572,7 +551,7 @@ fn keep_file(
             return None;
         }
     };
-    match place(&source, dir, rel, how) {
+    match place(&source, dir, rel) {
         Ok(kept) => Some(kept.to_string_lossy().into_owned()),
         Err(e) => {
             tracing::debug!("could not keep {}: {e}", source.describe());
@@ -580,13 +559,6 @@ fn keep_file(
             None
         }
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Placement {
-    /// A hard link, else a copy.
-    Link,
-    Copy,
 }
 
 /// What a log is kept from: a local file, or the contents Bazel sent inline.
@@ -614,11 +586,12 @@ fn config_of(id: &Option<ConfigurationId>) -> String {
     id.as_ref().map(|c| c.id.clone()).unwrap_or_default()
 }
 
-/// Put `from` at `rel` under `dir`, making its folders; the path it took,
-/// relative to `dir`. Nothing is overwritten: two labels can map to one
-/// folder (`//a:b/c`, `//a/b:c`), so a taken name gets a numbered sibling
+/// Put `from` at `rel` under `dir`, making its folders: a file hard-linked,
+/// else copied, inline contents written; the path it took, relative to
+/// `dir`. Nothing is overwritten: two labels can map to one folder
+/// (`//a:b/c`, `//a/b:c`), so a taken name gets a numbered sibling
 /// (`test.log` → `test.2.log`).
-fn place(from: &Source, dir: &Path, rel: &Path, how: Placement) -> io::Result<PathBuf> {
+fn place(from: &Source, dir: &Path, rel: &Path) -> io::Result<PathBuf> {
     if let Some(parent) = dir.join(rel).parent() {
         fs::create_dir_all(parent)?;
     }
@@ -629,7 +602,7 @@ fn place(from: &Source, dir: &Path, rel: &Path, how: Placement) -> io::Result<Pa
             numbered(rel, n)
         };
         let to = dir.join(&candidate);
-        if let (Placement::Link, Source::Path(from)) = (how, from) {
+        if let Source::Path(from) = from {
             match fs::hard_link(from, &to) {
                 Ok(()) => return Ok(candidate),
                 Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
@@ -1073,7 +1046,7 @@ mod tests {
     }
 
     #[test]
-    fn test_logs_are_copied_by_status_and_cache() {
+    fn test_logs_are_linked_by_status_and_cache() {
         let tmp = tempfile::tempdir().unwrap();
         let log = tmp.path().join("test.log");
         fs::write(&log, "FAIL\n").unwrap();
@@ -1119,15 +1092,15 @@ mod tests {
                 })
                 .collect();
             assert_eq!(labels, kept_labels, "{which:?}");
-            let copy = dir.join("testlogs/t/fails/run_1/shard_1/attempt_1/test.log");
-            assert_eq!(fs::read_to_string(&copy).unwrap(), "FAIL\n");
+            let kept = dir.join("testlogs/t/fails/run_1/shard_1/attempt_1/test.log");
+            assert_eq!(fs::read_to_string(&kept).unwrap(), "FAIL\n");
             #[cfg(unix)]
             {
                 use std::os::unix::fs::MetadataExt;
-                assert_ne!(
-                    fs::metadata(&copy).unwrap().ino(),
+                assert_eq!(
+                    fs::metadata(&kept).unwrap().ino(),
                     fs::metadata(&log).unwrap().ino(),
-                    "copied"
+                    "hard-linked, as an action's"
                 );
             }
             assert!(
@@ -1209,7 +1182,7 @@ mod tests {
         );
     }
 
-    /// A test log a remote cache names by `bytestream://` is copied from
+    /// A test log a remote cache names by `bytestream://` is kept from
     /// where Bazel left it: the last attempt's `test.log`, an earlier one's
     /// under `test_attempts/`, a sharded test's in its shard's folder.
     #[test]
@@ -1365,7 +1338,7 @@ mod tests {
     }
 
     /// A retry of the build in one stream: the abandoned attempt's remote log
-    /// is found before the retry rewrites it.
+    /// is found before the retry replaces it.
     #[test]
     fn a_retried_build_keeps_each_attempts_own_test_log() {
         use axl_proto::build_event_stream::{BuildStarted, Configuration, WorkspaceConfig};
@@ -1414,6 +1387,8 @@ mod tests {
         fs::write(logs.join("test.log"), "first\n").unwrap();
         kept.event(&result);
         kept.event(&started);
+        // As Bazel runs a test again: its log a new file at the same name.
+        fs::remove_file(logs.join("test.log")).unwrap();
         fs::write(logs.join("test.log"), "retry\n").unwrap();
         kept.event(&result);
         kept.finish();
@@ -1505,7 +1480,6 @@ mod tests {
             &Source::Path(tmp.path().join("gone")),
             &dir,
             Path::new("a/x.stderr"),
-            Placement::Link,
         );
         assert!(err.is_err());
         assert!(!dir.join("a/x.stderr").exists());

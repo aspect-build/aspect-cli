@@ -144,8 +144,10 @@ fn fixture(report: &Path, handshake: &Path, scenario: &str, f: Fixture) -> Strin
         // registers one in practice — the Artifact Upload feature does,
         // unconditionally — so this is how a task with no BES consumer is reached.
         setup.push_str("    t.build_start.append(lambda _ctx: t.build_event.clear())\n");
-        // Keeping action logs (failed ones by default) reads the stream too.
+        // Keeping action and test logs (failed ones by default) reads the
+        // stream too.
         setup.push_str("    t.keep_action_logs = \"none\"\n");
+        setup.push_str("    t.keep_test_logs = \"none\"\n");
     }
     setup.push_str(if f.late {
         // `build_start` fires on attempt 0 only, so this appends exactly once.

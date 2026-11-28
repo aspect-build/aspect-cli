@@ -668,7 +668,8 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     ///   nothing is trimmed.
     /// * `keep_test_logs` - Keep test logs in the history (`bazel/<n>/testlogs/`,
     ///   listed in `bazel/<n>/testlogs.json`): `none` (the default), `failed`, `executed`
-    ///   (attempts this build ran, not cached) or `all`. Copied.
+    ///   (attempts this build ran, not cached) or `all`. Hard-linked from where
+    ///   Bazel wrote them, else copied.
     /// * `execution_log` - Enable Bazel execution log collection by passing a list of
     ///   consumers: sinks such as `execution_log.compact_file(path = "out.binpb.zst")`
     ///   or `execution_log.file(path = ...)`, and `execution_log.iterator(kinds = [...])`
@@ -887,7 +888,8 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     ///   nothing is trimmed.
     /// * `keep_test_logs` - Keep test logs in the history (`bazel/<n>/testlogs/`,
     ///   listed in `bazel/<n>/testlogs.json`): `none` (the default), `failed`, `executed`
-    ///   (attempts this build ran, not cached) or `all`. Copied.
+    ///   (attempts this build ran, not cached) or `all`. Hard-linked from where
+    ///   Bazel wrote them, else copied.
     /// * `execution_log` - Enable Bazel execution log collection by passing a list of
     ///   consumers: sinks such as `execution_log.compact_file(path = "out.binpb.zst")`
     ///   or `execution_log.file(path = ...)`, and `execution_log.iterator(kinds = [...])`
