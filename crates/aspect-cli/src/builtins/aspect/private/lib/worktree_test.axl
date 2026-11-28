@@ -11,6 +11,7 @@ two spellings but not the two hosts is the behaviour these pin down.
 
 load(
     "@aspect//worktree.axl",
+    "testonly_age_out",
     "testonly_base_note",
     "testonly_being_set_up",
     "testonly_capped",
@@ -34,6 +35,7 @@ load(
     "testonly_own_subagent",
     "testonly_porcelain_entries",
     "testonly_protected_from",
+    "testonly_prune_idle_days",
     "testonly_push_command",
     "testonly_release_all_plan",
     "testonly_release_grade",
@@ -56,6 +58,7 @@ load(
     "./worktree.axl",
     "FREE",
     "LEASED",
+    "PRUNE_IDLE_DAYS",
     "RESERVED",
     "SLOT_PREFIX",
     "UNREADABLE_CHECKOUT",
@@ -115,6 +118,7 @@ load(
     "work_in",
     "write_registry",
 )
+load("./worktrees_trait.axl", "testonly_pool_options")
 
 def _eq(label, got, want):
     if got != want:
@@ -315,6 +319,62 @@ def _test_prune_respects_the_age_threshold(ctx):
     }}
     _eq("over the line", prunable_slots(ctx.std, pool, registry, 30), ["stale"])
     _eq("everything, at zero", sorted(prunable_slots(ctx.std, pool, registry, 0)), ["fresh", "stale"])
+
+def _swept_by_add(ctx, **options) -> list[str]:
+    """The slots of a fresh pool that `add`'s sweep deletes with the
+    `WorktreePool` options at `options` over their defaults, as the feature
+    writes them from config. The pool's slots are 29, 45 and 100 days idle."""
+    tmp = ctx.std.fs.mkdtemp(prefix = "aspect-wt-test")
+    root = ctx.std.fs.mkdtemp(prefix = "aspect-worktree-root")
+    pool = {"git_common_dir": tmp + "/.git", "dir": tmp + "/pool"}
+    registry = {"slots": {}}
+    for slot_id, days in [("day029", 29), ("day045", 45), ("day100", 100)]:
+        ctx.std.fs.create_dir_all(slot_path(pool, slot_id))
+        registry["slots"][slot_id] = _slot(pool["git_common_dir"], age_days = days)
+    before = list(registry["slots"].keys())
+    restore = testonly_pool_options(ctx, **options)
+    dropped = testonly_age_out(ctx, pool, registry, root)
+    restore()
+    gone = sorted([s for s in before if s not in registry["slots"]])
+    _eq("count returned for %r" % gone, dropped, len(gone))
+    return gone
+
+def _test_adds_sweep_uses_the_pools_idle_limit(ctx):
+    """`add` deletes free slots by the pool's idle limit, the one `prune`
+    defaults to, so a slot a config protects from `prune` survives `add` too:
+    45 days is past the default 30 but inside a configured 90. At 0 or below
+    every free slot goes, as it does for `prune`."""
+    _eq("the default", _swept_by_add(ctx), ["day045", "day100"])
+    _eq("configured to 90", _swept_by_add(ctx, max_idle_days = 90), ["day100"])
+    _eq("configured to 0", _swept_by_add(ctx, max_idle_days = 0), ["day029", "day045", "day100"])
+    _eq("configured below 0", _swept_by_add(ctx, max_idle_days = -1), ["day029", "day045", "day100"])
+
+def _prune_args(days: int, explicit: bool = False, configured = None):
+    """A stand-in for `prune`'s `ctx.args`: `--max-idle-days` at `days`, typed
+    on the command line where `explicit`, and the value a config.axl gave it,
+    if any."""
+    return struct(
+        max_idle_days = days,
+        is_explicit = lambda name: explicit and name == "max_idle_days",
+        configured = lambda name: configured if name == "max_idle_days" else None,
+    )
+
+def _test_prune_uses_the_pools_idle_limit_unless_told_otherwise(ctx):
+    """`prune` with no `--max-idle-days` works by the limit `add` sweeps by;
+    the flag, typed or set in config.axl, replaces it for that run."""
+    restore = testonly_pool_options(ctx, max_idle_days = 90)
+    _eq("the pool's", testonly_prune_idle_days(ctx, _prune_args(PRUNE_IDLE_DAYS)), 90)
+    _eq("typed", testonly_prune_idle_days(ctx, _prune_args(7, explicit = True)), 7)
+    _eq("typed as 0", testonly_prune_idle_days(ctx, _prune_args(0, explicit = True)), 0)
+    _eq("set in config.axl", testonly_prune_idle_days(ctx, _prune_args(60, configured = 60)), 60)
+    _eq("typed over config.axl", testonly_prune_idle_days(ctx, _prune_args(7, explicit = True, configured = 60)), 7)
+    restore()
+    restore = testonly_pool_options(ctx, max_idle_days = 0)
+    _eq("the pool's 0", testonly_prune_idle_days(ctx, _prune_args(PRUNE_IDLE_DAYS)), 0)
+    restore()
+    restore = testonly_pool_options(ctx)
+    _eq("the default", testonly_prune_idle_days(ctx, _prune_args(PRUNE_IDLE_DAYS)), PRUNE_IDLE_DAYS)
+    restore()
 
 def _test_prune_leaves_a_live_clones_slots_alone(ctx):
     """Two clones of one repository share a pool directory but not slots. A slot
@@ -3775,6 +3835,8 @@ _UNIT_TESTS = [
     _test_a_recently_used_base_outranks_an_old_creation_floor,
     _test_prune_never_takes_a_leased_slot,
     _test_prune_respects_the_age_threshold,
+    _test_adds_sweep_uses_the_pools_idle_limit,
+    _test_prune_uses_the_pools_idle_limit_unless_told_otherwise,
     _test_prune_leaves_a_live_clones_slots_alone,
     _test_owned_slots_counts_only_this_clone,
     _test_drop_slot_removes_the_entry_and_the_base,

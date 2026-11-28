@@ -1959,8 +1959,10 @@ def _prune_reason(ctx: TaskContext, pool: dict, slot_id: str, slot: dict, root: 
     return "no recorded age, nothing on disk"
 
 def _age_out(ctx: TaskContext, pool: dict, registry: dict, root: str) -> int:
-    """Drop free slots nothing has touched in `PRUNE_IDLE_DAYS`. Returns how many
-    went, so the caller can persist a registry that no longer matches the disk.
+    """Drop free slots nothing has touched in the pool's idle limit
+    (`--worktree-pool:max-idle-days`), the one `prune` defaults to. Returns how
+    many went, so the caller can persist a registry that no longer matches the
+    disk.
 
     This is what actually bounds the pool, and it runs inside `add` because
     nobody runs a cleanup command on a schedule. It never touches a leased slot
@@ -1968,7 +1970,7 @@ def _age_out(ctx: TaskContext, pool: dict, registry: dict, root: str) -> int:
     had already stopped paying for itself.
     """
     dropped = 0
-    for slot_id in prunable_slots(ctx.std, pool, registry, PRUNE_IDLE_DAYS, root, stranded_at_once = False):
+    for slot_id in prunable_slots(ctx.std, pool, registry, worktree_pool.max_idle_days(ctx), root, stranded_at_once = False):
         slot = registry["slots"][slot_id]
         label = slot.get("last_branch", "") or slot_id
         why = _prune_reason(ctx, pool, slot_id, slot, root)
@@ -4459,6 +4461,30 @@ def _prune_outside_a_clone(ctx: TaskContext) -> TaskConclusion:
         "`aspect worktree list --all` shows, which is how a slot whose clone is gone is removed",
     )
 
+def _prune_idle_days(ctx: TaskContext, args = None) -> int:
+    """The idle limit `prune` works by when no slot is named: its own
+    `--max-idle-days` where the command line or a config.axl gives one, and
+    otherwise the pool's (`--worktree-pool:max-idle-days`), which the sweep in
+    `add` uses.
+
+    `add` cannot read `prune`'s args, so a config.axl setting
+    `ctx.tasks["worktree/prune"].args.max_idle_days` sets a limit the sweep
+    never sees. That is said whenever it differs from the pool's, because the
+    next `add` would delete what this `prune` keeps, or the reverse. `args` is
+    `ctx.args` unless a test passes its own.
+    """
+    args = ctx.args if args == None else args
+    pool_days = worktree_pool.max_idle_days(ctx)
+    configured = args.configured("max_idle_days")
+    if configured != None and configured != pool_days:
+        _warn(ctx.std, ("ctx.tasks[\"worktree/prune\"].args.max_idle_days is %d, but the sweep in `aspect worktree add` " +
+                        "deletes free slots idle for %d days (--worktree-pool:max-idle-days); set " +
+                        "ctx.features[WorktreePool].args.max_idle_days in config.axl instead, so both use one limit") %
+                       (configured, pool_days))
+    if args.is_explicit("max_idle_days") or configured != None:
+        return args.max_idle_days
+    return pool_days
+
 def _prune_impl(ctx: TaskContext) -> int | TaskConclusion:
     bad = _invalid_agent(ctx)
     if bad:
@@ -4510,6 +4536,8 @@ def _prune_impl(ctx: TaskContext) -> int | TaskConclusion:
                        " recorded for a clone no longer at its path: " + ", ".join(taken))
     if not ctx.args.dry_run and _reclaim_reservations(ctx, pool, registry):
         write_registry(ctx.std, pool["dir"], registry)
+
+    max_idle_days = _prune_idle_days(ctx)
 
     # Named a slot, or working by policy. Naming one says which, so age is not
     # consulted — the argument is the decision.
@@ -4581,7 +4609,7 @@ def _prune_impl(ctx: TaskContext) -> int | TaskConclusion:
             )
         eligible = [found]
     else:
-        eligible = prunable_slots(ctx.std, pool, registry, ctx.args.max_idle_days, root)
+        eligible = prunable_slots(ctx.std, pool, registry, max_idle_days, root)
 
     # A live Bazel server, or a checkout holding work, spares a slot. Applied
     # here rather than only at deletion, so `--dry-run` previews what a real run
@@ -4658,7 +4686,7 @@ def _prune_impl(ctx: TaskContext) -> int | TaskConclusion:
             if not _relock(ctx, pool, lock):
                 return _pool_busy(ctx)
             registry = reconcile(ctx.std, pool, read_registry(ctx.std, pool["dir"]))
-            still = [found] if named else prunable_slots(ctx.std, pool, registry, ctx.args.max_idle_days, root)
+            still = [found] if named else prunable_slots(ctx.std, pool, registry, max_idle_days, root)
             victims = [
                 v
                 for v in victims
@@ -4697,7 +4725,7 @@ def _prune_impl(ctx: TaskContext) -> int | TaskConclusion:
             "schema_version": _SCHEMA_VERSION,
             "pool": pool["id"],
             "dry_run": ctx.args.dry_run,
-            "max_idle_days": ctx.args.max_idle_days,
+            "max_idle_days": max_idle_days,
             # Candidates are reported whether or not anything was deleted, so a
             # dry run says what it would do rather than only that it did
             # nothing.
@@ -4716,10 +4744,10 @@ def _prune_impl(ctx: TaskContext) -> int | TaskConclusion:
         _info(ctx.std, _nothing_to_prune_message(
             registry,
             pool["git_common_dir"],
-            ctx.args.max_idle_days,
+            max_idle_days,
         ))
     elif not victims:
-        idle = (" that has been idle for %d days" % ctx.args.max_idle_days) if ctx.args.max_idle_days else ""
+        idle = (" that has been idle for %d days" % max_idle_days) if max_idle_days else ""
         _info(ctx.std, "nothing to prune: every free slot" + idle + " was kept, for the reasons above")
     elif declined:
         _info(ctx.std, "left alone; nothing was deleted")
@@ -5403,7 +5431,7 @@ path = task(
 prune = task(
     group = ["worktree"],
     summary = "Delete free slots and their Bazel output bases: one named, or all that have gone stale.",
-    description = _EXPERIMENTAL + "\n\n" + "Reclaim the disk held by free slots. Name a branch, a slot id, a unique prefix of one or a slot's directory to delete that one however recently it was used; name nothing and every free slot nothing has used for a while goes. Each slot costs a checkout plus a Bazel output base, so a pool that grew during a busy week keeps paying for it afterwards.\n\nOnly free slots — and, by name, stranded ones — are considered: a slot someone is working in is never deleted, however long it has been idle. A free slot whose Bazel server is still running, or whose checkout holds work, is reported and kept, since unlinking an output base from under a live server is how a build starts writing into directories that no longer exist.\n\nA clone that was moved or deleted leaves its slots for the next clone to take over: a free one by any clone, which then ages like its own, and a leased one by the clone whose git still lists its checkout. What no clone can take — a leased slot whose clone was deleted — is stranded, and goes only by being named, whatever its age, with `--force=all` where its checkout holds work; one whose lease's session is still running is refused, since its clone most likely moved.\n\nThis also runs automatically during `aspect worktree add`, so the pool stays bounded without anyone remembering to clean up.",
+    description = _EXPERIMENTAL + "\n\n" + "Reclaim the disk held by free slots. Name a branch, a slot id, a unique prefix of one or a slot's directory to delete that one however recently it was used; name nothing and every free slot nothing has used for a while goes. Each slot costs a checkout plus a Bazel output base, so a pool that grew during a busy week keeps paying for it afterwards.\n\nOnly free slots — and, by name, stranded ones — are considered: a slot someone is working in is never deleted, however long it has been idle. A free slot whose Bazel server is still running, or whose checkout holds work, is reported and kept, since unlinking an output base from under a live server is how a build starts writing into directories that no longer exist.\n\nA clone that was moved or deleted leaves its slots for the next clone to take over: a free one by any clone, which then ages like its own, and a leased one by the clone whose git still lists its checkout. What no clone can take — a leased slot whose clone was deleted — is stranded, and goes only by being named, whatever its age, with `--force=all` where its checkout holds work; one whose lease's session is still running is refused, since its clone most likely moved.\n\nThis also runs automatically during `aspect worktree add`, by the same idle limit (`--worktree-pool:max-idle-days`), so the pool stays bounded without anyone remembering to clean up.",
     implementation = _prune_impl,
     args = {
         "target": args.positional(
@@ -5413,7 +5441,7 @@ prune = task(
         ),
         "max_idle_days": args.int(
             default = PRUNE_IDLE_DAYS,
-            description = "Delete free slots untouched for at least this many days, when no slot is named. `0` considers every free slot.",
+            description = "Delete free slots untouched for at least this many days, when no slot is named, in place of the pool's limit for this run. Without it, the pool's limit applies: `--worktree-pool:max-idle-days`, which the sweep in `aspect worktree add` uses too. `0` considers every free slot.",
         ),
         "dry_run": args.boolean(
             default = False,
@@ -5501,3 +5529,5 @@ testonly_slot_in_use = _slot_in_use_message
 testonly_same_session = _same_session
 testonly_is_branch = _is_branch
 testonly_porcelain_entries = _porcelain_entries
+testonly_age_out = _age_out
+testonly_prune_idle_days = _prune_idle_days
