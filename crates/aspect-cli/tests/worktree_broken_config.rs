@@ -1,13 +1,17 @@
 //! `aspect worktree` is how you get a clean checkout to fix a broken workspace
 //! in, so the workspace's own AXL failing to load must not block it. `add`,
 //! `release`, `list`, `path` and `inspect` run anyway, with one warning on
-//! stderr naming each file that failed and the settings that may be at their
-//! defaults, and stdout stays the answer a caller parses. Such a run takes no
-//! stopped session's slot back and runs no feature but the ones those tasks
-//! read, since the config that did not load may protect the one and turn off
-//! the others. A usage error on one of them is Clap's to report. `prune`, any
-//! other task, and a repository's own task in the `worktree` group still fail
-//! as before, and a workspace that loads warns about nothing.
+//! stderr naming each file that failed, and stdout stays the answer a caller
+//! parses. When a config failed, the warning also names the settings that may
+//! be at their defaults, and the run takes no stopped session's slot back and
+//! runs no feature but the ones those tasks read, since that config may
+//! protect the one and turn off the others. When only task or feature files
+//! failed, every config ran: settings and the grace period are known, the
+//! healthy features run, and the warning names the failed feature files as
+//! ones whose hooks are off. A usage error on one of these tasks is Clap's to
+//! report unless a feature file failed. `prune`, any other task, and a
+//! repository's own task in the `worktree` group still fail as before, and a
+//! workspace that loads warns about nothing.
 //!
 //! Each case is a scratch git clone with its own `HOME` (see
 //! [`common::isolated`]), so the pool and any user-global

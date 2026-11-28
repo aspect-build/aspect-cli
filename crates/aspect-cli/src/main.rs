@@ -534,9 +534,9 @@ impl std::fmt::Display for ConfigError {
 /// This type is the mechanism, and holds two invariants the policy depends on:
 ///
 /// * Nothing recorded is ever dropped silently. Both ways out of here report
-///   first — [`Self::reporting`] for an error of its own, [`Self::into_error`]
-///   for one of the recorded failures raised as the run's error — so a typo
-///   does not vanish behind whatever ended the run. A run that carries on
+///   first: [`Self::reporting`] for an error of its own and
+///   [`Self::into_error`] for one of the recorded failures raised as the run's
+///   error, so a typo does not vanish behind whatever ended the run. A run that carries on
 ///   names every failed file too: [`Self::warn`] in full, and
 ///   [`Self::warn_degraded`] one line each.
 /// * Scripts come before configs. In the full report a config that failed
@@ -783,7 +783,7 @@ impl DegradedLines {
         }
         DegradedLines {
             settings: Some(cmd.degraded_settings(entry)),
-            running: Some(cmd.degraded_features(entry)),
+            running: Some(entry.running_features()),
             missing: vec![],
             ignored: matches.map_or_else(Vec::new, |matches| {
                 cmd.typed_feature_flags(matches, |f| {

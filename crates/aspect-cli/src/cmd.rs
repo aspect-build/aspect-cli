@@ -12,8 +12,8 @@
 //!   `degraded_usage()` tell `main` whether the selected task is one of the
 //!   built-ins that run against a workspace that did not fully load
 //!   ([`DEGRADED_COMMANDS`]), `runs_degraded()` which features still run for
-//!   it, and `degraded_settings()`, `degraded_features()` and
-//!   `typed_feature_flags()` what its warning lists.
+//!   it, and `degraded_settings()` and `typed_feature_flags()` what its
+//!   warning lists, beside [`DegradedCommands::running_features`].
 //!   `dispatch()` turns parsed [`ArgMatches`] into a [`Dispatch`].
 //!   `print_feature_help()` renders `aspect feature [<name>]`, the discovery
 //!   surface for feature flags (which are hidden from each task's `--help`)
@@ -88,6 +88,18 @@ pub struct DegradedCommands {
     pub other_settings: &'static str,
 }
 
+impl DegradedCommands {
+    /// The features that still run for these tasks when the others are off,
+    /// as the degraded run's warning names them: `` `WorktreePool` ``.
+    pub fn running_features(&self) -> String {
+        self.features
+            .iter()
+            .map(|name| format!("`{name}`"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
+
 /// The built-in tasks that still run when the workspace's own AXL failed to
 /// load, warning instead of failing (see `Unloadable` in `main.rs`).
 ///
@@ -98,10 +110,10 @@ pub struct DegradedCommands {
 /// keeps. The one setting that protects anything, how long a stopped
 /// session's slot is kept for it, is not trusted when a config failed: the
 /// tasks read `ctx.task.degraded` and keep every such slot, unless the command
-/// line gave that setting. `prune` is left out, since a
-/// config may raise its `max_idle_days` and the default would delete slots the
-/// config keeps. Only tasks the built-in module defines qualify: a
-/// repository's own task in one of these groups may depend on what failed.
+/// line gave that setting. `prune` is left out, since a config may raise its
+/// `max_idle_days` and the default would delete slots the config keeps. Only
+/// tasks the built-in module defines qualify: a repository's own task in one
+/// of these groups may depend on what failed.
 pub const DEGRADED_COMMANDS: &[DegradedCommands] = &[DegradedCommands {
     group: "worktree",
     tasks: &["add", "release", "list", "path", "inspect"],
@@ -488,17 +500,6 @@ impl<'a, 'v> Cmd<'a, 'v> {
             }
         }
         flags
-    }
-
-    /// The features that still run for `entry`'s tasks when the others are
-    /// off, as the degraded run's warning names them: `` `WorktreePool` ``.
-    pub fn degraded_features(&self, entry: &DegradedCommands) -> String {
-        entry
-            .features
-            .iter()
-            .map(|name| format!("`{name}`"))
-            .collect::<Vec<_>>()
-            .join(", ")
     }
 
     /// The [`DEGRADED_COMMANDS`] entry task `index` is one of, if any.
