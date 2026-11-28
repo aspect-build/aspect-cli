@@ -129,8 +129,12 @@ rust_test(
     ],
 )
 
+# Some ninety runs of the unoptimized CLI, each a CPU-second of
+# evaluating the builtins: up to 455s on a loaded CI runner, past the medium
+# size's 300s timeout.
 rust_test(
     name = "console_test",
+    size = "large",
     srcs = ["tests/console.rs"] + INTEGRATION_TEST_COMMON_SRCS,
     crate_root = "tests/console.rs",
     data = [":aspect-cli"],
