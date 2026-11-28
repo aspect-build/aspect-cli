@@ -4,6 +4,7 @@ collects and the console text `failure_ties.axl` ties to them."""
 
 load("@aspect//bazel/console.axl", "RECAP_MAX")
 load("@std//theme.axl", "theme")
+load("./bazel_results.axl", "bes_get")
 load("./failure_records.axl", "failure_records")
 load("./failure_ties.axl", "failure_ties")
 load("./term_text.axl", "term_text")
@@ -360,9 +361,11 @@ def failure_entries(state: dict) -> dict:
     order; then a failed target none of those is about and no root cause
     blocks (`_NO_REASON`); with none of those nor any of Bazel's other
     errors (`console_ties`) once a build Bazel failed has ended
-    (`bazel_exit`), its exit code (`exited`), marked `interrupted` where
-    its `BuildFinished` says Bazel was (`INTERRUPTED`, by name), which
-    counts as no failure (`counted`). Each blocked target
+    (`bazel_exit`), its exit code (`exited`). Once a build its
+    `BuildFinished` says Bazel was interrupted in has ended (`INTERRUPTED`,
+    by name), an entry of that last, whatever else is listed, its exit code
+    `BuildFinished`'s and marked `interrupted`, which counts as no failure
+    (`counted`). Each blocked target
     (`blocked_targets`) goes under the first entry of its first root cause
     (`blocked`); a root with no entry keeps its blocked targets in
     `unlisted`. An entry's heading and excerpt are `entry_text`'s. Cached
@@ -400,12 +403,15 @@ def failure_entries(state: dict) -> dict:
             entries.append({"index": None, "group": "target", "label": label, "flaky": False, "pattern": False, "blocked": []})
 
     # A failed build always says why: with nothing else to list, an entry of
-    # Bazel's exit code (`entry_text`: its raw log's last lines), or that
-    # Bazel was interrupted.
+    # Bazel's exit code (`entry_text`: its raw log's last lines); one Bazel
+    # was interrupted in says so, whatever else it lists.
     code = state.get("bazel_exit")
-    if not entries and code not in (None, 0) and not state.get("building") and not _console_ties(state)["others"]:
-        interrupted = _build_outcome(state.get("inv") or {}) == "interrupted"
-        entries.append({"index": None, "group": "target", "label": "", "exited": code, "interrupted": interrupted, "flaky": False, "pattern": False, "blocked": []})
+    inv = state.get("inv") or {}
+    if not state.get("building") and _build_outcome(inv) == "interrupted":
+        code = bes_get(bes_get(inv.get("build_finished"), "exit_code"), "code", None) or code
+        entries.append({"index": None, "group": "target", "label": "", "exited": code, "interrupted": True, "flaky": False, "pattern": False, "blocked": []})
+    elif not entries and code not in (None, 0) and not state.get("building") and not _console_ties(state)["others"]:
+        entries.append({"index": None, "group": "target", "label": "", "exited": code, "interrupted": False, "flaky": False, "pattern": False, "blocked": []})
     first = {}
     for e in entries:
         if e["label"] not in first:
@@ -562,9 +568,11 @@ def failure_summary(state: dict, task_id: str, tty: bool, log_path: str = "", li
     stage's caps left out counted; `Failures (N)` counts the entries alone.
     With neither though Bazel exited non-zero (`bazel_exit`), the one entry
     is `✗ Bazel exited N` (`failure_entries`), quoting the raw log's last
-    `ERROR:` lines, else, a crashed server's, its last lines but progress;
-    for a build Bazel was interrupted in, a line `■ Bazel was interrupted
-    (exit N)` in the `warning` role instead, no failure and no rule.
+    `ERROR:` lines, else, a crashed server's, its last lines but progress.
+    A build Bazel was interrupted in ends, after whatever else it lists, on
+    a line `■ Bazel was interrupted (exit N)` in the `warning` role, which
+    counts as no failure (Bazel's own `ERROR: build interrupted`, the same
+    outcome restated, claimed, `console_ties`).
 
     Past `max_entries` entries (`_SUMMARY_MAX` when None), and as many of
     Bazel's other errors, `… and N more failures · aspect history show

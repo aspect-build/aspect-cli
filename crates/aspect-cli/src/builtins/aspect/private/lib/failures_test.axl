@@ -358,6 +358,25 @@ def _test_interrupted(ctx):
         got = failures.failure_summary(state, "t-1", False, log_path = "/log", bazel_exit = 8)
         _eq("%s: a failure" % name, ("── Failures (1) ──" in got, "✗ Bazel exited 8" in got, failures.failure_counts(state)), (True, True, (1, 0)))
 
+    # As Bazel ends a real Ctrl+C: its console says `ERROR: build
+    # interrupted`, its `BuildFinished` the same as its `failure_detail`'s
+    # message. That line is the outcome restated, claimed, never one of
+    # Bazel's other errors; the mark follows whatever else is listed.
+    console = _error("build interrupted") + _redrawn(_error("Build did NOT complete successfully"))
+    said = _event("build_finished", struct(), struct(exit_code = struct(name = "INTERRUPTED", code = 8), failure_detail = struct(message = "build interrupted")))
+    action = _failed_action("//a:g", "bazel-out/k8-fastbuild/bin/a/g.out", "Executing genrule //a:g failed: (Exit 1): bash failed")
+    for name, events, failures_rule in [("alone", [said], []), ("after a failure", [action, said], ["── Failures (1) ──"])]:
+        state = _ended(ctx, events, console)
+        got = failures.failure_summary(state, "t-1", False, bazel_exit = 8)
+        _eq("Ctrl+C %s: its rule, the mark, no other error" % name, ([l for l in got if l.startswith("──")], "■ Bazel was interrupted (exit 8)" in got, failures.failure_counts(state)[0]), (failures_rule, True, len(failures_rule)))
+
+    # Its `BuildFinished` naming no message (an interrupted `test` on Bazel
+    # 9.3.3): nothing to tie the line to, so it stays among Bazel's other
+    # errors, the mark after it.
+    bare = _event("build_finished", struct(), struct(exit_code = struct(name = "INTERRUPTED", code = 8)))
+    got = failures.failure_summary(_ended(ctx, [bare], console), "t-1", False, bazel_exit = 8)
+    _eq("no message: the line stays, the mark after", ([l for l in got if l.startswith("──") or l.startswith("ERROR: ")], "■ Bazel was interrupted (exit 8)" in got), (["── Other errors from Bazel ──", "ERROR: build interrupted"], True))
+
 def _impl(ctx: TaskContext) -> int:
     # The glyphs these compare are the default theme's, whatever the caller's.
     rerun = test_theme.rerun_in_default_theme(ctx, ["dev", "test-failures"])

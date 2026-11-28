@@ -243,9 +243,9 @@ the build events.
 
 It has a `── Failures (N) ──` section when anything failed, a
 `── Other errors from Bazel ──` section when Bazel wrote errors no entry claims
-(on a passing build too), for a build Bazel was interrupted in with nothing
-else to say a `■ Bazel was interrupted (exit 8)` line in place of both, then on
-every build the counts line and `All of it: aspect history show <id>`.
+(on a passing build too), for a build Bazel was interrupted in a
+`■ Bazel was interrupted (exit 8)` line after both, then on every build the
+counts line and `All of it: aspect history show <id>`.
 
 ### Entries
 
@@ -261,7 +261,8 @@ Entries come from build events alone, never from guessing at text:
 | `ActionExecuted` failed | The action | action |
 | `TestResult` not `PASSED` (one of the failed statuses above) | The test: the last attempt of its first failed shard or run stands for it (`test_group`) | test |
 | A failed target none of those is about and no root cause blocks | `Bazel's events give no reason; its error is in the console` (`_NO_REASON`) | target, after the tests |
-| None of those, no other errors, and Bazel exited non-zero | `✗ Bazel exited N`, quoting the raw log's last `ERROR:` lines, else a crashed server's `FATAL:` lines, else its last lines but progress (`_last_words`). Where `BuildFinished`'s exit code is named `INTERRUPTED` (a Ctrl+C), a mark instead, `■ Bazel was interrupted (exit 8)`, which counts as no failure (`counted`) | target |
+| None of those, no other errors, and Bazel exited non-zero | `✗ Bazel exited N`, quoting the raw log's last `ERROR:` lines, else a crashed server's `FATAL:` lines, else its last lines but progress (`_last_words`) | target |
+| `BuildFinished` with an exit code named `INTERRUPTED` (a Ctrl+C) | `■ Bazel was interrupted (exit 8)`, its code `BuildFinished`'s, after whatever else is listed and in place of the entry above; it counts as no failure (`counted`) | last |
 
 Each label has one target entry. A test attempt Bazel posts twice is one. A
 failed `TestRunner` action (a test Bazel failed itself) is an action entry
@@ -342,8 +343,11 @@ line restating an action's message at its location;
 `package contains errors: <pkg>: <text>` where an entry of that package quotes
 `<text>`, or, with no text, says its package has an error;
 `… <label> failed: …` and `Analysis of target '<label>' … failed` for a listed
-label; and `package contains errors: <pkg>: Traceback …` where a block listed or
-quoted already has that `Traceback`.
+label; `package contains errors: <pkg>: Traceback …` where a block listed or
+quoted already has that `Traceback`; and, for an interrupted build, the one
+line whose text is `BuildFinished`'s `failure_detail` message (`ERROR: build
+interrupted`), Bazel restating the outcome the mark says (`_claim_interrupted`;
+an interrupted `test` on Bazel 9.3.3 names no message, so its line stays).
 
 ### Other errors from Bazel
 

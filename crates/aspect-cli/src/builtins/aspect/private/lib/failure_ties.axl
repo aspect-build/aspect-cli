@@ -2,9 +2,11 @@
 (`console_ties`): an action's relayed output, a target's location, and
 Bazel's other errors."""
 
+load("./bazel_results.axl", "bes_get")
 load("./failure_records.axl", "failure_records")
 
 _action_logs = failure_records.action_logs
+_build_outcome = failure_records.build_outcome
 _own_labels = failure_records.own_labels
 _referrers = failure_records.referrers
 _workspace = failure_records.workspace
@@ -302,8 +304,9 @@ def console_ties(state: dict) -> dict:
     one entry and never one of several that match: the actions' ties
     (`_tie_actions`), the targets' (`_tie_targets`), then the lines that
     repeat an entry (`_claim_restated`), name one as what failed
-    (`_claim_named_failures`) or restate a `Traceback` listed or quoted
-    already (`_claim_restated_tracebacks`); every other one but Bazel's
+    (`_claim_named_failures`), restate a `Traceback` listed or quoted
+    already (`_claim_restated_tracebacks`) or restate an interrupted
+    build's outcome (`_claim_interrupted`); every other one but Bazel's
     boilerplate is among `others` (`_other_errors`).
 
     Returns `{actions, targets, others, not_kept}`: each tie by record
@@ -353,6 +356,7 @@ def console_ties(state: dict) -> dict:
     _claim_restated(state, result["targets"], headers, claimed)
     _claim_named_failures(state, headers, by, claimed)
     _claim_restated_tracebacks(state, headers, claimed, spans)
+    _claim_interrupted(state, by, claimed)
     result["others"] = _other_errors(state, headers, claimed, spans)
     state["ties_cache"] = (key, result)
     return result
@@ -586,6 +590,21 @@ def _claim_named_failures(state: dict, headers: list, by: dict, claimed: dict) -
         for k, h in enumerate(headers):
             if h["message"].startswith(_BAZEL.analysis_of % label) and h["message"].endswith(" failed"):
                 claimed[k] = True
+
+def _claim_interrupted(state: dict, by: dict, claimed: dict) -> None:
+    """Claim the one line that is Bazel restating an interrupted build's
+    outcome (`ERROR: build interrupted`): where `BuildFinished`'s exit code
+    is named `INTERRUPTED`, the one header whose text is its
+    `failure_detail`'s message, which the summary's interrupted mark says
+    instead. One with no message there (Bazel 9.3.3's interrupted `test`
+    command) leaves its line among Bazel's other errors."""
+    inv = state.get("inv") or {}
+    if _build_outcome(inv) != "interrupted":
+        return
+    message = str(bes_get(bes_get(inv.get("build_finished"), "failure_detail"), "message", "") or "")
+    k = _tie(by["message"].get(message, [])) if message else None
+    if k != None:
+        claimed[k] = True
 
 def _in_spans(header: dict, spans: list) -> bool:
     """Whether a header starts inside a tool's output (`spans`)."""
