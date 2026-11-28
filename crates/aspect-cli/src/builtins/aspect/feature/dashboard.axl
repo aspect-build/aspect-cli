@@ -495,7 +495,9 @@ def _hold(state: dict, task_ctx, screen, countdown_ms):
         changed = _draw(state, screen, _render(state, cols, rows))
 
         # Idle, a key a second; a frame that moves, or the countdown, ten.
-        key = screen.key(timeout_ms = _BUSY_MS if changed or deadline != None else _IDLE_MS)
+        # Each wait is the screen held for its reader, which the task's
+        # duration leaves out.
+        key = screen.key(timeout_ms = _BUSY_MS if changed or deadline != None else _IDLE_MS, reading = True)
         if key == "ctrl-c":
             return
         if key != None and deadline != None and key.startswith("mouse-move:"):

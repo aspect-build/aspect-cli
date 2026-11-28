@@ -113,22 +113,21 @@ fn lock_until<T>(m: &Mutex<T>, deadline: Instant) -> Option<MutexGuard<'_, T>> {
 /// The generation the next `take()` gets.
 static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
 
-/// How long, in microseconds, `key()` has waited for a key with a timeout
-/// in this process: a screen up for its reader (the Dashboard's finished
-/// screen, its countdown), never one drawing a build, whose reads do not
-/// wait ([`reader_wait`]).
+/// How long, in microseconds, `key(reading = True)` has waited for a key
+/// in this process: a screen its caller says is up for its reader (the
+/// Dashboard's finished screen, its countdown), never one that polls keys
+/// while it works ([`reader_wait`]).
 static READER_WAIT_US: AtomicU64 = AtomicU64::new(0);
 
 /// How long the screen has waited for its reader so far in this process
-/// (`key()` with a timeout): what a task's recorded duration and its
-/// closing line leave out, as the difference from the task's start to its
-/// end.
+/// (`key(reading = True)`): what a task's recorded duration and its closing
+/// line leave out, as the difference from the task's start to its end.
 pub fn reader_wait() -> Duration {
     Duration::from_micros(READER_WAIT_US.load(Ordering::Relaxed))
 }
 
-/// Counts a `key()` wait into [`READER_WAIT_US`] as it ends, however it
-/// returns.
+/// Counts a `key(reading = True)` wait into [`READER_WAIT_US`] as it ends,
+/// however it returns.
 struct ReaderWait(Option<Instant>);
 
 impl Drop for ReaderWait {
@@ -915,14 +914,17 @@ fn screen_methods(registry: &mut MethodsBuilder) {
     /// while held) and `mouse-release:<col>:<row>`, from 0 at the top left
     /// (its other buttons are skipped), or `ctrl-@`,
     /// `ctrl-\`, `ctrl-]`, `ctrl-^`, `ctrl-_`. A key it does not
-    /// know (a function key) is skipped. A wait (`timeout_ms` above 0) is
-    /// the screen up for its reader: the task's recorded duration and its
-    /// closing line leave it out ([`reader_wait`]).
+    /// know (a function key) is skipped. With `reading`, the wait is the
+    /// screen held up for its reader (a finished screen, nothing left to
+    /// do but read it): the task's recorded duration and its closing line
+    /// leave it out ([`reader_wait`]). Any other wait, a screen polling keys
+    /// while it works, is the task's time.
     fn key<'v>(
         this: values::Value<'v>,
         #[starlark(require = named, default = 0)] timeout_ms: u32,
+        #[starlark(require = named, default = false)] reading: bool,
     ) -> anyhow::Result<NoneOr<String>> {
-        let _waited = ReaderWait((timeout_ms > 0).then(Instant::now));
+        let _waited = ReaderWait((reading && timeout_ms > 0).then(Instant::now));
         // The wait runs without the screen's lock, which the exit path may
         // need to give the terminal back; only reading (with a wait for the rest
         // of a key, `KEY_SLICE` at most) and parsing hold it.
