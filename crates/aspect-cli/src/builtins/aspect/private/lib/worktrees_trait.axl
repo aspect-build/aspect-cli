@@ -32,9 +32,9 @@ When the workspace's own AXL does not load, most `aspect worktree` tasks still
 run (`DEGRADED_COMMANDS` in `crates/aspect-cli/src/cmd.rs`) and these may be at
 their defaults. Their warning lists `WorktreePool`'s options from the feature
 itself, and the `Worktrees` hooks from that table, so a hook added here belongs
-there too. Such a run takes no stopped session's slot back unless
-`--worktree-pool:abandoned-grace-hours` was given on the command line, which
-beats any config and so is known.
+there too. When a config is what failed, such a run takes no stopped
+session's slot back unless `--worktree-pool:abandoned-grace-hours` was given
+on the command line, which beats any config and so is known.
 """
 
 # The `score_slot` hook's limits: how long its calls for one `add` may take in

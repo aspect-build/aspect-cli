@@ -69,6 +69,7 @@ use aspect_telemetry::{
 };
 use axl_runtime::eval::{
     AxlFileFailure, AxlFileRole, EvalError, Loader, ModuleEnv, MultiPhaseEval,
+    args_read_before_features,
 };
 use axl_runtime::module::{AXL_ROOT_MODULE_NAME, Mod};
 use axl_runtime::module::{DiskStore, ModEvaluator};
@@ -282,10 +283,8 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
                     if !unloadable.is_empty()
                         && let Some(entry) = cmd.degraded_usage(&root_cmd, &argv)
                     {
-                        let settings = unloadable
-                            .settings_lost()
-                            .then(|| cmd.degraded_settings(entry));
-                        unloadable.warn_degraded(entry, settings.as_deref(), &[]);
+                        let lines = DegradedLines::of(&unloadable, &cmd, entry, None);
+                        unloadable.warn_degraded(entry, &lines);
                         err.print().ok();
                         return Ok(ExitCode::from(err.exit_code() as u8));
                     }
@@ -303,23 +302,18 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
 
             // Everything past here either reports the CLI's own surface or
             // dispatches a task; see `Unloadable` for which may run degraded.
-            let mut degraded = None;
+            let mut features_off = None;
             if !unloadable.is_empty() {
                 if runs_without_tasks(matches.subcommand_name()) {
                     unloadable.warn();
                 } else if let Some(entry) = cmd.degraded_commands(&matches) {
-                    // With only task files broken the configs ran in full, so
-                    // the run is degraded only when a config or feature file
-                    // failed.
-                    if unloadable.settings_lost() {
-                        let ignored =
-                            cmd.typed_feature_flags(&matches, |f| !cmd.runs_degraded(entry, f));
-                        let settings = cmd.degraded_settings(entry);
-                        unloadable.warn_degraded(entry, Some(&settings), &ignored);
+                    let lines = DegradedLines::of(&unloadable, &cmd, entry, Some(&matches));
+                    unloadable.warn_degraded(entry, &lines);
+                    if unloadable.config_lost() {
                         mpe.mark_degraded();
-                        degraded = Some(entry);
-                    } else {
-                        unloadable.warn_degraded(entry, None, &[]);
+                    }
+                    if lines.features.is_some() {
+                        features_off = Some(entry);
                     }
                 } else if let Some(err) = unloadable.into_error() {
                     return Err(err);
@@ -379,12 +373,12 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
             )
             .map_err(anyhow::Error::from)?;
 
-            // Phase 3: run enabled feature impls; in a degraded run only the
-            // ones its task reads, since a config that did not load may have
-            // turned the others off.
+            // Phase 3: run enabled feature impls; in a degraded run whose
+            // config or feature files failed, only the ones its task reads
+            // (see `DegradedLines::of`).
             time("features", || {
                 mpe.execute_features_with_args(
-                    |f| degraded.is_none_or(|entry| cmd.runs_degraded(entry, f)),
+                    |f| features_off.is_none_or(|entry| cmd.runs_degraded(entry, f)),
                     |f, h| dispatch.feature_args(f, h),
                 )
             })
@@ -561,12 +555,17 @@ impl Unloadable {
         self.scripts.is_empty() && self.configs.is_empty()
     }
 
-    /// Whether a config or feature file failed, which leaves out settings it
-    /// would have applied. A task file sets none.
-    fn settings_lost(&self) -> bool {
+    /// Whether a config failed, which leaves out settings it would have
+    /// applied and features it would have turned off.
+    fn config_lost(&self) -> bool {
+        !self.configs.is_empty()
+    }
+
+    /// Whether a feature file failed, which leaves out the hooks its feature
+    /// would have added. A task file adds none.
+    fn feature_lost(&self) -> bool {
         self.scripts
             .iter()
-            .chain(&self.configs)
             .any(|failure| failure.role != AxlFileRole::Tasks)
     }
 
@@ -652,20 +651,13 @@ impl Unloadable {
     /// them, or whose command line Clap rejected: a single `warning:` naming
     /// the command, then a line per file with the first line of its own
     /// error, scripts first. Each line is that file's own message, so no
-    /// config is blamed on a script here. Then a line naming `settings`, which
-    /// the run may have at their defaults, and one naming the `ignored` flags
-    /// of the features it does not run, each when given: the caller gives them
-    /// when a config or feature file failed ([`Self::settings_lost`]).
+    /// config is blamed on a script here. Then the lines `lines` has (see
+    /// [`DegradedLines`]).
     ///
     /// The full diagnostics are left to `ASPECT_DEBUG`, which prints each one
     /// below: pages of source excerpts would bury the answer the user ran the
     /// command for.
-    fn warn_degraded(
-        &self,
-        entry: &cmd::DegradedCommands,
-        settings: Option<&str>,
-        ignored: &[String],
-    ) {
+    fn warn_degraded(&self, entry: &cmd::DegradedCommands, lines: &DegradedLines) {
         errln!(
             "warning: `aspect {}` runs without the AXL that failed to load:",
             entry.group
@@ -678,17 +670,25 @@ impl Unloadable {
                 headline(&failure.error, &failure.path)
             );
         }
-        if let Some(settings) = settings {
+        if let Some(settings) = &lines.settings {
             errln!(
                 "  Settings these files would have applied to it may be at their defaults: \
                  {settings}."
             );
         }
-        if !ignored.is_empty() {
+        if let Some(features) = &lines.features {
+            let (noun, verb) = if entry.features.len() == 1 {
+                ("feature", "runs")
+            } else {
+                ("features", "run")
+            };
+            errln!("  Only the {features} {noun} {verb}, so any hook another feature adds is off.");
+        }
+        if !lines.ignored.is_empty() {
             errln!(
                 "  This run ignores {}: the features they set do not run while those files \
                  do not load.",
-                ignored.join(", ")
+                lines.ignored.join(", ")
             );
         }
         errln!("  `ASPECT_DEBUG=1` prints each error in full.");
@@ -734,6 +734,48 @@ impl Unloadable {
         let failure = self.configs.remove(0);
         self.warn_blaming(None);
         Some(anyhow::Error::from(failure.error).context(ConfigError))
+    }
+}
+
+/// What a degraded run's warning says beyond the files that failed, which
+/// depends on what kind of file failed. A task file alone costs these tasks
+/// nothing, since the configs ran in full: no line.
+#[derive(Default)]
+struct DegradedLines {
+    /// The settings that may be at their defaults, when a config failed.
+    settings: Option<String>,
+    /// The features that still run, when a config failed, which may have
+    /// turned the others off, or a feature file did, whose hooks are gone:
+    /// every other feature is off.
+    features: Option<String>,
+    /// The flags of the features that are off which the command line gave,
+    /// as typed. Not the console's, whose flags the runtime reads before the
+    /// features run ([`args_read_before_features`]).
+    ignored: Vec<String>,
+}
+
+impl DegradedLines {
+    /// The lines for `entry`'s tasks, given what `unloadable` holds and, when
+    /// the command line parsed, its `matches`.
+    fn of(
+        unloadable: &Unloadable,
+        cmd: &Cmd<'_, '_>,
+        entry: &cmd::DegradedCommands,
+        matches: Option<&clap::ArgMatches>,
+    ) -> Self {
+        let features_off = unloadable.config_lost() || unloadable.feature_lost();
+        DegradedLines {
+            settings: unloadable
+                .config_lost()
+                .then(|| cmd.degraded_settings(entry)),
+            features: features_off.then(|| cmd.degraded_features(entry)),
+            ignored: match matches {
+                Some(matches) if features_off => cmd.typed_feature_flags(matches, |f| {
+                    !cmd.runs_degraded(entry, f) && !args_read_before_features(f)
+                }),
+                _ => vec![],
+            },
+        }
     }
 }
 

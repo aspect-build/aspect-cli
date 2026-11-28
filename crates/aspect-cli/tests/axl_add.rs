@@ -1,8 +1,8 @@
-//! `aspect axl add` refuses to name a dependency after a module the CLI
-//! provides (`root`, `aspect`), whether the name comes from the repository or
-//! from `--name`: `MODULE.aspect` refuses such a dependency, so writing one
-//! would fail every command. The refusal comes before anything is fetched, so
-//! these runs need no network.
+//! `aspect axl add` refuses a dependency name `MODULE.aspect` would refuse,
+//! whether it comes from the repository or from `--name`: one the CLI gives a
+//! module of its own (`root`, `aspect`), or one that is no module name
+//! (`1password_cli`). Writing it would fail every command. The refusal comes
+//! before anything is fetched, so these runs need no network.
 
 mod common;
 
@@ -10,11 +10,26 @@ use common::{aspect_cli, base_env};
 use std::process::Command;
 
 #[test]
-fn a_reserved_module_name_is_refused_before_anything_is_fetched() {
-    for args in [
-        &["gh:someone/aspect"][..],
-        &["gh:someone/thing", "--name=aspect"][..],
-        &["gh:someone/thing", "--name=root"][..],
+fn a_name_module_aspect_would_refuse_is_refused_before_anything_is_fetched() {
+    for (args, reason) in [
+        (&["gh:someone/aspect"][..], "provides itself"),
+        (
+            &["gh:someone/thing", "--name=aspect"][..],
+            "provides itself",
+        ),
+        (&["gh:someone/thing", "--name=root"][..], "provides itself"),
+        (
+            &["gh:someone/1password-cli"][..],
+            "begin with a lowercase letter",
+        ),
+        (
+            &["gh:someone/thing-"][..],
+            "end with a lowercase letter or digit",
+        ),
+        (
+            &["gh:someone/thing", "--name=My.Dep"][..],
+            "begin with a lowercase letter",
+        ),
     ] {
         let dir = tempfile::tempdir().expect("temp dir");
         std::fs::write(dir.path().join("MODULE.aspect"), "").unwrap();
@@ -31,9 +46,10 @@ fn a_reserved_module_name_is_refused_before_anything_is_fetched() {
         let stderr = String::from_utf8_lossy(&out.stderr);
         assert_eq!(out.status.code(), Some(1), "axl add {args:?}:\n{stderr}");
         assert!(
-            stderr.contains("is the name of a module the CLI provides itself")
+            stderr.contains("Cannot name the dependency")
+                && stderr.contains(reason)
                 && stderr.contains("--name=<name>"),
-            "axl add {args:?}:\n{stderr}"
+            "axl add {args:?}: expected {reason:?} in:\n{stderr}"
         );
         assert!(
             !stderr.contains("Querying GitHub"),

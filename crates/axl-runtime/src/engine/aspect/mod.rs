@@ -9,6 +9,7 @@ use starlark::starlark_simple_value;
 use starlark::values;
 use starlark::values::NoSerialize;
 use starlark::values::ProvidesStaticType;
+use starlark::values::none::NoneOr;
 use starlark::values::starlark_value;
 
 use starlark::{environment::GlobalsBuilder, values::starlark_value_as_type::StarlarkValueAsType};
@@ -51,16 +52,17 @@ pub(crate) fn aspect_methods(registry: &mut MethodsBuilder) {
         Ok(tips::Tips {})
     }
 
-    /// The module names the CLI provides itself, which `axl_local_dep` and
-    /// `axl_archive_dep` refuse for a dependency.
-    #[starlark(attribute)]
-    fn reserved_module_names<'v>(
+    /// Why `name` cannot name a dependency in `MODULE.aspect`, or `None`
+    /// when it can: the check `axl_local_dep` and `axl_archive_dep` make. A
+    /// name the CLI gives a module of its own (`root`, `aspect`) is refused,
+    /// and so is one that is not a module name: it must begin with a
+    /// lowercase letter, end with one or a digit, and hold only lowercase
+    /// letters, digits, `.`, `-` and `_`.
+    fn module_name_error<'v>(
         #[allow(unused)] this: values::Value<'v>,
-    ) -> anyhow::Result<Vec<String>> {
-        Ok(crate::module::AXL_RESERVED_MODULE_NAMES
-            .iter()
-            .map(|name| name.to_string())
-            .collect())
+        #[starlark(require = pos)] name: &str,
+    ) -> anyhow::Result<NoneOr<String>> {
+        Ok(NoneOr::from_option(crate::module::dep_name_error(name)))
     }
 }
 

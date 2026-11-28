@@ -78,6 +78,13 @@ fn task_command_path(group: &[String], kind: &str) -> String {
 /// CLI prefix of the builtin feature whose args select the terminal surface.
 const CONSOLE_FEATURE: &str = "console";
 
+/// Whether the runtime reads `feature`'s args itself, before phase 3, so its
+/// flags take effect whether or not its implementation runs: the console's,
+/// which [`MultiPhaseEval::resolve_console`] builds the surface from.
+pub fn args_read_before_features(feature: &dyn FeatureLike<'_>) -> bool {
+    feature.name() == CONSOLE_FEATURE
+}
+
 /// Pure core of [`task_label`], env-injected for testing.
 ///
 /// The task is identified by its command path (`<group…> <kind>`, space-joined
@@ -238,9 +245,8 @@ pub struct MultiPhaseEval<'v, 'l> {
     /// The run's `TaskHooks`, shared by ConfigContext, FeatureContext, and
     /// TaskContext as `ctx.hooks`; phase 4 runs what was registered into it.
     hooks_value: Value<'v>,
-    /// Whether the task runs although a config or feature file did not load,
-    /// set by [`Self::mark_degraded`] and read by the task as
-    /// `ctx.task.degraded`.
+    /// Whether the task runs although a config did not load, set by
+    /// [`Self::mark_degraded`] and read by the task as `ctx.task.degraded`.
     degraded: bool,
 }
 
@@ -259,10 +265,10 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
         }
     }
 
-    /// Run the task as one that goes ahead although a config or feature file
-    /// did not load: `ctx.task.degraded` is then `True`, so the task can hold
-    /// back from what a default could make it do that a setting of that file
-    /// was there to prevent.
+    /// Run the task as one that goes ahead although a config did not load:
+    /// `ctx.task.degraded` is then `True`, so the task can hold back from
+    /// what a default could make it do that a setting of that config was
+    /// there to prevent.
     pub fn mark_degraded(&mut self) {
         self.degraded = true;
     }

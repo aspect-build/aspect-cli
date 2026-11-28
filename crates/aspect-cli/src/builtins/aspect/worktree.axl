@@ -1301,8 +1301,8 @@ def _held_by_another_session(ctx: TaskContext, pool: dict, registry: dict, slot_
         unknown = (", which is not running; its slot is kept for it for another " + phrase_ms(kept_ms) +
                    ", counted from the slot's last activity (`--worktree-pool:abandoned-grace-hours`), in case it comes back")
     elif kept_unknown:
-        unknown = (", which is not running; its slot is kept for it, since how long that lasts " +
-                   "(`--worktree-pool:abandoned-grace-hours`) is set by a config that did not load")
+        unknown = (", which is not running; its slot is kept for it, since a config that did not load " +
+                   "may set how long that lasts (`--worktree-pool:abandoned-grace-hours`)")
     sibling = _sibling(me, agent)
     forced = ("--force covers uncommitted work only, not another session's lease. " if ctx.args.force == _FORCE_DIRTY and not sibling else "")
     path = slot_path(pool, slot_id)
@@ -1742,8 +1742,8 @@ def _held_by(ctx: TaskContext, pool: dict, registry: dict, slot_id: str, name: s
         work = _work(ctx, where, root)
         left = _grace_ms(ctx) - (time.now_ms() - lease_last_active_ms(ctx.std, pool, slot_id, registry["slots"][slot_id], root))
         if not work and not _grace_known(ctx):
-            kept = ("\n\nIts slot is kept for it, since how long that lasts " +
-                    "(`--worktree-pool:abandoned-grace-hours`) is set by a config that did not load.")
+            kept = ("\n\nIts slot is kept for it, since a config that did not load may set how long " +
+                    "that lasts (`--worktree-pool:abandoned-grace-hours`).")
         elif not work and left > 0:
             kept = ("\n\nIts slot is kept for it for another " + phrase_ms(left) + ", counted from the slot's " +
                     "last activity (`--worktree-pool:abandoned-grace-hours`), in case it comes back.")

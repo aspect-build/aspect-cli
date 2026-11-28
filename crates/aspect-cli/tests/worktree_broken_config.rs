@@ -23,10 +23,25 @@ use std::time::{Duration, SystemTime};
 /// The head of the degraded run's warning.
 const WARNING: &str = "warning: `aspect worktree` runs without the AXL that failed to load:";
 
-/// The warning's line for the settings a config or feature file would apply.
+/// The warning's line for the settings a config would apply.
 const SETTINGS: &str = "Settings these files would have applied to it may be at their defaults: \
                         the `WorktreePool` options (`max_slots`, `abandoned_grace_hours`), the \
                         `Worktrees` `score_slot` hooks";
+
+/// The warning's line for the features that are off.
+const FEATURES: &str =
+    "Only the `WorktreePool` feature runs, so any hook another feature adds is off.";
+
+/// What kind of file failed, which decides the warning's lines past the files.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Lost {
+    /// Only task files: no line.
+    Tasks,
+    /// A feature file, and no config: the features line.
+    Feature,
+    /// A config: the settings line and the features line.
+    Config,
+}
 
 /// A `config.axl` for each way of failing, with what the warning's line for
 /// it must say.
@@ -120,9 +135,9 @@ fn stdout(out: &Output) -> String {
 }
 
 /// `out` carries the degraded run's single warning, with a line naming `file`
-/// and `headline` and, when `settings`, the line for the settings. Nothing of
-/// it reached stdout.
-fn assert_warned(out: &Output, file: &str, headline: &str, settings: bool) {
+/// and `headline` and the lines `lost` calls for. Nothing of it reached
+/// stdout.
+fn assert_warned(out: &Output, file: &str, headline: &str, lost: Lost) {
     let stderr = stderr(out);
     assert_eq!(
         stderr.matches("warning:").count(),
@@ -141,8 +156,13 @@ fn assert_warned(out: &Output, file: &str, headline: &str, settings: bool) {
     );
     assert_eq!(
         stderr.contains(SETTINGS),
-        settings,
-        "the settings line, expected {settings}, in:\n{stderr}"
+        lost == Lost::Config,
+        "the settings line, for {lost:?}, in:\n{stderr}"
+    );
+    assert_eq!(
+        stderr.contains(FEATURES),
+        lost != Lost::Tasks,
+        "the features line, for {lost:?}, in:\n{stderr}"
     );
     assert!(
         stderr.contains("`ASPECT_DEBUG=1` prints each error in full."),
@@ -163,7 +183,7 @@ fn assert_degraded(out: &Output, file: &str, headline: &str) {
         "--- stderr ---\n{}",
         stderr(out)
     );
-    assert_warned(out, file, headline, true);
+    assert_warned(out, file, headline, Lost::Config);
 }
 
 /// `out` succeeded and said nothing about a workspace that did not load.
@@ -230,14 +250,14 @@ fn the_degraded_worktree_commands_run_on_a_config_that_does_not_load() {
 }
 
 /// A task file, a feature file and the user-global config are the workspace's
-/// AXL as much as the repository's `config.axl` is. A task file sets nothing,
-/// so its failure alone leaves out the settings line.
+/// AXL as much as the repository's `config.axl` is. A task file sets nothing
+/// and a feature file only adds hooks, so neither brings the settings line.
 #[test]
 fn a_broken_task_feature_or_user_config_does_not_block_it_either() {
-    for (path, file, settings) in [
-        (".aspect/broken.axl", ".aspect/broken.axl", false),
-        ("~/.aspect/config.axl", ".aspect/config.axl", true),
-        ("tools/feature.axl", "tools/feature.axl", true),
+    for (path, file, lost) in [
+        (".aspect/broken.axl", ".aspect/broken.axl", Lost::Tasks),
+        ("~/.aspect/config.axl", ".aspect/config.axl", Lost::Config),
+        ("tools/feature.axl", "tools/feature.axl", Lost::Feature),
     ] {
         let ws = Workspace::new(&[(path, UNPARSABLE)]);
         if path.starts_with("tools/") {
@@ -248,7 +268,7 @@ fn a_broken_task_feature_or_user_config_does_not_block_it_either() {
         }
         let out = ws.aspect(&["worktree", "inspect"]);
         assert_eq!(out.status.code(), Some(0), "{path}:\n{}", stderr(&out));
-        assert_warned(&out, file, "Parse error", settings);
+        assert_warned(&out, file, "Parse error", lost);
     }
 }
 
@@ -337,7 +357,7 @@ fn a_usage_error_on_a_degraded_command_is_reported_as_one() {
         let out = ws.aspect(args);
         let stderr = stderr(&out);
         assert_eq!(out.status.code(), Some(2), "aspect {args:?}:\n{stderr}");
-        assert_warned(&out, ".aspect/config.axl", headline, true);
+        assert_warned(&out, ".aspect/config.axl", headline, Lost::Config);
         assert!(
             stderr
                 .lines()
@@ -390,7 +410,7 @@ fn a_broken_task_file_alone_leaves_settings_and_features_alone() {
     ws.write(".aspect/broken.axl", UNPARSABLE);
     let added = ws.aspect(&["worktree", "add", "other", "--create", "--output=json"]);
     assert_eq!(added.status.code(), Some(0), "{}", stderr(&added));
-    assert_warned(&added, ".aspect/broken.axl", "Parse error", false);
+    assert_warned(&added, ".aspect/broken.axl", "Parse error", Lost::Tasks);
     assert!(
         stderr(&added).contains("scorer ran"),
         "the feature did not run:\n{}",
@@ -404,6 +424,59 @@ fn a_broken_task_file_alone_leaves_settings_and_features_alone() {
         "{}",
         stderr(&released)
     );
+    assert!(!slot_dir.exists(), "the stopped session's slot was kept");
+}
+
+/// A feature file alone leaves every config loaded, so the grace period a
+/// config sets is known: its 2 hours let `release` end a stopped session's
+/// lease idle for 3, which the 24-hour default would keep. The warning lists
+/// no setting and says the other features are off, and a healthy repository
+/// feature's `score_slot` hook does not run.
+#[test]
+fn a_broken_feature_file_alone_keeps_the_configured_grace() {
+    let config = "load(\"@aspect//feature/worktree_pool.axl\", \"WorktreePool\")\n\n\
+                  def config(ctx):\n    ctx.features[WorktreePool].args.abandoned_grace_hours = 2\n";
+    let scorer = "load(\"@aspect//traits.axl\", \"Worktrees\")\n\n\
+                  def _score(ctx, slot, want):\n    print(\"scorer ran\")\n    return 1\n\n\
+                  def _impl(ctx: FeatureContext):\n    ctx.traits[Worktrees].score_slot.append(_score)\n\n\
+                  Scorer = feature(implementation = _impl)\n";
+    let ws = Workspace::new(&[
+        (
+            "MODULE.aspect",
+            "use_feature(\"tools/scorer.axl\", \"Scorer\")\n",
+        ),
+        ("tools/scorer.axl", scorer),
+        (".aspect/config.axl", config),
+    ]);
+    let taken = ws.aspect(&["worktree", "add", "feat", "--create", "--output=json"]);
+    assert_clean(&taken);
+    let slot = json(&taken)["slot"].as_str().expect("a slot").to_owned();
+    let slot_dir = PathBuf::from(json(&taken)["path"].as_str().expect("a path"));
+    let spare = ws.aspect(&["worktree", "add", "spare", "--create", "--output=path"]);
+    assert_clean(&spare);
+    assert_clean(&ws.aspect(&["worktree", "release", stdout(&spare).trim_end()]));
+    stop_and_age(&ws, &slot_dir, &slot, Duration::from_secs(3 * 3600));
+
+    ws.write("tools/broken.axl", UNPARSABLE);
+    ws.write(
+        "MODULE.aspect",
+        "use_feature(\"tools/scorer.axl\", \"Scorer\")\n\
+         use_feature(\"tools/broken.axl\", \"Broken\")\n",
+    );
+    let added = ws.aspect(&["worktree", "add", "other", "--create", "--output=json"]);
+    assert_eq!(added.status.code(), Some(0), "{}", stderr(&added));
+    assert_warned(&added, "tools/broken.axl", "Parse error", Lost::Feature);
+    assert!(!stderr(&added).contains("scorer ran"), "{}", stderr(&added));
+
+    let released = ws.aspect(&["worktree", "release", "feat", "--output=json"]);
+    assert_eq!(
+        released.status.code(),
+        Some(0),
+        "{}{}",
+        stderr(&released),
+        stdout(&released)
+    );
+    assert_warned(&released, "tools/broken.axl", "Parse error", Lost::Feature);
     assert!(!slot_dir.exists(), "the stopped session's slot was kept");
 }
 
@@ -436,7 +509,22 @@ fn a_degraded_run_runs_no_feature_its_tasks_do_not_read() {
     );
 
     // A flag for a feature that does not run is named as ignored, in the one
-    // warning.
+    // warning. One turning a feature off is not: the run does what it asks.
+    // Nor is the console's, which the runtime reads before the features run.
+    for flag in [
+        "--telemetry=false",
+        "--telemetry:enabled=false",
+        "--console:template-preset=compact",
+        "--console:verbose=debug",
+    ] {
+        let out = ws.run(&["worktree", "inspect", flag], &exporter);
+        assert_degraded(&out, ".aspect/config.axl", "FromTheFuture");
+        assert!(
+            !stderr(&out).contains("This run ignores"),
+            "{flag} is not ignored:\n{}",
+            stderr(&out)
+        );
+    }
     let out = ws.run(
         &["worktree", "inspect", "--telemetry:enabled=true"],
         &exporter,
@@ -486,7 +574,8 @@ fn a_degraded_run_takes_no_stopped_sessions_slot_back() {
     for (slot, dir) in &stopped {
         stop_and_age(&ws, dir, slot, Duration::from_secs(30 * 3600));
     }
-    let degraded = |out: &Output| assert_warned(out, ".aspect/config.axl", "FromTheFuture", true);
+    let degraded =
+        |out: &Output| assert_warned(out, ".aspect/config.axl", "FromTheFuture", Lost::Config);
     ws.write(".aspect/config.axl", broken);
 
     let added = ws.aspect(&["worktree", "add", "other", "--create", "--output=json"]);

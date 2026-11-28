@@ -12,8 +12,8 @@
 //!   `degraded_usage()` tell `main` whether the selected task is one of the
 //!   built-ins that run against a workspace that did not fully load
 //!   ([`DEGRADED_COMMANDS`]), `runs_degraded()` which features still run for
-//!   it, and `degraded_settings()` and `typed_feature_flags()` what its
-//!   warning lists.
+//!   it, and `degraded_settings()`, `degraded_features()` and
+//!   `typed_feature_flags()` what its warning lists.
 //!   `dispatch()` turns parsed [`ArgMatches`] into a [`Dispatch`].
 //!   `print_feature_help()` renders `aspect feature [<name>]`, the discovery
 //!   surface for feature flags (which are hidden from each task's `--help`)
@@ -80,8 +80,9 @@ pub struct DegradedCommands {
     /// The group's tasks that run, by kind.
     pub tasks: &'static [&'static str],
     /// The built-in features that still run for them, by exported name: the
-    /// ones whose settings the tasks read. Every other feature stays off,
-    /// since the config that did not load may have turned it off.
+    /// ones whose settings the tasks read. When a config failed, which may
+    /// have turned the others off, or a feature file did, every other feature
+    /// stays off.
     pub features: &'static [&'static str],
     /// The settings a config applies to these tasks besides those features'
     /// options, as the degraded run's warning names them.
@@ -96,9 +97,9 @@ pub struct DegradedCommands {
 /// `aspect worktree` hands out the clean checkout to fix the config in. Most
 /// of what config sets for it picks which slot is reused and how many the pool
 /// keeps. The one setting that protects anything, how long a stopped
-/// session's slot is kept for it, is not trusted when a config or feature file
-/// failed: the tasks read `ctx.task.degraded` and keep every such slot, unless
-/// the command line gave that setting. `prune` is left out, since a
+/// session's slot is kept for it, is not trusted when a config failed: the
+/// tasks read `ctx.task.degraded` and keep every such slot, unless the command
+/// line gave that setting. `prune` is left out, since a
 /// config may raise its `max_idle_days` and the default would delete slots the
 /// config keeps. Only tasks the built-in module defines qualify: a
 /// repository's own task in one of these groups may depend on what failed.
@@ -459,7 +460,8 @@ impl<'a, 'v> Cmd<'a, 'v> {
 
     /// The flags of the features `pick` takes that the command line `matches`
     /// was parsed from typed, spelled as typed: `--telemetry:enabled`, or the
-    /// bare `--telemetry`.
+    /// bare `--telemetry`. A flag turning a feature off is left out, since a
+    /// run without that feature already does what it asks.
     pub fn typed_feature_flags(
         &self,
         matches: &ArgMatches,
@@ -472,7 +474,7 @@ impl<'a, 'v> Cmd<'a, 'v> {
         for feature in self.features.iter().filter(|feature| pick(**feature)) {
             let prefix = feature.name();
             let scope = Scope::Feature(&prefix);
-            if typed_shorthand(&prefix, leaf).is_some() {
+            if typed_shorthand(&prefix, leaf) == Some(true) {
                 flags.push(format!("--{prefix}"));
             }
             for (name, arg) in feature.args().iter() {
@@ -480,12 +482,24 @@ impl<'a, 'v> Cmd<'a, 'v> {
                 if arg.is_cli_exposed()
                     && leaf.try_contains_id(&key).is_ok()
                     && leaf.value_source(&key) == Some(ValueSource::CommandLine)
+                    && !(name == "enabled" && leaf.get_one::<bool>(&key) == Some(&false))
                 {
                     flags.push(format!("--{}", long_flag(scope, name, arg)));
                 }
             }
         }
         flags
+    }
+
+    /// The features that still run for `entry`'s tasks when the others are
+    /// off, as the degraded run's warning names them: `` `WorktreePool` ``.
+    pub fn degraded_features(&self, entry: &DegradedCommands) -> String {
+        entry
+            .features
+            .iter()
+            .map(|name| format!("`{name}`"))
+            .collect::<Vec<_>>()
+            .join(", ")
     }
 
     /// The [`DEGRADED_COMMANDS`] entry task `index` is one of, if any.
