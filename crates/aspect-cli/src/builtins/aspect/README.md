@@ -325,12 +325,19 @@ and under 40x12, saying why on stderr.
 
 What it shows:
 
-- **Header:** the task, how long it has run, and Bazel's status while a build
-  runs (`3,830 of 8,563+ actions`, `+` while Bazel analyses).
+- **Header:** the task and how long it has run, then at its right end, while
+  a build runs, Bazel's own status (`16 actions, 15 running`), or, where the
+  bar isn't drawn (panes folded, or a short screen), how far the build is
+  (`3,830 of 8,563+ actions done`, `+` while Bazel analyses); between builds,
+  the task's phase; once the task has ended, only what its ✔/✗ can't say
+  (`interrupted`, `ended without a result`).
 - **Build panes**, while a build runs (`p` folds and opens them; each ended
-  build folds to a row, `<`/`>` picks one):
-  - a bar of the build's actions, one glyph per kind, and at its end
-    `8,590 actions · 3,148 cache hits (37%)`, from Bazel's own count;
+  build folds to a row; in Metrics or Invocation, `<`/`>` picks the build the
+  bar, Results and those tabs show):
+  - a bar of the build's actions, one glyph per kind, its label
+    `3,830 of 8,563+ actions` while it runs and
+    `8,590 actions · 3,148 cache hits (37%)` at its end, from Bazel's own
+    count;
   - the actions running now, yellow past a minute and red past five, then
     the slowest once the build has ended;
   - Results: targets, tests (`7 passed (5 cached)`, running and pending),
