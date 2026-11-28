@@ -806,11 +806,15 @@ _ONLY_TESTS_FAILED = ["SUCCESS", "TESTS_FAILED", "NO_TESTS_FOUND"]
 def remainder_words(state: dict) -> str:
     """What the `skipped` part says (`_UP_TO_DATE` or `_SKIPPED`): once the
     build has finished, by its outcome, `up to date` where it succeeded or
-    failed only its tests (`_ONLY_TESTS_FAILED`), else `skipped`; while it
-    runs, or where it ended without a result, by what failed so far,
-    `skipped` once a target or an action other than a test's own
-    (`TestRunner`) has, else `up to date`. Once a failure is seen it stays
-    seen, so the words change at most once while the build runs."""
+    failed only its tests (`_ONLY_TESTS_FAILED`), else `skipped`; without a
+    `BuildFinished`, by what failed so far, `skipped` once a target or an
+    action other than a test's own (`TestRunner`) has, else `up to date`.
+
+    The part has a count only in a split from `BuildMetrics`, once the build
+    has ended (`action_split`), so the words reach the screen only then:
+    from the outcome, or from the failures for a build whose `BuildMetrics`
+    came without a `BuildFinished`. While the build runs the failures'
+    words are worked out all the same, but no part draws them."""
     finished = (state.get("inv") or {}).get("build_finished")
     if finished != None and not state.get("building"):
         name = str(bes_get(bes_get(finished, "exit_code"), "name", "") or "")
