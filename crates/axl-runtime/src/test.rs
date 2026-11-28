@@ -543,11 +543,17 @@ pub fn install_basil() {
 /// the only thing observing it, and pulling it out from under that worker turns
 /// one timeout into a run of unrelated failures. See
 /// `build::tests::DaemonStandIn::leak`.
+///
+/// Before the clock starts, the fake Bazel most callers run is found (under
+/// Cargo, built, once per test binary): a first `cargo build -p basil` can
+/// take minutes on a loaded machine, and is no part of what a hang bound
+/// measures.
 pub fn with_timeout<F, R>(timeout: Duration, f: F) -> Option<R>
 where
     F: FnOnce() -> R + Send + 'static,
     R: Send + 'static,
 {
+    basil_bin();
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let _ = tx.send(f());
