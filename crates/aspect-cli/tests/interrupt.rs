@@ -12,15 +12,21 @@
 //! tool a task runs, has no exit code; the built-in tasks end with the code
 //! a shell reports for it, 128 + the signal, and never retry a Bazel client
 //! that way. (Ctrl-C itself the Bazel client handles: it exits 8.)
+//!
+//! The task history records a build Ctrl+C stops as interrupted, and one
+//! whose Bazel server is lost mid-build, its event stream ending without a
+//! BuildFinished, as a disconnect.
 
 #![cfg(unix)]
 
 mod common;
 
 use std::io::{BufRead, BufReader, Read};
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
+use axl_runtime::engine::task_record;
 use common::{aspect_cli, base_env, basil_bin};
 
 /// A fixture task running in a scratch workspace.
@@ -675,4 +681,108 @@ fn a_tool_a_signal_ends_ends_the_task_with_its_shell_code() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(output.status.code(), Some(128 + 9), "{stderr}");
     assert!(!stderr.contains("Traceback"), "{stderr}");
+}
+
+/// `aspect build //...` in `root` against basil's `scenario`, with a task
+/// history of its own.
+fn build_in(root: &Path, scenario: &str) -> Command {
+    std::fs::write(root.join("MODULE.bazel"), "").expect("MODULE.bazel");
+    std::fs::write(root.join("MODULE.aspect"), "").expect("MODULE.aspect");
+    std::fs::create_dir(root.join(".aspect")).expect(".aspect");
+    std::fs::write(
+        root.join(".aspect").join("config.axl"),
+        format!(
+            r#"load("@aspect//traits.axl", "BazelTrait")
+
+def config(ctx: ConfigContext):
+    ctx.traits[BazelTrait].extra_flags.append("--scenario={scenario}")
+"#
+        ),
+    )
+    .expect("config.axl");
+    let mut cmd = Command::new(aspect_cli());
+    cmd.args(["build", "//..."])
+        .current_dir(root)
+        .env_clear()
+        .envs(base_env())
+        .env("BAZEL_REAL", basil_bin())
+        .env("ASPECT_HISTORY_DIR", root.join("history"))
+        .env("ASPECT_CREDENTIALS_FILE", root.join("credentials.json"))
+        .env("HOME", root.join("home"))
+        .env("DO_NOT_TRACK", "1")
+        .stdin(Stdio::null());
+    cmd
+}
+
+/// The record of the one run the history in `root` holds.
+fn the_record(root: &Path) -> task_record::TaskRecord {
+    let runs: Vec<PathBuf> = std::fs::read_dir(root.join("history"))
+        .expect("the history")
+        .map(|e| e.expect("entry").path())
+        .filter(|p| !p.file_name().unwrap().to_string_lossy().starts_with('.'))
+        .collect();
+    assert_eq!(runs.len(), 1, "one run: {runs:?}");
+    task_record::read(&runs[0].join(task_record::FILE_NAME)).expect("its record")
+}
+
+/// Ctrl+C mid-build: Bazel ends its stream with BuildFinished(INTERRUPTED)
+/// and exits 8, and the history records the run as cancelled and
+/// interrupted, not as a disconnect.
+#[test]
+fn a_build_ctrl_c_stops_is_recorded_as_interrupted() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let mut child = build_in(dir.path(), "interrupted")
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn aspect-cli");
+    let mut stderr = BufReader::new(child.stderr.take().expect("piped stderr"));
+    let mut seen = String::new();
+    while !seen.contains("basil: waiting for interrupt") {
+        let mut line = String::new();
+        if stderr.read_line(&mut line).expect("reading stderr") == 0 {
+            panic!("aspect ended before basil waited:\n{seen}");
+        }
+        seen.push_str(&line);
+    }
+    // SAFETY: signalling a child this test spawned and has not reaped.
+    assert_eq!(
+        unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGINT) },
+        0
+    );
+    stderr.read_to_string(&mut seen).expect("draining stderr");
+    let status = child.wait().expect("waiting for aspect-cli");
+    assert_eq!(status.code(), Some(8), "{seen}");
+    let record = the_record(dir.path());
+    assert_eq!(
+        (
+            record.exit_code,
+            record.cancelled,
+            record.conclusion.as_str()
+        ),
+        (Some(8), true, "Interrupted"),
+        "{seen}"
+    );
+}
+
+/// Bazel's server lost mid-build: the stream ends without a BuildFinished,
+/// and the history records the run as a disconnect.
+#[test]
+fn a_build_whose_server_is_lost_is_recorded_as_disconnected() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let output = build_in(dir.path(), "server_lost")
+        .output()
+        .expect("running aspect build");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(37), "{stderr}");
+    let record = the_record(dir.path());
+    assert_eq!(
+        (
+            record.exit_code,
+            record.cancelled,
+            record.conclusion.as_str()
+        ),
+        (Some(37), false, "Invocation disconnected"),
+        "{stderr}"
+    );
 }

@@ -1825,6 +1825,47 @@ def _test_only_the_interrupt_exit_code_aborts_the_build(ctx):
     process_event(data, struct(kind = "build_finished", id = struct(), payload = struct()), None)
     _eq("no exit_code message is not an abort", data["bazel"]["aborted"], False)
 
+def _started_event():
+    """A `build_started` event: the build's stream has begun."""
+    return struct(
+        kind = "build_started",
+        id = struct(),
+        payload = struct(uuid = "u1", command = "build", start_time_millis = 1700000000000),
+    )
+
+def _test_an_interrupted_build_concludes_interrupted(ctx):
+    """The bookend, the line the task history records, names an interrupt:
+    Bazel's BuildFinished(INTERRUPTED), or the task's own cancellation of a
+    build that failed before its stream reached a BuildFinished. The title
+    keeps the Aspect Web UI's label."""
+    data = _data_after([_started_event(), _finished_event(exit_codes.INTERRUPTED)])
+    _eq("Bazel exited INTERRUPTED", conclusion("aborted", data), "Interrupted")
+    _eq("and the task was cancelled", conclusion("aborted", data, cancelled = True), "Interrupted")
+    _eq("the title keeps the Web UI's label", compute_invocation_state(data, "aborted"), "Invocation disconnected")
+
+    cut = _data_after([_started_event()])
+    _eq("cancelled before the BuildFinished", conclusion("failed", cut, cancelled = True), "Interrupted")
+    _eq("cancelled before any stream", conclusion("failed", init_data(), cancelled = True), "Interrupted")
+
+    # A build that finished reads as it finished, cancelled or not.
+    failed = _data_after([_started_event(), _finished_event(exit_codes.BUILD_FAILURE)])
+    _eq("a finished failure", conclusion("failed", failed, cancelled = True), "Failed to build")
+    _eq("a cancelled success", conclusion("passed", init_data(), cancelled = True), "")
+
+def _test_a_stream_without_build_finished_concludes_disconnected(ctx):
+    """A failed build whose stream started and ended without a BuildFinished,
+    the task not cancelled: Bazel's server went away mid-build. A build with
+    no stream at all, or one that finished, is not a disconnect."""
+    data = _data_after([_started_event()])
+    _eq("the stream started", data["bazel"]["stream"], "started")
+    _eq("a disconnect", conclusion("failed", data), "Invocation disconnected")
+    _eq("no stream", conclusion("failed", init_data()), "Failed to build")
+    _eq("a success", conclusion("passed", data), "")
+
+    finished = _data_after([_started_event(), _finished_event(exit_codes.BUILD_FAILURE)])
+    _eq("the stream finished", finished["bazel"]["stream"], "finished")
+    _eq("a finished failure", conclusion("failed", finished), "Failed to build")
+
 def _test_abort_reason_never_decides_the_verdict(ctx):
     """No `Aborted.AbortReason` sets the build-level flag by itself. Bazel
     reports skipped targets, `--nobuild`, and the per-label root cause of an
@@ -2463,6 +2504,8 @@ _UNIT_TESTS = [
     _test_nokeep_going_interrupt_aborts_despite_an_incomplete_reason,
     _test_ordinary_nokeep_going_failure_is_not_an_abort,
     _test_only_the_interrupt_exit_code_aborts_the_build,
+    _test_an_interrupted_build_concludes_interrupted,
+    _test_a_stream_without_build_finished_concludes_disconnected,
     _test_abort_reason_never_decides_the_verdict,
     _test_nobuild_abort_reason_leaves_the_build_green,
     _test_skipped_target_counts_as_skipped_and_not_as_an_abort,
