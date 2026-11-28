@@ -96,7 +96,7 @@ def _test_double_star(_ctx):
         ("**", "a/b/c", True),
         ("**/**", "a", True),
         ("**/**/a", "a", True),
-        # Several: every `**` but the last tries each split.
+        # Several: the head backtracks to its last `**`.
         ("**/x/**/y", "q/x/r/s/y", True),
         ("**/x/**/y", "x/y", True),
         ("**/x/**/y", "q/y", False),

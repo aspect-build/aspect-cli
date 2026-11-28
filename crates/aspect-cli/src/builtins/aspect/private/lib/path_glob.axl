@@ -103,8 +103,8 @@ def _match_segments(pat_segs: list[str], name_segs: list[str]) -> bool:
     least one segment, so it becomes `*` (any one segment) and then `**`.
     The segments after the last `**` take one name segment each, so they
     must line up with the path's last segments; only the head, up to and
-    including that `**`, backtracks. Consecutive `**` collapse into one,
-    since a run of stars backtracks from its last.
+    including that `**`, backtracks. Consecutive `**` need no special
+    case: a run of stars backtracks from its last.
     """
     if pat_segs[-1] == "**":
         pat_segs = pat_segs[:-1] + ["*", "**"]
