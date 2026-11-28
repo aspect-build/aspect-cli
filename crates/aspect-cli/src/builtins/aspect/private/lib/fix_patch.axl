@@ -16,8 +16,9 @@ where:
 - it isn't there, isn't a file, or is larger than `PATCH_CAP`;
 - a hunk's range isn't numbers or its body ends short;
 - a line outside its file sections is part of no plain unified diff: a lone
-  `--- ` or `+++ `, a context diff's `*** `, an `Index:`, or a hunk with no
-  header of its own (a change this would drop, not apply);
+  `--- ` or `+++ `, a context diff's `*** `, an `Index:`, a hunk with no
+  header of its own, or a hunk line past its hunk's count (a change this
+  would drop, not apply);
 - it has a binary patch, a git mode, rename or copy line, or a file mode
   other than a regular file's (a change the copy-back doesn't make);
 - a header's name is quoted, empty, or not UTF-8;
@@ -87,7 +88,8 @@ def _is_epoch(stamp: str) -> bool:
 def _header_name(raw: str) -> tuple:
     """`(path, why)` for the text after a `--- ` or `+++ `: the path with
     its first component dropped, as `patch -p1` would open it (None for
-    `/dev/null` or an epoch timestamp), and why it can't be known, or None.
+    `/dev/null` or an epoch timestamp), and why it can't be known, or None:
+    a header naming nothing past its prefix (`b/`) has no name.
     The name ends at a tab, else runs to the end of the line less trailing
     spaces, as rules_lint's `--label` headers write it, spaces inside and
     all. A git-quoted name is
@@ -108,7 +110,10 @@ def _header_name(raw: str) -> tuple:
         return None, "a name that isn't UTF-8, which the copy-back can't name"
     if name == "/dev/null":
         return None, None
-    return (name.partition("/")[2] if "/" in name else name), None
+    path = name.partition("/")[2] if "/" in name else name
+    if not path:
+        return None, "a header with no name"
+    return path, None
 
 # Git extended header lines asking for a change the copy-back doesn't make:
 # a mode change, a rename or copy.
@@ -124,6 +129,8 @@ def _stray_why(line: str) -> str | None:
         return "an `Index:` line, which this doesn't read"
     if line.startswith("@@ "):
         return "a hunk with no header of its own"
+    if line[:1] in ("+", "-", " "):
+        return "a hunk line past its hunk's line count"
     if line.startswith("GIT binary patch") or line.startswith("Binary files "):
         return "a binary patch, which patch can't apply"
     for header in _GIT_HEADERS:

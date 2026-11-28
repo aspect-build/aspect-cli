@@ -112,10 +112,11 @@ def parse_patch_hunks(content):
     Returns `{file, start_line, end_line}` per hunk with new-side lines,
     from `patch.axl`'s `parse`: `file` is the post-fix side without its
     `b/` prefix, lines 1-based inclusive. A hunk adding no lines is left
-    out. A malformed hunk yields the hunks before it and none after (an
-    empty list when the first one is); callers treat an empty list as
-    "leave the patch alone". A hunk's span is what its body holds, so a
-    malformed count can't make one span more lines than the patch has.
+    out. A malformed hunk drops every hunk of its own file and of the files
+    after it, so only the files before it keep theirs (an empty list when it
+    is in the first); callers treat an empty list as "leave the patch
+    alone". A hunk's span is what its body holds, so a malformed count
+    can't make one span more lines than the patch has.
     """
     hunks = []
     for f in patch_parse(content):

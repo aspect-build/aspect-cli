@@ -63,6 +63,9 @@ def _test_scan():
     _eq("a hunk range that isn't numbers", _sides("--- a/x\n+++ b/x\n@@ -1,y +1 @@\n")[1], "a hunk's line range isn't numbers")
     _eq("a name that isn't UTF-8", _sides("--- a/caf\ufffd\n+++ b/caf\ufffd\n@@ -1 +1 @@\n-a\n+b\n")[1], "a name that isn't UTF-8, which the copy-back can't name")
     _eq("a header with no name", _sides("--- a/x\n+++ \t\n@@ -1 +1 @@\n-a\n+b\n")[1], "a header with no name")
+    _eq("a header naming its prefix alone", _sides("--- a/\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n")[1], "a header with no name")
+    _eq("a prefix and padding", _sides("--- /dev/null\n+++ b/   \n@@ -0,0 +1 @@\n+x\n")[1], "a header with no name")
+    _eq("a hunk line past its count", _sides("--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n+c\n")[1], "a hunk line past its hunk's line count")
     _eq("a name with spaces and no tab runs to the end of the line", _sides("--- a/src/my file.txt\n+++ b/src/my file.txt\n@@ -1 +1 @@\n-a\n+b\n"), ([("src/my file.txt", "src/my file.txt")], None))
 
     # A name after a leading tab is read; the other header shapes BSD patch
@@ -235,6 +238,15 @@ printf 'caf\\352\\n' > tree/src/l1.txt
     fs.write(root + "/padded-missing.patch", "--- a/src/gone \n+++ b/src/gone \n@@ -1 +1 @@\n-a\n+b\n")
     apply_fix_patch(ctx, root + "/padded-missing.patch", cwd = tree, say = _noted(said))
     _eq("a name in a message is quoted", [l.rpartition(" changes ")[2].partition(",")[0] for l in said], ["'src/gone'"])
+
+    # A header naming only its prefix is refused before patch runs, which
+    # would be handed `./` (GNU patch refuses it, BSD exits with trouble).
+    ran = root + "/ran-prefix"
+    shim = _stand_in(fs, root, "prefix-patch", "touch '%s'\necho 'File ./ is not a regular file -- refusing to patch'\nexit 1\n" % ran)
+    said = []
+    fs.write(root + "/prefix.patch", "--- /dev/null\n+++ b/\n@@ -0,0 +1 @@\n+x\n")
+    _eq("a creation named by its prefix", apply_fix_patch(ctx, root + "/prefix.patch", cwd = tree, program = shim, say = _noted(said)), None)
+    _eq("is refused, patch not run", (said, fs.exists(ran)), (["a header with no name"], False))
 
     # An I/O failure nothing below handles (a path longer than any host
     # takes) refuses the patch, and the run goes on.
