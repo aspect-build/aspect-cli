@@ -121,7 +121,6 @@ def _match_segments(pat_segs: list[str], name_segs: list[str]) -> bool:
 
 def match_path(pattern: str, path: str) -> bool:
     """Match a single path against a glob pattern. Empty pattern → no match."""
-
     if pattern.endswith("/"):
         pattern = pattern[:-1]
     if not pattern:
