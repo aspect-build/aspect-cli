@@ -1007,7 +1007,7 @@ def _impl(ctx: TaskContext) -> int:
     helped = _screen(ctx, lines, scroll = 12)
     on_key(helped, "?", 10)
     drawn = render(helped, 100, 30)
-    if "Keys · ↑↓ scroll · any other key closes" not in drawn or "these keys" not in drawn:
+    if "Keys · ↑↓ PgUp PgDn scroll · any other key closes" not in drawn or "these keys" not in drawn:
         fail("render: ? should show the keys")
     on_key(helped, "wheel-up", 10)
     _eq("the wheel keeps the keys shown", (helped["help"], helped["scroll"]), (True, 12))
@@ -1020,6 +1020,20 @@ def _impl(ctx: TaskContext) -> int:
         seen = seen or "cancel the build" in render(helped, 80, 16)
     if not seen or "every run from a cache" not in render(helped, 80, 16):
         fail("render: ↓ should reach the last key, then the end of the glyphs' key")
+
+    # PgDn and PgUp scroll it a page, past what `… N more: ↓` counts, and
+    # back to the top; neither closes it.
+    paged = _screen(ctx, lines)
+    on_key(paged, "?", 10)
+    first = _visible(render(paged, 80, 16))
+    on_key(paged, "pagedown", 10)
+    _eq("PgDn keeps the keys shown, a page on", (paged["help"], paged["help_top"]), (True, 9))
+    if _visible(render(paged, 80, 16)) == first:
+        fail("render: PgDn should show the keys' next page")
+    on_key(paged, "pageup", 10)
+    on_key(paged, "pageup", 10)
+    _eq("PgUp back to the top, still shown", (paged["help"], paged["help_top"]), (True, 0))
+    _eq("as it was", _visible(render(paged, 80, 16)), first)
     on_key(helped, "q", 10)
     _eq("a key closes them and does nothing else", (helped["help"], helped["scroll"], helped["cancelling"]), (False, 12, False))
     on_key(helped, "?", 10)

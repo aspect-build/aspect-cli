@@ -743,7 +743,7 @@ def render(state: dict, cols: int, rows: int) -> str:
     name = ("the end" if view["cut"] and not view.get("peek") else "") if view != None else "Console"
     title = "%s%s%s · %s" % (name, _FILTER_TITLES[state["filter"]], found, where)
     if state.get("help"):
-        title = "Keys · ↑↓ scroll · any other key closes"
+        title = "Keys · ↑↓ PgUp PgDn scroll · any other key closes"
         out.append(_box_top(title, cols))
     else:
         # The tab names the console; its status follows.

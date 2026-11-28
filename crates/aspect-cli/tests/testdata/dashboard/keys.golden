@@ -1,5 +1,5 @@
  ⠋ aspect build · 12s                                                           3 of 9 actions done
-┌─ Keys · ↑↓ scroll · any other key closes ────────────────────────────────────────────────────────┐
+┌─ Keys · ↑↓ PgUp PgDn scroll · any other key closes ──────────────────────────────────────────────┐
 │ Scroll                                                                                           │
 │   ↑ ↓  k j             scroll a line; in a list, choose                                          │
 │   ⇧↑↓ ⌥↑↓  u d  ^U ^D  scroll half a page (macOS Terminal sends ⇧↑↓ as ↑↓)                       │
@@ -27,4 +27,4 @@
 │   ^O                   show the lines under each INFO: From (a successful action's output, fold… │
 │ … 33 more: ↓                                                                                     │
 └──────────────────────────────────────────────────────────────────────────────────────────────────┘
- ↑↓ scroll · any other key closes
+ ↑↓ PgUp PgDn scroll · any other key closes

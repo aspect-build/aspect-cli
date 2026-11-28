@@ -79,7 +79,7 @@ def keys_row(state: dict, cols: int) -> str:
     if state.get("countdown_ms") != None:
         return _fit(" Done ✔ · leaving in %ds · q, Enter or Esc leave now · any other key stays" % ((state["countdown_ms"] + 999) // 1000), cols)
     if state.get("help"):
-        return _fit(" ↑↓ scroll · any other key closes", cols)
+        return _fit(" ↑↓ PgUp PgDn scroll · any other key closes", cols)
     if state.get("note") and (state.get("note_until") == None or _clock(state) < state["note_until"]):
         return _fit(" " + state["note"], cols)
     if state.get("tab") in ("metrics", "invocation"):
@@ -104,7 +104,8 @@ def on_key(state: dict, key: str, page: int) -> bool:
     screen. The mouse (`mouse_key`) first, then an `early` entry of `KEYS`
     (Ctrl+L); then the modes that take the keys: an Esc typed before a key
     as Alt with it, the `?` overlay open (↑↓, `k`/`j` and the wheel scroll
-    it, any other key closes it), the search bar open (`_search_key`, every
+    it a row, PgUp and PgDn a page, any other key closes it), the search bar
+    open (`_search_key`, every
     key but the arrows and the wheel). Else the first entry of `KEYS` that
     takes the key and applies now; a toggle's entry (`note`) has the keys
     row say, for `_NOTE_MS`, the state it left and how to undo it. Any key
@@ -128,6 +129,10 @@ def on_key(state: dict, key: str, page: int) -> bool:
             state["help_top"] = max(0, state.get("help_top", 0) - 1)
         elif key in ("down", "j", "wheel-down"):
             state["help_top"] = state.get("help_top", 0) + 1
+        elif key in ("pageup", "pagedown"):
+            # A page of the overlay, which the next frame holds within it.
+            step = max(1, page - 1)
+            state["help_top"] = max(0, state.get("help_top", 0) + (step if key == "pagedown" else -step))
         else:
             state["help"] = False
         return False
