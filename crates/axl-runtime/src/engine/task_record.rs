@@ -117,6 +117,7 @@ pub struct TaskIdentity {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Git {
     pub commit: String,
+    /// The branch checked out (`main`); absent when `HEAD` is detached.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
     /// Whether tracked files differed from the commit; absent when that had
@@ -605,20 +606,30 @@ pub fn read(path: &Path) -> Option<TaskRecord> {
 }
 
 /// What [`read_git`] sends, in this order.
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 enum GitPart {
     Head(Git),
     Dirty(bool),
 }
 
 /// Send the repository's commit and branch, then whether tracked files
-/// differ, from `git`; nothing outside a repository or without git. Run
-/// beside the task, so it never delays its start.
+/// differ, from `git`; nothing outside a repository, on a branch with no
+/// commit yet, or without git. Run beside the task, so it never delays its
+/// start.
+///
+/// Two git calls: `rev-parse` for the commit and `HEAD`'s ref together,
+/// sent as soon as it answers, then `git status`, which can take seconds in
+/// a large repository.
 fn read_git(root: &Path, tx: &mpsc::Sender<GitPart>) {
+    read_git_with(root, tx, || Command::new("git"));
+}
+
+/// [`read_git`], each git command started from `git()`.
+fn read_git_with(root: &Path, tx: &mpsc::Sender<GitPart>, git: impl Fn() -> Command) {
     let git = |args: &[&str]| -> Option<String> {
         // No optional locks: `git status` would otherwise take the index's
         // lock to refresh it, and a `git commit` of the user's at once fail.
-        let out = Command::new("git")
+        let out = git()
             .env("GIT_OPTIONAL_LOCKS", "0")
             .arg("-C")
             .arg(root)
@@ -631,15 +642,10 @@ fn read_git(root: &Path, tx: &mpsc::Sender<GitPart>) {
             .success()
             .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
     };
-    // One call for both: the commit, then `HEAD`'s ref (`HEAD` itself when
-    // detached).
-    let Some(head) = git(&[
-        "rev-parse",
-        "--verify",
-        "HEAD",
-        "--symbolic-full-name",
-        "HEAD",
-    ]) else {
+    // The commit, then `HEAD`'s ref (`HEAD` itself when detached), then the
+    // `--` echoed back. Not `--verify`, which takes a single revision; the
+    // `--` makes an unborn `HEAD` an error rather than a path.
+    let Some(head) = git(&["rev-parse", "HEAD", "--symbolic-full-name", "HEAD", "--"]) else {
         return;
     };
     let mut lines = head.lines();
@@ -1237,5 +1243,143 @@ mod tests {
                 &vec![],
             ]
         );
+    }
+
+    /// A scratch folder for git repositories, with git run in it under no
+    /// configuration of the host's: no system or global config file, a
+    /// `HOME` of its own, no ambient `GIT_*` variable, and no repository
+    /// found above the folder.
+    struct Scratch(tempfile::TempDir);
+
+    impl Scratch {
+        fn new() -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            fs::create_dir(dir.path().join("home")).unwrap();
+            Self(dir)
+        }
+
+        fn path(&self, rel: &str) -> PathBuf {
+            self.0.path().join(rel)
+        }
+
+        fn git(&self) -> Command {
+            let mut cmd = Command::new("git");
+            for (k, _) in std::env::vars_os() {
+                if k.to_string_lossy().starts_with("GIT_") {
+                    cmd.env_remove(k);
+                }
+            }
+            let home = self.path("home");
+            cmd.env("HOME", &home)
+                .env("XDG_CONFIG_HOME", home.join(".config"))
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", home.join(".gitconfig"))
+                .env("GIT_CEILING_DIRECTORIES", self.0.path());
+            cmd
+        }
+
+        /// Run git with `args` in `dir`, and its stdout.
+        fn run(&self, dir: &str, args: &[&str]) -> String {
+            let out = self
+                .git()
+                .current_dir(self.path(dir))
+                .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+                .args(["-c", "commit.gpgsign=false"])
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?} in {dir}: {out:?}");
+            String::from_utf8(out.stdout).unwrap().trim().to_owned()
+        }
+
+        /// A repository at `dir` on `main`, with one commit of `file`.
+        fn repo(&self, dir: &str) -> String {
+            fs::create_dir(self.path(dir)).unwrap();
+            self.run(dir, &["init", "-q", "-b", "main"]);
+            fs::write(self.path(dir).join("file"), "one\n").unwrap();
+            self.run(dir, &["add", "file"]);
+            self.run(dir, &["commit", "-q", "-m", "one"]);
+            self.run(dir, &["rev-parse", "HEAD"])
+        }
+
+        /// What [`read_git`] sends for `dir`.
+        fn read(&self, dir: &str) -> Vec<GitPart> {
+            let (tx, rx) = mpsc::channel();
+            read_git_with(&self.path(dir), &tx, || self.git());
+            drop(tx);
+            rx.into_iter().collect()
+        }
+    }
+
+    fn head(commit: &str, branch: Option<&str>) -> GitPart {
+        GitPart::Head(Git {
+            commit: commit.to_owned(),
+            branch: branch.map(str::to_owned),
+            dirty: None,
+        })
+    }
+
+    /// The commit and branch, then whether a tracked file differs from the
+    /// commit, staged or not; an untracked file does not count.
+    #[test]
+    fn git_details_are_the_commit_the_branch_and_whether_tracked_files_changed() {
+        let scratch = Scratch::new();
+        let commit = scratch.repo("repo");
+        let clean = [head(&commit, Some("main")), GitPart::Dirty(false)];
+        assert_eq!(scratch.read("repo"), clean);
+        fs::write(scratch.path("repo/untracked"), "new\n").unwrap();
+        assert_eq!(scratch.read("repo"), clean);
+        fs::write(scratch.path("repo/file"), "two\n").unwrap();
+        let dirty = [head(&commit, Some("main")), GitPart::Dirty(true)];
+        assert_eq!(scratch.read("repo"), dirty);
+        scratch.run("repo", &["add", "file"]);
+        assert_eq!(scratch.read("repo"), dirty);
+    }
+
+    #[test]
+    fn a_detached_head_has_its_commit_and_no_branch() {
+        let scratch = Scratch::new();
+        let commit = scratch.repo("repo");
+        scratch.run("repo", &["checkout", "-q", "--detach"]);
+        assert_eq!(
+            scratch.read("repo"),
+            [head(&commit, None), GitPart::Dirty(false)]
+        );
+    }
+
+    /// A linked worktree has its own branch and its own tree: a change in
+    /// the main checkout leaves it clean.
+    #[test]
+    fn a_linked_worktree_has_its_own_branch_and_tree() {
+        let scratch = Scratch::new();
+        let commit = scratch.repo("repo");
+        scratch.run(
+            "repo",
+            &["worktree", "add", "-q", "-b", "topic/wt", "../wt"],
+        );
+        fs::write(scratch.path("repo/file"), "two\n").unwrap();
+        assert_eq!(
+            scratch.read("wt"),
+            [head(&commit, Some("topic/wt")), GitPart::Dirty(false)]
+        );
+        assert_eq!(
+            scratch.read("repo"),
+            [head(&commit, Some("main")), GitPart::Dirty(true)]
+        );
+    }
+
+    /// A branch with no commit yet has nothing to record, even with a file
+    /// named `HEAD` that git could take the revision for; nor has a folder
+    /// outside any repository.
+    #[test]
+    fn an_unborn_branch_and_a_folder_outside_git_send_nothing() {
+        let scratch = Scratch::new();
+        fs::create_dir(scratch.path("unborn")).unwrap();
+        scratch.run("unborn", &["init", "-q", "-b", "main"]);
+        assert_eq!(scratch.read("unborn"), []);
+        fs::write(scratch.path("unborn/HEAD"), "").unwrap();
+        assert_eq!(scratch.read("unborn"), []);
+        fs::create_dir(scratch.path("plain")).unwrap();
+        assert_eq!(scratch.read("plain"), []);
     }
 }
