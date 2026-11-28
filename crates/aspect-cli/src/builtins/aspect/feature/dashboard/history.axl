@@ -27,6 +27,7 @@ load("../../private/lib/worktree_layout.axl", "slot_name")
 
 _c = term_text.c
 _fit = term_text.fit
+_middle = term_text.middle
 _tail = term_text.tail
 _RESET = term_text.RESET
 _text_width = term_text.text_width
@@ -105,7 +106,10 @@ def history_records(state: dict) -> list:
         b["now_ms"] = now_ms()
         b["census"] = b["history"].census()
         if not b["standalone"] and b["exclude"]:
-            b["live_record"] = b["history"].get(b["exclude"])
+            live = b["history"].get(b["exclude"])
+
+            # Only a record that reads, not a newer or damaged one's folder.
+            b["live_record"] = live if live and not live.get("newer") and not live.get("unreadable") else None
         listed = b["history"].list(
             limit = _LIMIT + 1,
             outcome = "failed" if b["filter"] == "failed builds" else None,
@@ -238,15 +242,17 @@ def page_rows(rows: int) -> int:
     """How many runs the History screen lists at once, `rows` tall."""
     return max(1, rows - 4)
 
-def header_text(state: dict) -> str:
-    """The History screen's header: how many runs the history keeps, and,
-    with a live run to go back to, how it is doing (`live_words`)."""
+def header_text(state: dict, cols: int = 1 << 30) -> str:
+    """The History screen's header, `cols` wide at most: how many runs the
+    history keeps, and, with a live run to go back to, how it is doing
+    (`live_words`), the count the first to go where both do not fit."""
     b = state["browser"]
     runs = (b["census"] or {}).get("runs", len(b["records"] or []))
-    head = " aspect history · %s run%s kept" % (_thousands(runs), "" if runs == 1 else "s")
-    if not b["standalone"]:
-        head += " · " + live_words(state)
-    return head
+    kept = " · %s run%s kept" % (_thousands(runs), "" if runs == 1 else "s")
+    live = "" if b["standalone"] else " · " + live_words(state)
+    if live and _text_width(" aspect history" + kept + live) > cols:
+        kept = ""
+    return " aspect history" + kept + live
 
 def box_title(state: dict, width: int = 1 << 30) -> str:
     """The list's box title in `width` cells: what it shows, where, and how
@@ -271,23 +277,33 @@ def empty_text(state: dict) -> str:
     where = " in this workspace" if b["here"] and b["workspace"] else ""
     return "No %s%s%s." % ("" if b["standalone"] else "earlier ", noun, where)
 
-def damaged_text(state: dict) -> str:
-    """What of the history the list leaves out, and why, for under it:
-    records a newer CLI wrote, folders without a record (a run starting,
-    or one stopped before it wrote one) and records that do not read; ""
-    for none."""
+def damaged_text(state: dict, width: int = 1 << 30) -> str:
+    """What of the history the list leaves out, and why, for under it, in
+    `width` cells at most: records a newer CLI wrote, folders without a
+    record (a run starting, or one stopped before it wrote one) and
+    records that do not read; each part whole, all in a shorter form where
+    they do not fit (`3 from a newer aspect`), the last of those left out
+    until the rest do; "" for none."""
     census = state["browser"]["census"] or {}
     parts = []
     n = census.get("newer", 0)
     if n:
-        parts.append("%s run%s from a newer aspect, not listed (upgrade to read %s)" % (_thousands(n), "" if n == 1 else "s", "it" if n == 1 else "them"))
+        parts.append(("%s run%s from a newer aspect, not listed (upgrade to read %s)" % (_thousands(n), "" if n == 1 else "s", "it" if n == 1 else "them"), "%s from a newer aspect" % _thousands(n)))
     n = census.get("without_record", 0)
     if n:
-        parts.append("%s folder%s without a record (a run starting, or stopped before writing one)" % (_thousands(n), "" if n == 1 else "s"))
+        parts.append(("%s folder%s without a record (a run starting, or stopped before writing one)" % (_thousands(n), "" if n == 1 else "s"), "%s without a record" % _thousands(n)))
     n = census.get("unreadable", 0)
     if n:
-        parts.append("%s record%s unreadable" % (_thousands(n), "" if n == 1 else "s"))
-    return " · ".join(parts)
+        parts.append(("%s record%s unreadable" % (_thousands(n), "" if n == 1 else "s"), "%s unreadable" % _thousands(n)))
+    whole = " · ".join([long for long, _ in parts])
+    if _text_width(whole) <= width:
+        return whole
+    short = [brief for _, brief in parts]
+    for _ in range(len(parts)):
+        if _text_width(" · ".join(short)) <= width:
+            break
+        short.pop()
+    return " · ".join(short)
 
 def _live_status(state: dict) -> tuple:
     """The live run's state, `(text, role)`, the one form for its row's
@@ -306,6 +322,19 @@ def _live_status(state: dict) -> tuple:
     counts = _progress_counts(line) if line else None
     spin = _SPINNER[state["frames"] % len(_SPINNER)]
     return (spin + " " + ("%s/%s" % (_thousands(counts[0]), _thousands(counts[1])) if counts else "running"), "accent")
+
+def _live_most(state: dict) -> str:
+    """The widest the live run's status comes to while it builds as far as
+    Bazel has counted (`⠹ 14/14` for `⠹ 4/14`), for its column's width;
+    else its status."""
+    status = _live_status(state)[0]
+    live = _live_of(state)
+    line = _bazel_line(live["progress"][0]) if live.get("progress") and not live["ended"] and not live["cancelling"] else ""
+    counts = _progress_counts(line) if line else None
+    if not counts:
+        return status
+    total = _thousands(counts[1])
+    return status.partition(" ")[0] + " %s/%s" % (total, total)
 
 def live_words(state: dict) -> str:
     """The live run in a header: `live ⠹ 4/14`, `live ✗ exit 1`, `live ✓
@@ -421,6 +450,23 @@ def _ending(path: str, paths: list) -> str:
             break
     return name
 
+def _cut_apart(names: list, width: int) -> dict:
+    """Each of `names` in at most `width` cells, those that differ kept
+    apart: whole where it fits, else cut from the left (its end, which
+    tells it apart, kept), else in the middle, else from the right; cut
+    from the left where none keeps them all apart."""
+    distinct = [n for i, n in enumerate(names) if n not in names[:i]]
+    cuts = [
+        lambda n: "…" + _tail(n, width - 1),
+        lambda n: _middle(n, width).rstrip(" "),
+        lambda n: _fit(n, width).rstrip(" "),
+    ]
+    for cut in cuts:
+        shown = {n: n if _text_width(n) <= width else cut(n) for n in distinct}
+        if len(set(shown.values())) == len(distinct):
+            return shown
+    return {n: n if _text_width(n) <= width else cuts[0](n) for n in distinct}
+
 def workspace_names(paths: list) -> dict:
     """Each workspace path's name for the list: a worktree slot's as the
     pool's layout names it (`aspect-cli·9c1239a4`, `slot_name`) where no
@@ -435,13 +481,18 @@ def workspace_names(paths: list) -> dict:
 
 # The columns' least widths: the widest each comes to hold as its rows age
 # (`just now`, `now`, `4m05s`, an ID), so a column never comes and goes as
-# the clock moves. The workspace column at most `_WORKSPACE_CAP` (more where
-# the row has room to spare), at least `_WORKSPACE_LEAST` before it goes.
+# the clock moves; with a run going (the live build, or one elsewhere), its
+# time so far up to an hour (`59m59s…`), and the live build's counts as
+# far as Bazel has counted (`⠹ 14/14` for `⠹ 4/14`, `_live_most`). The
+# workspace column at most `_WORKSPACE_CAP` (more where the row has room
+# to spare), at least `_WORKSPACE_LEAST` before it goes.
 _WHEN_LEAST = 8
 
 _SHORT_WHEN_LEAST = 3
 
 _TOOK_LEAST = 5
+
+_TOOK_GOING = 7
 
 _ID_WIDTH = 8
 
@@ -464,6 +515,7 @@ def _row_cells(state: dict, row, now: int) -> dict:
         started = rec.get("started", "") if rec != None else ""
         return dict(
             status = status,
+            most = _live_most(state),
             role = role,
             when = ago(started, now) if started else "just now",
             when_short = ago(started, now, short = True) if started else "now",
@@ -482,6 +534,7 @@ def _row_cells(state: dict, row, now: int) -> dict:
         took_text = duration(now - start) + "…"
     return dict(
         status = status,
+        most = status,
         role = role,
         when = ago(row.get("started", ""), now),
         when_short = ago(row.get("started", ""), now, short = True),
@@ -502,10 +555,12 @@ def table_rows(state: dict, rows: list, width: int, chosen: int) -> list:
     (`_WHEN_LEAST`...), so none comes and goes as rows age. The command's
     label is the last thing cut: a row's flags go first (`command_cell`),
     then the ID column, then the duration, then the workspace shortened to
-    `_WORKSPACE_LEAST`, then status and when as short as they say it (a
-    glyph, `5m`) to keep it, then it gone; only then is the label
-    shortened. The command column is as wide as its widest command, the
-    ID beside it."""
+    `_WORKSPACE_LEAST` (names kept apart, `_cut_apart`), then status and
+    when as short as they say it (a glyph, `5m`) to keep it, then it gone,
+    until every label fits with its last folder and name whole; a longer
+    package is shortened in its middle (`command_cell`), so one long label
+    takes no column from the others. The command column is as wide as its
+    widest command, the ID beside it."""
     now = state["browser"]["now_ms"]
     cells = [_row_cells(state, r, now) for r in rows]
     if not cells:
@@ -516,8 +571,11 @@ def table_rows(state: dict, rows: list, width: int, chosen: int) -> list:
         c["workspace"] = names.get(c["workspace"], "")
     widest = lambda key: max([_text_width(c[key]) for c in cells])
     ws_full = widest("workspace") if names else 0
-    took_w = max(_TOOK_LEAST, widest("took")) if widest("took") else 0
-    label_w = widest("label")
+    going = [r for r in rows if r == None or outcome(r) == "running"]
+    took_w = max(_TOOK_LEAST, _TOOK_GOING if going else 0, widest("took")) if widest("took") or going else 0
+
+    # Wide enough for every label with its last folder and name whole.
+    label_w = max([_text_width(_shortened(c["label"], 1)) for c in cells])
     full_w = max([_text_width(" ".join([c["label"]] + c["flags"])) for c in cells])
     ws_cap = min(ws_full, _WORKSPACE_CAP)
     plans = [
@@ -532,7 +590,7 @@ def table_rows(state: dict, rows: list, width: int, chosen: int) -> list:
 
     def others(plan):
         # The cells beside the command, each with its separator.
-        status_w = 1 if plan["short"] else widest("status")
+        status_w = 1 if plan["short"] else widest("most")
         when_w = max(_SHORT_WHEN_LEAST, widest("when_short")) if plan["short"] else max(_WHEN_LEAST, widest("when"))
         ws = [plan["ws"]] if plan["ws"] else []
         return [status_w, when_w] + ([took_w] if plan["took"] and took_w else []) + ws + ([_ID_WIDTH] if plan["id"] else [])
@@ -554,6 +612,7 @@ def table_rows(state: dict, rows: list, width: int, chosen: int) -> list:
         plan = dict(plan, ws = min(ws_full, plan["ws"] + room(plan) - full_w))
     status_w, when_w = others(plan)[0], others(plan)[1]
     command_w = max(1, min(room(plan), full_w))
+    shown = _cut_apart([c["workspace"] for c in cells], plan["ws"]) if plan["ws"] else {}
     out = []
     for i, c in enumerate(cells):
         status = c["status"].partition(" ")[0] if plan["short"] else c["status"]
@@ -562,9 +621,7 @@ def table_rows(state: dict, rows: list, width: int, chosen: int) -> list:
         if plan["took"] and took_w:
             pieces.append((_fit(c["took"], took_w), ""))
         if plan["ws"]:
-            name = c["workspace"]
-            cut = name if _text_width(name) <= plan["ws"] else "…" + _tail(name, plan["ws"] - 1)
-            pieces.append((_fit(cut, plan["ws"]), "muted"))
+            pieces.append((_fit(shown[c["workspace"]], plan["ws"]), "muted"))
         pieces.append((_fit(command_cell(c["label"], c["flags"], command_w), command_w), ""))
         if plan["id"]:
             pieces.append((_fit(c["id"], _ID_WIDTH), "accent" if c["id"] == "live" else "muted"))
@@ -673,10 +730,11 @@ def ctrl_c(state: dict) -> bool:
 
 def _within(dir: str, rel, fs = None) -> str | None:
     """`dir` + `/` + `rel`, a path a record names inside its entry (`dir`):
-    None for one that is not a string, is empty or absolute, climbs out (a
-    `..`), or, with `fs` (`std.fs`) to look, reaches its file through a
-    symbolic link, so a record cannot show a file outside its run's."""
-    if type(rel) != "string" or not rel or rel.startswith("/") or ".." in rel.split("/"):
+    None for one that is not a string, or not plain names (empty, absolute,
+    a `.` or a `..` in it), or, with `fs` (`std.fs`) to look, reaches its
+    file through a symbolic link, so a record cannot show a file outside
+    its run's."""
+    if type(rel) != "string" or [name for name in rel.split("/") if name in ("", ".", "..")]:
         return None
     at = dir
     for name in (rel.split("/") if fs != None else []):
@@ -980,7 +1038,8 @@ def past_header(state: dict, cols: int = 1 << 30) -> str:
     while it ran saying as of when the list was read, a cut event stream
     saying so. Too narrow, its command's flags go first (`command_cell`),
     then the age, the cut stream's note and the duration, in that order,
-    before the command's label is shortened as the list shortens one."""
+    before the command's label is shortened as the list shortens one; and
+    how it ended (the glyph says it too) before a target's name is cut."""
     rec = state["past"]
     b = state.get("browser") or {}
     now = b.get("now_ms") or now_ms()
@@ -1001,14 +1060,18 @@ def past_header(state: dict, cols: int = 1 << 30) -> str:
         return " History · %s %s · %s" % (mark, cmd, " · ".join(kept + [p for _, p in parts]))
 
     # The age first, then the cut stream's note, then the duration, until
-    # the label fits whole; else none of them, the label shortened.
+    # the label fits whole; else none of them, the label shortened, while
+    # its targets' names fit; else how it ended too.
     order = ["age", "cut", "took"]
     for drop in range(len(order) + 1):
         parts = [p for p in optional if p[0] not in order[:drop]]
         room = cols - _text_width(text("", parts))
-        if room >= _text_width(label) or drop == len(order):
+        if room >= _text_width(label):
             return text(command_cell(label, flags, max(1, room)), parts)
-    return text(label, [])
+    if room >= _text_width(_shortened(label, 2)):
+        return text(command_cell(label, flags, max(1, room)), [])
+    bare = " History · %s " % mark
+    return bare + command_cell(label, flags, max(1, cols - _text_width(bare)))
 
 dashboard_history = namespace(
     ago = ago,
@@ -1045,6 +1108,7 @@ dashboard_history = namespace(
     toggle_failed = toggle_failed,
     toggle_workspace = toggle_workspace,
     testonly_use_kept_logs = use_kept_logs,
+    testonly_cut_apart = _cut_apart,
     testonly_within = _within,
     warned = warned,
     workspace_names = workspace_names,

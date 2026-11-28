@@ -917,7 +917,7 @@ def render_history(state: dict, cols: int, rows: int) -> str:
         top = b["selected"] - height + 1
     top = max(0, min(top, max(0, len(rows_shown) - height)))
     b["top"] = top
-    out = [_history_bar() + _fit(_history_header(state), cols) + _RESET]
+    out = [_history_bar() + _fit(_history_header(state, cols), cols) + _RESET]
     out.append(_box_top("Keys" if state.get("help") else _box_title(state, cols - 5), cols))
     w = cols - 4
     body = []
@@ -939,9 +939,9 @@ def render_history(state: dict, cols: int, rows: int) -> str:
     for i in range(height):
         drawn = body[i] if i < len(body) else " " * w
         out.append(_c("border") + "│" + _RESET + " " + drawn + _RESET + (" " + edge[i] if edge else _c("border") + " │" + _RESET))
-    damaged = _damaged_text(state)
+    damaged = _damaged_text(state, cols - 5)
     if damaged:
-        note = " %s " % _fit(damaged, max(1, cols - 5)).rstrip(" ")
+        note = " %s " % damaged
         out.append(_c("border") + "└─" + _RESET + _c("muted") + note + _RESET + _c("border") + "─" * max(0, cols - 3 - _text_width(note)) + "┘" + _RESET)
     else:
         out.append(_box_bottom(cols))

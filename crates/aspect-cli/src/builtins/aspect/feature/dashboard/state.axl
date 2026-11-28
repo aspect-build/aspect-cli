@@ -148,7 +148,9 @@ _BUILD_KEYS = ["counts", "inv", "slowest", "spawn_slowest", "critical", "pages",
 _PER_ATTEMPT = ["fails", "outputs", "last_attempts", "spread", "test_counts", "counts", "inv", "bazel_uuid", "bep_done_total", "excerpts"]
 
 def _run_event(run: dict, event) -> bool:
-    """One build event into a run (its keys alone, never the UI's): the
+    """One build event into a run (its keys, and only one of the UI's: the
+    Failures list's choice, `selected`, which `collect_event` keeps in range
+    as a row is dropped, and which a run aside keeps unread): the
     invocation's id and `--bes_results_url` for its results pages, then
     what the failure summary and the Failures list read (`collect_event`).
     A second `build_started` in the build, Bazel restarting it in place
