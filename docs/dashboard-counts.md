@@ -370,14 +370,15 @@ cancelled.
 
 The tab has a row per entry, in the summary's order and with its heading
 (`failure_rows`, `listed_failures`), a flaky test's too, marked `~` and never
-counted. The chosen row shows its excerpt under it (every row's with Ctrl+O).
-After them come the rows of no record: a failed target with no reason
-(`✗ <label>  no log`), Bazel's exit code (`■ Bazel was interrupted (exit 8)`
-where Bazel was interrupted), each blocked target (`○ <label>  blocked by
-:x`), and, once the build has ended, Bazel's other errors (`! …`). The tab's
-badge (`Failures ✗6 ○1`) and the Results pane's `Failed` row count the entries
-but a flaky test's and an interrupted build's mark, and the blocked targets.
-While the
+counted. A row too wide for the tab keeps whole fields, its last details
+dropped first, then its label cut in the middle (`headed_row`). The chosen row
+shows its excerpt under it (every row's with Ctrl+O). After them come the rows
+of no record: a failed target with no reason (`✗ <label>  no log`), Bazel's
+exit code (`■ Bazel was interrupted (exit 8)` where Bazel was interrupted),
+each blocked target (`○ <label>  blocked by :x`), and, once the build has
+ended, Bazel's other errors (`! …`). The tab's badge (`Failures ✗6 ○1`) and the
+Results pane's `Failed` row count the entries but a flaky test's and an
+interrupted build's mark, and the blocked targets. While the
 build runs the entries have no console ties, so no location: those come when it
 ends.
 

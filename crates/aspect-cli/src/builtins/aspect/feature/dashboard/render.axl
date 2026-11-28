@@ -86,14 +86,28 @@ _keys_row = dashboard_keys.keys_row
 # Folded builds shown above the tabs, the older counted on a row.
 _MAX_FOLDED = 3
 
+def headed_row(mark: str, label: str, details: list, width: int) -> tuple:
+    """`(text, label)` of a Failures row headed `mark label  details` in
+    `width` cells, as the other rows fit: whole fields only, the details
+    dropped from the last, which says the least (a test's time, then its
+    attempts; an action's location), then the label cut in the middle, the
+    rest gone; `label` as it is shown."""
+    for k in range(len(details), -1, -1):
+        text = mark + " " + label + ("  " + " · ".join(details[:k]) if k else "")
+        if _text_width(text) <= width:
+            return (text, label)
+    shown = _middle(label, max(1, width - _text_width(mark) - 1))
+    return (mark + " " + shown, shown)
+
 def failure_rows(state: dict, room: int, width: int) -> list:
     """The Failures list's rows, `room` at most, each `width` wide: a row per
     failed action and per failed test (`listed_failures`: a test's chosen
     attempt stands for it), headed as the failure summary heads it (`✗
     //pkg:t  Genrule · exit 1 · pkg/BUILD:3:8`, `✗ //t:x  test · failed 2 of
-    2 attempts`, `record_excerpt`), the selected one in reverse video while
-    the list has focus and kept in sight with its excerpt under it behind a
-    `│` (every row's with Ctrl+O, `expand_failures`); then the rows of no
+    2 attempts`, `record_excerpt`; whole fields that fit, `headed_row`),
+    the selected one in reverse video while the list has focus and kept in
+    sight with its excerpt under it behind a `│` (every row's with Ctrl+O,
+    `expand_failures`); then the rows of no
     record of their own (`_tab_extras`): a failed target no event says
     more of, Bazel's exit code (`■`, no failure, where Bazel was
     interrupted), each blocked target (`○`), Bazel's other errors (`!`). What
@@ -143,9 +157,8 @@ def failure_rows(state: dict, room: int, width: int) -> list:
         rec = fails[i]
         flaky = rec["kind"] == "test" and state["counts"].get("flaky", {}).get(rec["label"])
         mark = "~" if flaky else "✗"
-        details = " · ".join(record_excerpt(state, i)[0])
-        text = _middle(mark + " " + rec["label"] + "  " + details, width)
-        return _list_row(state, text, width, chosen, (_c("warning") if flaky else _c("error")) + mark + _RESET + " " + _c("strong") + rec["label"] + _RESET + _c("muted") + text[2 + len(rec["label"]):] + _RESET)
+        text, label = headed_row(mark, rec["label"], record_excerpt(state, i)[0], width)
+        return _list_row(state, text, width, chosen, (_c("warning") if flaky else _c("error")) + mark + _RESET + " " + _c("strong") + label + _RESET + _c("muted") + text[2 + len(label):] + _RESET)
 
     # A window of whole entries around the chosen one, as many as fit with
     # a line each for what is hidden above and below; too short for those,
@@ -1069,6 +1082,7 @@ dashboard_render = namespace(
     testonly_build_row = build_row,
     console_height = console_height,
     testonly_failure_rows = failure_rows,
+    testonly_headed_row = headed_row,
     testonly_invocation_lines = invocation_lines,
     testonly_links_row = links_row,
     testonly_metrics_lines = metrics_lines,

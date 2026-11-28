@@ -112,6 +112,7 @@ action_rows = dashboard_render.testonly_action_rows
 build_row = dashboard_render.testonly_build_row
 console_height = dashboard_render.console_height
 failure_rows = dashboard_render.testonly_failure_rows
+headed_row = dashboard_render.testonly_headed_row
 invocation_lines = dashboard_render.testonly_invocation_lines
 links_row = dashboard_render.testonly_links_row
 metrics_lines = dashboard_render.testonly_metrics_lines
@@ -202,6 +203,20 @@ def _interrupted_mark(ctx):
         _eq("%s: its row" % name, rows, [row])
         frame = _visible(render(st, 120, 30))
         _eq("%s: a failure counted" % name, ("Failures ✗1" in frame, "Failed   ✗ 1" in frame), (failed, failed))
+
+def _narrow_failure_rows(ctx):
+    """A Failures row narrower than its heading keeps whole fields, the
+    last dropped first, never a field cut mid-word (`failed 1 of 2
+    at…0.5s`); narrower than its label alone, the label cut in the middle."""
+    details = ["test", "failed 1 of 2 attempts", "0.5s"]
+    whole = "✗ //t:flaky  test · failed 1 of 2 attempts · 0.5s"
+    for width, want in [(60, whole), (len(whole), whole), (len(whole) - 1, "✗ //t:flaky  test · failed 1 of 2 attempts"), (30, "✗ //t:flaky  test"), (12, "✗ //t:flaky")]:
+        _eq("headed at %d" % width, headed_row("✗", "//t:flaky", details, width)[0], want)
+    for width in range(4, 70):
+        text, label = headed_row("✗", "//t:flaky", details, width)
+        if text_width(text) > width or ("…" in text and label == "//t:flaky"):
+            fail("headed_row at %d: %r" % (width, text))
+    _eq("too narrow for the label", headed_row("✗", "//pkg/sub:a_long_target_name", details, 16), ("✗ //pkg/su…_name", "//pkg/su…_name"))
 
 def _headed(block):
     """A kept block, its `ERROR:` header read as the collector reads one
@@ -2758,6 +2773,7 @@ def _impl(ctx: TaskContext) -> int:
     _goldens(ctx, view_state, act, ctx.args.update)
     _held_line_reads(ctx)
     _interrupted_mark(ctx)
+    _narrow_failure_rows(ctx)
     print("dashboard_test.axl: OK")
     return 0
 
