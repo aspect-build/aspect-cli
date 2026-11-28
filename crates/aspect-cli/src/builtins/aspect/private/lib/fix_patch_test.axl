@@ -66,6 +66,8 @@ def _test_scan():
     _eq("a header naming its prefix alone", _sides("--- a/\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n")[1], "a header with no name")
     _eq("a prefix and padding", _sides("--- /dev/null\n+++ b/   \n@@ -0,0 +1 @@\n+x\n")[1], "a header with no name")
     _eq("a hunk line past its count", _sides("--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n+c\n")[1], "a hunk line past its hunk's line count")
+    _eq("one past a first file's count", _sides("--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n c\n--- a/y\n+++ b/y\n@@ -1 +1 @@\n-a\n+b\n")[1], "a hunk line past its hunk's line count")
+    _eq("text around a diff that looks like hunk lines", _sides("- a note\n+ another\n a third\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n-- \n2.50.1\n"), ([("x", "x")], None))
     _eq("a name with spaces and no tab runs to the end of the line", _sides("--- a/src/my file.txt\n+++ b/src/my file.txt\n@@ -1 +1 @@\n-a\n+b\n"), ([("src/my file.txt", "src/my file.txt")], None))
 
     # A name after a leading tab is read; the other header shapes BSD patch
@@ -167,6 +169,51 @@ printf -- '--- a/../escape.txt\\n+++ b/../escape.txt\\n@@ -0,0 +1 @@\\n+out\\n' 
     said = []
     _eq("an empty patch does nothing", apply_fix_patch(ctx, "bazel-out/bin/empty.patch", cwd = tree, say = _noted(said)), None)
     _eq("and says nothing", said, [])
+
+    # What git writes around a diff: `git format-patch`'s headers, a message
+    # with lines that start like hunk lines, a diffstat and the `-- `
+    # signature right after the last hunk; `git diff --stat -p`'s diffstat.
+    format_patch = "\n".join([
+        "From f64ac2e444984720aab1bd777df422e8a146fef6 Mon Sep 17 00:00:00 2001",
+        "From: Test <t@example.com>",
+        "Date: Fri, 27 Nov 2026 18:19:20 -0700",
+        "Subject: [PATCH] fix: two files",
+        "",
+        "- a bullet starting with a dash",
+        "+ and one with a plus",
+        " and an indented line",
+        "---",
+        " src/fp/a.txt | 2 +-",
+        " src/fp/b.txt | 2 +-",
+        " 2 files changed, 2 insertions(+), 2 deletions(-)",
+        "",
+        "diff --git a/src/fp/a.txt b/src/fp/a.txt",
+        "index 422c2b7..f21fa3b 100644",
+        "--- a/src/fp/a.txt",
+        "+++ b/src/fp/a.txt",
+        "@@ -1,2 +1,2 @@",
+        "-a",
+        "+A",
+        " b",
+        "diff --git a/src/fp/b.txt b/src/fp/b.txt",
+        "index 587be6b..975fbec 100644",
+        "--- a/src/fp/b.txt",
+        "+++ b/src/fp/b.txt",
+        "@@ -1 +1 @@",
+        "-x",
+        "+y",
+        "-- ",
+        "2.50.1 (Apple Git-155)",
+        "",
+        "",
+    ])
+    for name, body in [("format-patch", format_patch), ("diff --stat -p", format_patch.partition("---\n")[2].partition("-- \n")[0])]:
+        fs.create_dir_all(tree + "/src/fp")
+        fs.write(tree + "/src/fp/a.txt", "a\nb\n")
+        fs.write(tree + "/src/fp/b.txt", "x\n")
+        fs.write(root + "/git.patch", body)
+        _eq("git %s output" % name, apply_fix_patch(ctx, root + "/git.patch", cwd = tree), None)
+        _eq("git %s output applies" % name, (fs.read_to_string(tree + "/src/fp/a.txt"), fs.read_to_string(tree + "/src/fp/b.txt")), ("A\nb\n", "y\n"))
 
     # A patch making a file that is there already: other bytes keep its
     # hunk as a reject, the same ones are applied indeed.

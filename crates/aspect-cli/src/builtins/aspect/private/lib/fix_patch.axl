@@ -17,8 +17,8 @@ where:
 - a hunk's range isn't numbers or its body ends short;
 - a line outside its file sections is part of no plain unified diff: a lone
   `--- ` or `+++ `, a context diff's `*** `, an `Index:`, a hunk with no
-  header of its own, or a hunk line past its hunk's count (a change this
-  would drop, not apply);
+  header of its own, or a hunk line right after a hunk's last counted one
+  (a change this would drop, not apply);
 - it has a binary patch, a git mode, rename or copy line, or a file mode
   other than a regular file's (a change the copy-back doesn't make);
 - a header's name is quoted, empty, or not UTF-8;
@@ -130,8 +130,6 @@ def _stray_why(line: str) -> str | None:
         return "an `Index:` line, which this doesn't read"
     if line.startswith("@@ "):
         return "a hunk with no header of its own"
-    if line[:1] in ("+", "-", " "):
-        return "a hunk line past its hunk's line count"
     if line.startswith("GIT binary patch") or line.startswith("Binary files "):
         return "a binary patch, which patch can't apply"
     for header in _GIT_HEADERS:
@@ -145,13 +143,20 @@ def _stray_why(line: str) -> str | None:
 
 def _scan(text: str) -> tuple:
     """`(files, why)`: each file section of the diff `text` as a `_File`, and
-    why the patch is refused, or None (`_stray_why`, `_header_name`, or the
-    walk stopping short)."""
+    why the patch is refused, or None (`_stray_why`, `_header_name`, the
+    walk stopping short, or a hunk line right after a section's last hunk,
+    where a count that falls short shows). Elsewhere a line starting with
+    `+`, `-` or a space is text around the diff: a `git format-patch`
+    message, a diffstat, or the `-- ` signature git puts right after the
+    last hunk."""
     diff = scan(text.split("\n"))
     if diff.problem:
         return [], diff.problem
     why = None
-    for _, line in diff.stray:
+    after_hunks = {s.end: True for s in diff.sections if s.hunks}
+    for i, line in diff.stray:
+        if i in after_hunks and line[:1] in ("+", "-", " ") and line != "-- ":
+            why = why or "a hunk line past its hunk's line count"
         why = why or _stray_why(line)
     files = []
     for section in diff.sections:
