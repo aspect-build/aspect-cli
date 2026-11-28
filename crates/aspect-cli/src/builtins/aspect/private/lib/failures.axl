@@ -417,7 +417,7 @@ def entry_text(state: dict, e: dict) -> dict:
     - a failed action: its mnemonic and its command's exit code (its
       `failure_detail`'s `spawn_exit_code`), and the code of a command
       that timed out, ran out of memory or could not start in its sandbox
-      (`timeout`); its own log's excerpt (what `std.excerpt` picks,
+      (`timeout`, `out of memory`, `subprocess start failed`); its own log's excerpt (what `std.excerpt` picks,
       `own_excerpt`) and that log; with neither an excerpt nor a tie's
       lines, its `failure_detail`'s message where it says more than the
       failed command (`COMMAND_FAILURES`), such as a test Bazel failed
@@ -459,8 +459,8 @@ def entry_text(state: dict, e: dict) -> dict:
             details = [_status_word(tied["status"])]
         category, code = rec.get("failure_category") or ("", "")
         command = code in _COMMAND_FAILURES.get(category, [])
-        if command and code != "non_zero_exit" and code not in details:
-            details.append(code)
+        if command and code != "non_zero_exit" and code.replace("_", " ") not in details:
+            details.append(code.replace("_", " "))
         gaps = [(i + len(tied["lines"]), n) for i, n in gaps]
         lines = tied["lines"] + lines
         if not lines and rec.get("failure") and not command:

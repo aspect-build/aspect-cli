@@ -205,8 +205,8 @@ def _test_quoted_failure_detail(ctx):
     cases = [
         ("exited non-zero", _json_failed_action("//a:g", "Genrule", command, {"spawn": {"code": "NON_ZERO_EXIT", "spawnExitCode": 1}}), (["exit 1"], [])),
         ("timed out", _json_failed_action("//a:g", "Genrule", command, {"spawn": {"code": "TIMEOUT", "spawnExitCode": 142}}), (["exit 142", "timeout"], [])),
-        ("out of memory", _json_failed_action("//a:g", "Genrule", command, {"spawn": {"code": "OUT_OF_MEMORY"}}), (["out_of_memory"], [])),
-        ("not started", _json_failed_action("//a:g", "Genrule", command, {"sandbox": {"code": "SUBPROCESS_START_FAILED"}}), (["subprocess_start_failed"], [])),
+        ("out of memory", _json_failed_action("//a:g", "Genrule", command, {"spawn": {"code": "OUT_OF_MEMORY"}}), (["out of memory"], [])),
+        ("not started", _json_failed_action("//a:g", "Genrule", command, {"sandbox": {"code": "SUBPROCESS_START_FAILED"}}), (["subprocess start failed"], [])),
         ("a test Bazel failed itself", _json_failed_action("//tx:t", "TestRunner", sharding, {"testAction": {"code": "LOCAL_TEST_PREREQ_UNMET"}}), ([], [sharding])),
         ("a remote cache's evicted input", _json_failed_action("//a:g", "Genrule", evicted, {"spawn": {"code": "REMOTE_CACHE_EVICTED"}}), ([], [evicted])),
     ]
