@@ -22,11 +22,10 @@ is actually bounded.
 before another `add` may take it back.
 
 `max_idle_days` is how long a free slot may go unused before it is deleted
-with its output base: by the sweep every `add` runs, and by `prune`, whose own
-`--max-idle-days` overrides it for that run. Both read this one value, so a
-slot the config protects from `prune` is protected from `add` too. A task
-cannot read another task's args, which is why the limit is the pool's and
-not `prune`'s.
+with its output base: by the sweep every `add` runs, and by `prune`. It has
+this one place to be set, so a slot the config protects from `prune` is
+protected from `add` too. It is the pool's rather than an arg of `prune`
+because `add` cannot read another task's args.
 
 All three are options of the `WorktreePool` feature (`--worktree-pool:max-slots`,
 `ctx.features[WorktreePool].args.max_slots` in config.axl), which writes them
@@ -94,7 +93,7 @@ WorktreePool = feature(
         ),
         "max_idle_days": args.int(
             default = PRUNE_IDLE_DAYS,
-            description = "Days a free slot may go unused before it is deleted with its Bazel output base: by the sweep each `aspect worktree add` runs before it picks a slot, and by `aspect worktree prune` when no slot is named. Unused means no Bazel command in its output base and no lease taken or given back, as the `last used` column of `aspect worktree list` shows. `aspect worktree prune --max-idle-days` overrides it for that run. 0 or less makes every free slot eligible, as it does for `prune`. A free slot a live Bazel server holds, or whose checkout holds work, is kept whatever its age, and a leased slot is never deleted for being idle.",
+            description = "Days a free slot may go unused before it is deleted with its Bazel output base: by the sweep each `aspect worktree add` runs before it picks a slot, and by `aspect worktree prune` when no slot is named. Unused means no Bazel command in its output base and no lease taken or given back, as the `last used` column of `aspect worktree list` shows. A free slot a live Bazel server holds, or whose checkout holds work, is kept whatever its age, and a leased slot is never deleted for being idle. Below 1, `aspect worktree add` refuses, since every free slot would go before it could hand one out. `aspect worktree prune` takes 0 for a one-off that considers every free slot, because it lists them and asks first.",
         ),
     },
 )
@@ -108,9 +107,9 @@ worktree_pool = struct(
 )
 
 def _pool_options_for_test(ctx: TaskContext, **options) -> typing.Callable[[], None]:
-    """Set this run's `WorktreePool` options as the feature writes them from
-    config, `options` over the defaults, and return a function that puts back
-    the ones they replaced."""
+    """Replace this run's `_WorktreePoolSettings` with `options` over the
+    trait's defaults, bypassing the feature, and return a function that puts
+    back the settings they replaced."""
     previous = ctx.traits[_WorktreePoolSettings]
     ctx.traits[_WorktreePoolSettings] = _WorktreePoolSettings(**options)
 

@@ -78,7 +78,7 @@ Disk is held down by idle time, but only for **free** slots: `add` drops those
 nothing has touched in the pool's idle limit (`--worktree-pool:max-idle-days`,
 `PRUNE_IDLE_DAYS` unless configured), after adopting what a moved or deleted
 clone left, and `aspect worktree prune` does the same on demand, by the same
-limit unless its `--max-idle-days` says otherwise. A leased slot is never taken on idle time alone, however long,
+limit. A leased slot is never taken on idle time alone, however long,
 because a lease is a checkout someone may still want. The one exception is
 `abandoned_lease`.
 

@@ -270,7 +270,7 @@ Run `aspect dev test-delivery-scheduler` for the unit tests.
 
 [`worktree.axl`](worktree.axl) · a pool of checkouts, each leased to the agent session that works in it. `aspect worktree --help` lists its commands.
 
-The `WorktreePool` feature sizes the pool: `--worktree-pool:max-slots` (default 8, advisory), `--worktree-pool:abandoned-grace-hours` (default 24, how long a stopped session's slot is kept for it) and `--worktree-pool:max-idle-days` (default 30, how long a free slot may go unused before the sweep in `add`, or `prune`, deletes it), or `ctx.features[WorktreePool].args.*` in `config.axl`. `prune --max-idle-days` overrides the idle limit for one run; set it on the feature, not on `ctx.tasks["worktree/prune"]`, which `add` cannot see. `aspect feature worktree-pool` describes all three.
+The `WorktreePool` feature sizes the pool: `--worktree-pool:max-slots` (default 8, advisory), `--worktree-pool:abandoned-grace-hours` (default 24, how long a stopped session's slot is kept for it) and `--worktree-pool:max-idle-days` (default 30, how long a free slot may go unused before the sweep in `add`, or `prune`, deletes it), or `ctx.features[WorktreePool].args.*` in `config.axl`. `add` refuses an idle limit below 1. `aspect worktree prune --worktree-pool:max-idle-days=7` prunes deeper once. `aspect feature worktree-pool` describes all three.
 
 ### A session under `claude remote-control`
 
