@@ -4362,7 +4362,14 @@ def _nothing_to_prune_message(registry: dict, own_git_dir: str, max_idle_days: i
     if not mine:
         return ("nothing to prune: the free slots here belong to another clone of this " +
                 "repository, and are that clone's to collect")
-    return "nothing to prune: no free slot has been idle for %d days" % max_idle_days
+    return "nothing to prune: no free slot has been idle for " + pluralize(max_idle_days, "day")
+
+def _all_kept_message(max_idle_days: int) -> str:
+    """Why nothing was pruned when every eligible free slot was kept, for the
+    reasons already reported. The limit is named only above 0: at 0 or less
+    every free slot was eligible, whatever its age."""
+    idle = (" that has been idle for " + pluralize(max_idle_days, "day")) if max_idle_days > 0 else ""
+    return "nothing to prune: every free slot" + idle + " was kept, for the reasons above"
 
 def _slot_on_disk(ctx: TaskContext, asked: str) -> list:
     """The pool and slot id `asked` names, searched across every pool on this
@@ -4732,8 +4739,7 @@ def _prune_impl(ctx: TaskContext) -> int | TaskConclusion:
             max_idle_days,
         ))
     elif not victims:
-        idle = (" that has been idle for %d days" % max_idle_days) if max_idle_days else ""
-        _info(ctx.std, "nothing to prune: every free slot" + idle + " was kept, for the reasons above")
+        _info(ctx.std, _all_kept_message(max_idle_days))
     elif declined:
         _info(ctx.std, "left alone; nothing was deleted")
     elif verdict == confirm.SKIP:
@@ -5503,6 +5509,7 @@ testonly_list_order = _list_order
 testonly_materialize = _materialize
 testonly_remote_branches = _remote_branches
 testonly_nothing_to_prune = _nothing_to_prune_message
+testonly_all_kept = _all_kept_message
 testonly_being_set_up = _being_set_up_message
 testonly_nothing_to_release = _nothing_to_release_message
 testonly_resolve_slot = _resolve_slot

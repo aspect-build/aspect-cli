@@ -55,11 +55,6 @@ _MAX_SLOTS = 8
 _ABANDONED_GRACE_HOURS = 24
 
 _WorktreePoolSettings = trait(
-    max_idle_days = attr(
-        int,
-        default = PRUNE_IDLE_DAYS,
-        description = "Set from `WorktreePool`'s `max_idle_days` option.",
-    ),
     abandoned_grace_hours = attr(
         int,
         default = _ABANDONED_GRACE_HOURS,
@@ -70,13 +65,18 @@ _WorktreePoolSettings = trait(
         default = _MAX_SLOTS,
         description = "Set from `WorktreePool`'s `max_slots` option.",
     ),
+    max_idle_days = attr(
+        int,
+        default = PRUNE_IDLE_DAYS,
+        description = "Set from `WorktreePool`'s `max_idle_days` option.",
+    ),
 )
 
 def _worktree_pool_impl(ctx: FeatureContext):
     settings = ctx.traits[_WorktreePoolSettings]
-    settings.max_idle_days = ctx.args.max_idle_days
     settings.max_slots = ctx.args.max_slots
     settings.abandoned_grace_hours = ctx.args.abandoned_grace_hours
+    settings.max_idle_days = ctx.args.max_idle_days
 
 WorktreePool = feature(
     display_name = "Worktree pool",
@@ -101,9 +101,9 @@ WorktreePool = feature(
 # The worktree tasks' view of the `WorktreePool` options, read through the
 # accessors.
 worktree_pool = struct(
-    max_idle_days = lambda ctx: ctx.traits[_WorktreePoolSettings].max_idle_days,
     max_slots = lambda ctx: ctx.traits[_WorktreePoolSettings].max_slots,
     abandoned_grace_hours = lambda ctx: ctx.traits[_WorktreePoolSettings].abandoned_grace_hours,
+    max_idle_days = lambda ctx: ctx.traits[_WorktreePoolSettings].max_idle_days,
 )
 
 def _pool_options_for_test(ctx: TaskContext, **options) -> typing.Callable[[], None]:
