@@ -483,6 +483,9 @@ def _hold(state: dict, task_ctx, screen, countdown_ms):
             break
     screen.interrupts(False)
     deadline = int(monotonic() * 1000) + countdown_ms if countdown_ms else None
+
+    # A key a burst fetched past its last, for the next turn.
+    carried = None
     for _ in range(1 << 30):
         if task_ctx.cancellation.root.cancelled or not screen.held:
             return
@@ -497,7 +500,8 @@ def _hold(state: dict, task_ctx, screen, countdown_ms):
         # Idle, a key a second; a frame that moves, or the countdown, ten.
         # Each wait is the screen held for its reader, which the task's
         # duration leaves out.
-        key = screen.key(timeout_ms = _BUSY_MS if changed or deadline != None else _IDLE_MS, reading = True)
+        key = carried if carried != None else screen.key(timeout_ms = _BUSY_MS if changed or deadline != None else _IDLE_MS, reading = True)
+        carried = None
         if key == "ctrl-c":
             return
         if key != None and deadline != None and key.startswith("mouse-move:"):
@@ -522,6 +526,10 @@ def _hold(state: dict, task_ctx, screen, countdown_ms):
                     break
             if key == "ctrl-c":
                 return
+            carried = key
+
+# For the tests: `_hold` with a fake screen.
+testonly_hold = _hold
 
 def _post(state: dict, task_ctx, outcome):
     screen = state["screen"]

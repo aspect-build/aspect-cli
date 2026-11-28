@@ -15,7 +15,7 @@ load("@aspect//feature/dashboard/pointer.axl", "dashboard_pointer")
 load("@aspect//feature/dashboard/render.axl", "dashboard_render")
 load("@aspect//feature/dashboard/testing.axl", "dashboard_testing")
 load("@aspect//feature/dashboard/view.axl", "dashboard_view")
-load("@aspect//feature/dashboard.axl", "end_build", "fold_build", "frame", "new_build", "new_state", "refusal")
+load("@aspect//feature/dashboard.axl", "end_build", "fold_build", "frame", "new_build", "new_state", "refusal", "testonly_hold")
 load("@std//theme.axl", "theme")
 load("../private/lib/failure_records.axl", "failure_records")
 load("../private/lib/failures.axl", "failures")
@@ -244,6 +244,31 @@ def _frame_order(ctx):
         frame(st, None, build)
         _eq("arrival order, %s" % name, [l for l in st["log"] if l in want], want)
         _eq("drawn once, %s" % name, len(written), 1)
+
+def _hold_burst(ctx):
+    """The finished screen takes a burst of keys `_MAX_KEYS` (512) at a
+    time, and a key fetched past a burst's last is the next turn's first,
+    never dropped: 512 keys then Ctrl+C leave, and a 513th key is applied
+    before the Ctrl+C after it. Every wait for a key is `reading`."""
+    for name, after, zoomed in [("512 keys then Ctrl+C", ["ctrl-c"], False), ("a 513th key", ["z", "ctrl-c"], True)]:
+        keys = ["j"] * 512 + after
+        waits = []
+        first = [True]
+
+        def key(timeout_ms = 0, reading = False):
+            if timeout_ms:
+                waits.append(reading)
+            if first[0]:
+                # The drain of keys typed while the build finished.
+                first[0] = False
+                return None
+            return keys.pop(0) if keys else "ctrl-c"
+
+        screen = struct(key = key, interrupts = lambda on: None, held = True, size = lambda: (100, 30), write = lambda frame: None, output = lambda: [])
+        st = _screen(ctx, ["x"] * 50, building = False, ended = True)
+        testonly_hold(st, struct(cancellation = struct(root = struct(cancelled = False))), screen, 0)
+        _eq("%s: every key taken, the zoom" % name, (keys, bool(st.get("zoom"))), ([], zoomed))
+        _eq("%s: each wait reading" % name, all(waits) and len(waits) > 0, True)
 
 def _headed(block):
     """A kept block, its `ERROR:` header read as the collector reads one
@@ -2825,6 +2850,7 @@ def _impl(ctx: TaskContext) -> int:
     _interrupted_mark(ctx)
     _narrow_failure_rows(ctx)
     _frame_order(ctx)
+    _hold_burst(ctx)
     print("dashboard_test.axl: OK")
     return 0
 
