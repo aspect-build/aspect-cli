@@ -601,7 +601,10 @@ def action_split(state: dict) -> dict:
         left = in_total - from_internal
         other = 0
         if not logged:
-            # The failed actions under a runner come out of its spawns.
+            # The failed actions under a runner come out of its spawns;
+            # what of the spawned actions no runner has is other. Those
+            # taken from internal were never among them.
+            taken = left
             for key in ("ran", "disk", "remote"):
                 have = {"ran": ran, "disk": disk, "remote": remote}[key]
                 took = min(left, have)
@@ -612,7 +615,7 @@ def action_split(state: dict) -> dict:
                     disk -= took
                 else:
                     remote -= took
-            other = max(0, spawned - from_internal - (in_total - from_internal - left) - ran - disk - remote)
+            other = max(0, spawned - (taken - left) - ran - disk - remote)
         whole = ran + local + disk + remote + internal + failed + other
         succeeded = _build_succeeded(inv)
         split.update(counted = True, known = True, final = True, ran = ran, local = local, disk = disk, remote = remote, internal = internal, failed = failed, skipped = max(0, done - whole), other = other, more = False, failed_build = not succeeded)

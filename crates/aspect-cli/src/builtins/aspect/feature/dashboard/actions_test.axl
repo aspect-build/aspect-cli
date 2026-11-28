@@ -311,6 +311,28 @@ def _actions_tests(ctx):
     ]:
         _eq("real: " + name, _split_of(action_split(_real(ctx, name))), want)
 
+    # Runners that account for fewer spawned actions than were executed (5
+    # of the 7 not internal) and a failed action Bazel counts among its
+    # internal ones, as it counts a failed genrule (`keep_going` above): the
+    # 2 no runner has are other, the failure comes out of internal alone,
+    # since the spawned actions (executed less internal) never held it.
+    short = _screen(ctx, ["x"], building = False, ended = True, done_total = (10, 10, False), inv = {
+        "build_finished": _FAILURE,
+        "build_metrics": struct(action_summary = struct(
+            actions_executed = 10,
+            runner_count = [struct(name = "total", count = 10), struct(name = "internal", count = 3), struct(name = "darwin-sandbox", count = 5)],
+            action_cache_statistics = struct(hits = 0, misses = 10),
+        )),
+    })
+    _fail_event(short, "Genrule:spawn", 0)
+    _eq("runners short, a failure counted internal", _split_of(action_split(short)), dict(done = 10, total = 10, ran = 5, internal = 2, failed = 1, other = 2))
+
+    # The same failure, its outputs not created, counted under its runner:
+    # it comes out of what ran, and the other 2 stay.
+    unmade = _screen(ctx, ["x"], building = False, ended = True, done_total = (10, 10, False), inv = short["inv"])
+    _fail_event(unmade, "Genrule:execution", 0)
+    _eq("runners short, a failure counted under its runner", _split_of(action_split(unmade)), dict(done = 10, total = 10, ran = 4, internal = 3, failed = 1, other = 2))
+
     # The remainder's words follow the build's outcome: a passing warm
     # rebuild's are up to date (Bazel 9.3.3, `[4 / 4]`: one ran, one
     # action cache hit, one internal, one counted done alone), a build that
@@ -817,6 +839,7 @@ def _actions_tests(ctx):
     _eq("the newest build's bar", bar_of(two).endswith("8,563 actions · 8,000 cache hits (93%)") or bar_of(two).endswith("cache hits (93%)"), True)
     two["picked_build"] = 0
     _eq("the picked build's", bar_of(two).endswith("2 actions · 0 cache hits (0%)"), True)
+
 
     # Every row of the screen as wide as it, from 40 to 200 columns, while
     # the build runs and at its end.

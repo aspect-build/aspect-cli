@@ -109,7 +109,7 @@ says what changes without them.
 | `remote` | `▓` | The same for a remote cache (a remote executor's cached result too); without the log, every other `… cache hit` runner | The log's |
 | `up to date` or `skipped` | `○` | N less every other part | Not shown |
 | `internal` | `░` | `runner_count`'s `internal`, less the failed actions Bazel counted there | Successful actions with no command line |
-| `other` | `▌` | Without the log: executed actions with a spawn that no runner accounts for. Rare | Not shown |
+| `other` | `▌` | Without the log: the executed actions that are not internal and that no runner accounts for. Rare | Not shown |
 | `unreported` | `?` (`┈` on the bar) | Not shown | Done, but no event or log entry has said how yet |
 | `running`, `pending` | `─` | Not shown | What runs now (`running_count`, at most what is not done) and the rest of the total |
 | `done` | `━` | Not shown | The whole done count, with an execution log of your own |
