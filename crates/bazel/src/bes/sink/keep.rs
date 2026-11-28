@@ -29,6 +29,12 @@
 //! testlogs.json
 //! ```
 //!
+//! Each action entry names the build attempt it came in (`build_attempt`),
+//! and `actions.json` how many there were (`build_attempts`): a build Bazel
+//! restarted in place lists every attempt's. A failed action that wrote
+//! nothing is listed too, with no stream, so a build's failures match the
+//! index one for one.
+//!
 //! A failure to keep one file is counted in the index and never fails the
 //! build.
 

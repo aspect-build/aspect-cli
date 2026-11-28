@@ -502,15 +502,38 @@ impl History {
     /// case, or the only one whose ID starts with it, or whose entry's
     /// folder is named `id`.
     pub fn record(&self, id: &str) -> Option<(PathBuf, TaskRecord)> {
-        let dir = self
-            .earlier_run(id)
+        let dir = self.entry_of(id)?;
+        let record = task_record::read(&dir.join(task_record::FILE_NAME))?;
+        Some((dir, record))
+    }
+
+    /// The entry of the run `id` names (as [`record`](Self::record) finds
+    /// it) when a newer CLI wrote its record, of a schema this one cannot
+    /// read: its folder and the version that wrote it ("" when the record
+    /// does not say).
+    pub fn newer_record(&self, id: &str) -> Option<(PathBuf, String)> {
+        let dir = self.entry_of(id)?;
+        let bytes = fs::read(dir.join(task_record::FILE_NAME)).ok()?;
+        let value = serde_json::from_slice::<serde_json::Value>(&bytes).ok()?;
+        let schema = value.get("schema").and_then(|s| s.as_u64())?;
+        (schema > task_record::SCHEMA as u64).then(|| {
+            let version = value
+                .get("cli_version")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            (dir, version.to_owned())
+        })
+    }
+
+    /// The entry's folder for the run `id` names: its task ID ignoring
+    /// ASCII case, the folder's own name, or the only ID starting with it.
+    fn entry_of(&self, id: &str) -> Option<PathBuf> {
+        self.earlier_run(id)
             .or_else(|| {
                 let dir = self.root.join(id);
                 is_invocation_name(id.as_ref()).then_some(dir)
             })
-            .or_else(|| self.only_run_starting(id))?;
-        let record = task_record::read(&dir.join(task_record::FILE_NAME))?;
-        Some((dir, record))
+            .or_else(|| self.only_run_starting(id))
     }
 
     /// The values the task's secret flags were given on its command line.
@@ -1362,6 +1385,27 @@ mod tests {
             .unwrap();
         let scan = h.scan();
         assert_eq!((scan.records.len(), scan.without_record), (1, 0));
+    }
+
+    /// A record a newer CLI wrote is found by its ID as that, with the
+    /// version that wrote it, though `record` cannot read it.
+    #[test]
+    fn a_newer_record_is_found_as_that() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join(name(5));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join(task_record::FILE_NAME),
+            format!(
+                r#"{{"schema": {}, "cli_version": "2099.1.0", "status": 7}}"#,
+                task_record::SCHEMA + 1
+            ),
+        )
+        .unwrap();
+        let h = history(root.path(), 1 << 30, 10);
+        assert!(h.record(&id(5)).is_none());
+        assert_eq!(h.newer_record(&id(5)), Some((dir, "2099.1.0".to_owned())));
+        assert!(h.newer_record(&id(6)).is_none());
     }
 
     /// A run that keeps no history makes nothing in it, a build's included.

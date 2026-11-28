@@ -311,10 +311,7 @@ pub(crate) fn env_methods(registry: &mut MethodsBuilder) {
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<bool> {
         let env = RuntimeEnv::from_eval(eval)?;
-        Ok(
-            crate::project_root::find_bazel_root(&env.bazel_root_dir).as_ref()
-                == Some(&env.bazel_root_dir),
-        )
+        Ok(is_workspace_root(&env.bazel_root_dir))
     }
 
     /// Returns the operating system name.
@@ -337,5 +334,35 @@ pub(crate) fn env_methods(registry: &mut MethodsBuilder) {
         _heap: Heap<'v>,
     ) -> anyhow::Result<&'v str> {
         Ok(std::env::consts::ARCH)
+    }
+}
+
+/// Whether `dir` is a workspace's root: a Bazel marker (`MODULE.bazel`,
+/// `WORKSPACE`, ...) or, with none above it, an Aspect one (`MODULE.aspect`,
+/// `.aspect/version.axl`) found there, as `bazel_root_dir()` finds the root it
+/// gives; outside any workspace that is only the current directory.
+fn is_workspace_root(dir: &std::path::Path) -> bool {
+    crate::project_root::find_bazel_root(dir).as_deref() == Some(dir)
+}
+
+#[cfg(test)]
+mod tests {
+    /// A folder holding a Bazel or an Aspect marker is a workspace's root;
+    /// one under it, and one with neither, is not.
+    #[test]
+    fn a_workspace_root_has_a_marker() {
+        let root = tempfile::tempdir().unwrap();
+        let bazel = root.path().join("bazel");
+        let aspect = root.path().join("aspect");
+        let bare = root.path().join("bare");
+        for dir in [&bazel, &aspect, &bare] {
+            std::fs::create_dir_all(dir.join("sub")).unwrap();
+        }
+        std::fs::write(bazel.join("MODULE.bazel"), "").unwrap();
+        std::fs::write(aspect.join("MODULE.aspect"), "").unwrap();
+        assert!(super::is_workspace_root(&bazel));
+        assert!(super::is_workspace_root(&aspect));
+        assert!(!super::is_workspace_root(&bazel.join("sub")));
+        assert!(!super::is_workspace_root(&bare.join("sub")));
     }
 }

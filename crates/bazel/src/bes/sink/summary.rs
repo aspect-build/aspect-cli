@@ -8,11 +8,11 @@
 //! `TargetCompleted` id (under a `ConfiguredLabel` or `UnconfiguredLabel` id
 //! it names a root cause, a dependency, not a target asked for); any other
 //! abort reason skips it. An aspect's completion is not a target. A flaky
-//! test passed. A failure is a failed action (Bazel reports every one), a
-//! test attempt that did not pass, or a failed target neither explains; the
-//! first [`MAX_FAILURES`] are listed, the rest counted. A retry of the build
-//! in one stream starts again at its `Started`, so the summary is the last
-//! attempt's.
+//! test passed, its failed attempts marked `flaky`. A failure is a failed
+//! action (Bazel reports every one), a test attempt that did not pass, or a
+//! failed target neither explains; the first [`MAX_FAILURES`] are listed, the
+//! rest counted. A retry of the build in one stream starts again at its
+//! `Started`, so the summary is the last attempt's.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -64,6 +64,10 @@ pub struct Failure {
     /// the history once its indexes are written.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub logs: Vec<String>,
+    /// A failed attempt of a test that passed on a later one (its summary
+    /// `FLAKY`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub flaky: bool,
 }
 
 /// The test statuses that are failures; `no_status`, `incomplete` and the
@@ -162,6 +166,15 @@ impl Tally {
                     Ok(TestStatus::Flaky) => {
                         self.summary.tests_passed += 1;
                         self.summary.tests_flaky += 1;
+                        let label = event.id.as_ref().and_then(|id| match &id.id {
+                            Some(Id::TestSummary(id)) => Some(id.label.as_str()),
+                            _ => None,
+                        });
+                        for f in &mut self.summary.failures {
+                            if f.kind == "test" && Some(f.label.as_str()) == label {
+                                f.flaky = true;
+                            }
+                        }
                     }
                     Ok(status) if FAILED_TESTS.contains(&status) => {
                         self.summary.tests_failed += 1;
@@ -217,6 +230,7 @@ impl Tally {
             detail,
             attempt,
             logs: vec![],
+            flaky: false,
         });
     }
 
@@ -240,6 +254,7 @@ impl Tally {
                     detail: String::new(),
                     attempt: None,
                     logs: vec![],
+                    flaky: false,
                 });
             }
         }
@@ -456,6 +471,25 @@ mod tests {
             ]
         );
         assert_eq!(s.failures[2].attempt, Some((1, 1, 1)));
+    }
+
+    /// A test whose summary is flaky marks its failed attempts so, and no
+    /// other test's.
+    #[test]
+    fn a_flaky_tests_failed_attempts_are_marked() {
+        let s = summarize(&[
+            test_result("//t:flaky", 1, 1, 1, TestStatus::Failed),
+            test_result("//t:fail", 1, 1, 1, TestStatus::Failed),
+            test_result("//t:flaky", 1, 1, 2, TestStatus::Passed),
+            test_summary("//t:flaky", TestStatus::Flaky),
+            test_summary("//t:fail", TestStatus::Failed),
+        ]);
+        let got: Vec<(&str, bool)> = s
+            .failures
+            .iter()
+            .map(|f| (f.label.as_str(), f.flaky))
+            .collect();
+        assert_eq!(got, [("//t:flaky", true), ("//t:fail", false)]);
     }
 
     #[test]

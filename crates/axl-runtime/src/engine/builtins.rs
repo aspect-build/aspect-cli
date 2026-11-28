@@ -570,16 +570,22 @@ fn builtins_time_methods(registry: &mut MethodsBuilder) {
     /// ```
     fn local_offset_s(this: Value<'_>, #[starlark(require = pos)] ms: i64) -> anyhow::Result<i64> {
         let _ = this;
-        use chrono::{Offset, TimeZone};
-        Ok(chrono::DateTime::from_timestamp_millis(ms)
-            .map(|t| {
-                chrono::Local
-                    .offset_from_utc_datetime(&t.naive_utc())
-                    .fix()
-                    .local_minus_utc() as i64
-            })
-            .unwrap_or(0))
+        Ok(local_offset_at(ms))
     }
+}
+
+/// How far the local time zone was ahead of UTC at `ms` (milliseconds since
+/// 1970), in seconds; 0 for a time chrono cannot place.
+fn local_offset_at(ms: i64) -> i64 {
+    use chrono::{Offset, TimeZone};
+    chrono::DateTime::from_timestamp_millis(ms)
+        .map(|t| {
+            chrono::Local
+                .offset_from_utc_datetime(&t.naive_utc())
+                .fix()
+                .local_minus_utc() as i64
+        })
+        .unwrap_or(0)
 }
 
 #[starlark_module]
@@ -730,6 +736,24 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
 #[cfg(test)]
 mod tests {
     use crate::axl_eval;
+
+    /// The local offset is a whole number of quarter hours within a day,
+    /// `local_offset_s` gives it, and a time chrono cannot place is 0.
+    #[test]
+    fn local_offset_is_the_zones_and_zero_out_of_range() {
+        let now = 1_795_000_000_000;
+        let offset = super::local_offset_at(now);
+        assert!(offset.abs() <= 14 * 3600 && offset % 900 == 0, "{offset}");
+        assert_eq!(super::local_offset_at(i64::MAX), 0);
+        let got = axl_eval!(&format!(
+            r#"
+load("@std//time.axl", "local_offset_s")
+local_offset_s({now})
+"#
+        ))
+        .unwrap();
+        assert_eq!(got, offset.to_string());
+    }
 
     #[test]
     fn sleep_returns_none() {

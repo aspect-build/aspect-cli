@@ -10,7 +10,8 @@
 //! kept, for `bazel.build_events.read`; and, for a run whose record says
 //! `running`, `status` set to `abandoned` once its process is no longer
 //! running (gone, or silent for a week), as after a crash. Records of a newer
-//! schema are skipped.
+//! schema are skipped by `list`; `get` gives one as only its folder, the
+//! version that wrote it and `newer`.
 
 use allocative::Allocative;
 use derive_more::Display;
@@ -46,10 +47,19 @@ impl<'v> StarlarkValue<'v> for History {
 
 starlark_simple_value!(History);
 
+/// Whether `folder`, a build's folder as a record names it, is a path inside
+/// its entry: plain names only, none empty, absolute, `.` or `..`.
+fn within_entry(folder: &str) -> bool {
+    folder
+        .split(['/', '\\'])
+        .all(|name| !name.is_empty() && name != "." && name != "..")
+}
+
 /// A record as handed out: redacted, with its folder (`dir`), how it ended
 /// (`outcome`, from `abandoned`, which the caller reads once per record so
 /// the two agree), a `running` one whose process is gone marked `abandoned`,
-/// and each build's kept stream (`build_events`) where its folder has one.
+/// and each build's kept stream (`build_events`) where its folder has one; a
+/// build folder that would leave the entry (`within_entry`) is not looked in.
 fn shown(dir: &std::path::Path, record: &TaskRecord, abandoned: bool) -> serde_json::Value {
     let mut value = serde_json::to_value(record.redacted()).unwrap_or_default();
     value["dir"] = dir.to_string_lossy().into_owned().into();
@@ -64,6 +74,7 @@ fn shown(dir: &std::path::Path, record: &TaskRecord, abandoned: bool) -> serde_j
             let file = kept
                 .folder
                 .as_ref()
+                .filter(|f| within_entry(f))
                 .map(|f| dir.join(f).join(bazel::bes::binary_file::FILE_NAME))
                 .filter(|f| f.is_file());
             if let Some(file) = file {
@@ -279,17 +290,27 @@ fn history_methods(registry: &mut MethodsBuilder) {
     }
 
     /// The record of the run with task ID `id` (or whose entry's folder is
-    /// named `id`), as `list` gives it; None when it is not kept.
+    /// named `id`), as `list` gives it; None when it is not kept. A record a
+    /// newer CLI wrote, of a schema this one cannot read, is a dict of only
+    /// `dir`, `cli_version` (the version that wrote it, "" when unknown) and
+    /// `newer` (True).
     fn get<'v>(
         #[allow(unused)] this: values::Value<'v>,
         #[starlark(require = pos)] id: &str,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneOr<Value<'v>>> {
         let history = RuntimeEnv::from_eval(eval)?.history.clone();
-        Ok(NoneOr::from_option(history.record(id).map(
-            |(dir, record)| {
-                let gone = abandoned(&dir, &record);
-                eval.heap().alloc(shown(&dir, &record, gone))
+        if let Some((dir, record)) = history.record(id) {
+            let gone = abandoned(&dir, &record);
+            return Ok(NoneOr::Other(eval.heap().alloc(shown(&dir, &record, gone))));
+        }
+        Ok(NoneOr::from_option(history.newer_record(id).map(
+            |(dir, version)| {
+                eval.heap().alloc(serde_json::json!({
+                    "dir": dir.to_string_lossy(),
+                    "cli_version": version,
+                    "newer": true,
+                }))
             },
         )))
     }
@@ -309,6 +330,40 @@ fn history_methods(registry: &mut MethodsBuilder) {
 
 #[cfg(test)]
 mod tests {
+    /// A build's folder is looked in only where it is a path inside its
+    /// entry: a record naming `../<another entry>/bazel/1` replays nothing.
+    #[test]
+    fn a_build_folder_outside_its_entry_is_not_looked_in() {
+        for folder in ["bazel/1", "bazel"] {
+            assert!(super::within_entry(folder), "{folder}");
+        }
+        for folder in [
+            "",
+            "/abs/bazel/1",
+            "../other/bazel/1",
+            "bazel/../../x",
+            "./bazel/1",
+            "bazel/./1",
+        ] {
+            assert!(!super::within_entry(folder), "{folder:?}");
+        }
+        let root = tempfile::tempdir().unwrap();
+        let entry = root.path().join("entry");
+        let other = root.path().join("other/bazel/1");
+        std::fs::create_dir_all(&entry).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(other.join(bazel::bes::binary_file::FILE_NAME), b"").unwrap();
+        let record = crate::engine::task_record::TaskRecord {
+            bazel: vec![crate::engine::task_record::BazelRecord {
+                folder: Some("../other/bazel/1".into()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let shown = super::shown(&entry, &record, false);
+        assert!(shown["bazel"][0].get("build_events").is_none(), "{shown}");
+    }
+
     /// A long output is read from its first whole line in the limit, a line
     /// that starts right at the cut included, with how much came before.
     #[test]

@@ -1127,6 +1127,7 @@ mod tests {
                         detail: "Genrule".into(),
                         attempt: None,
                         logs: s(&["bazel/2/actions/a.stderr", "bazel/1/gone.stderr"]),
+                        flaky: false,
                     }],
                     ..Default::default()
                 }),
@@ -1194,6 +1195,7 @@ mod tests {
                         detail: "Genrule".into(),
                         attempt: None,
                         logs: s(&["bazel/1/actions/a.stderr"]),
+                        flaky: false,
                     }],
                     ..Default::default()
                 }),
@@ -1240,6 +1242,7 @@ mod tests {
                 detail: detail.into(),
                 attempt,
                 logs: vec![],
+                flaky: false,
             };
         let mut summary = Summary {
             failures: vec![
@@ -1296,6 +1299,7 @@ mod tests {
                 detail: detail.into(),
                 attempt,
                 logs: vec![],
+                flaky: false,
             };
         let mut summary = Summary {
             failures: vec![
@@ -1336,6 +1340,7 @@ mod tests {
             detail: "CppCompile".into(),
             attempt: None,
             logs: vec![],
+            flaky: false,
         };
         let mut summary = Summary {
             failures: vec![failure(), failure()],
@@ -1374,6 +1379,7 @@ mod tests {
                 detail: "Genrule".into(),
                 attempt: None,
                 logs: vec![],
+                flaky: false,
             }],
             ..Default::default()
         };

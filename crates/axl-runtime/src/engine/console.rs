@@ -26,12 +26,18 @@ use super::template::json_to_minijinja;
 
 /// The built-in tasks with a preset of their own, by command path, as if
 /// `task_presets` named them: `aspect history browse` is its full screen
-/// alone, with no header or verdict around it. A `task_presets` entry for
+/// alone, and `aspect history list` and `show` print only what they show
+/// (for a script to read), with no header or verdict around either. A
+/// `task_presets` entry for
 /// the task, by its command path or its kind, replaces one; a
 /// `task_templates` entry's slots beat it, as they beat any task's preset.
 /// Here rather than as the `Console` arg's default, which an `args.custom`
 /// dict cannot have.
-const BUILTIN_TASK_PRESETS: &[(&str, &str)] = &[("history browse", "silent")];
+const BUILTIN_TASK_PRESETS: &[(&str, &str)] = &[
+    ("history browse", "silent"),
+    ("history list", "silent"),
+    ("history show", "silent"),
+];
 
 /// Resolve the surface for `task` on `host` from the `Console` feature's
 /// merged `args`.
@@ -407,6 +413,15 @@ args = {{"templates": templates, "task_presets": task_presets, "task_templates":
             ""
         );
         assert_ne!(at(r#"task_presets = {"browse": "full"}"#, Slot::Header), "");
+        for (kind, path) in [("list", "history list"), ("show", "history show")] {
+            let task = TaskIdentity {
+                kind: kind.into(),
+                group: vec!["history".into()],
+                name: kind.into(),
+                path: path.into(),
+            };
+            assert_eq!(render_as("", Slot::Verdict, &task).unwrap(), "", "{path}");
+        }
         assert_ne!(
             render(r#"task_presets = {"lint": "full"}"#, Slot::Header).unwrap(),
             "",
