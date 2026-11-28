@@ -85,7 +85,7 @@ _link_at = dashboard_pointer.link_at
 _link_marks = dashboard_pointer.link_marks
 _link_spans = dashboard_pointer.link_spans
 _selection_rows = dashboard_pointer.selection_rows
-_fit_labels = dashboard_keys.fit_labels
+_fit_ranked = dashboard_keys.fit_ranked
 _help_rows = dashboard_keys.help_rows
 _keys_row = dashboard_keys.keys_row
 _box_title = dashboard_history.box_title
@@ -103,6 +103,7 @@ _live_words = dashboard_history.live_words
 _page_rows = dashboard_history.page_rows
 _past_header = dashboard_history.past_header
 _past_note = dashboard_history.past_note
+_past_running = dashboard_history.past_running
 _table_rows = dashboard_history.table_rows
 _warned = dashboard_history.warned
 
@@ -347,7 +348,9 @@ def _header(state: dict, cols: int, bar: bool) -> str:
     history's colours (`history_bar`), the mode first so it never passes
     for the live one, and the live build's state on the right, in words."""
     if state.get("past") != None:
-        shown = "" if (state.get("browser") or {}).get("standalone") else _live_words(state)
+        # The live build's state beside it where the screen has room for
+        # both; a narrower one keeps the past run's whole.
+        shown = "" if (state.get("browser") or {}).get("standalone") or cols < 80 else _live_words(state)
         title = _past_header(state, cols - (_text_width(shown) + 2 if shown else 0))
         title = _fit(title, min(_text_width(title), cols)).rstrip(" ")
         if _text_width(title) < cols:
@@ -453,18 +456,22 @@ def _top(state: dict, cols: int, rows: int) -> list:
         actions = _slowest_rows(state)
     past = state.get("past") != None
     past_links = {}
+    running_note = _past_running(state) if past else ""
     if past:
-        # The history keeps the build's profile, not a replay of its timings.
-        actions = ["Action timings aren't replayed for past runs"]
-        profile = state.get("profile_path", "")
+        # The history keeps the build's profile, not a replay of its
+        # timings: the note wrapped, the profile's path cut from its left so
+        # its file's name shows, linked whole. One still running elsewhere
+        # has neither yet.
+        inner = max(1, cols - _results_width(cols) - 4)
+        actions = [running_note] if running_note else [piece for piece, _ in _wrap_line("Action timings aren't replayed for past runs", inner)]
+        profile = "" if running_note else state.get("profile_path", "")
         if profile:
-            # Cut in its middle, so its file's name shows; linked whole.
-            lead = "Bazel's profile: "
-            shown = _middle(profile, max(1, cols - _results_width(cols) - 4 - len(lead))).rstrip(" ")
-            actions.append(lead + shown)
+            actions.append("Bazel's profile:")
+            shown = profile if _text_width(profile) <= inner else "…" + _tail(profile, inner - 1)
             url = _editor_link(state, profile)
             if url != None:
-                past_links[1] = [[len(lead), len(lead) + len(shown), url]]
+                past_links[len(actions)] = [[0, len(shown), url]]
+            actions.append(shown)
     right_w = _results_width(cols)
     left_w = cols - right_w
     c = state["counts"]
@@ -506,6 +513,9 @@ def _top(state: dict, cols: int, rows: int) -> list:
         else:
             # Too narrow for one row: running on one, pending under it.
             tests_rows = [indent + part for part in tests_now.split(" · ")]
+    if running_note:
+        # Its counts are not in yet.
+        summary = [running_note]
     if state.get("stream_cut"):
         # A past run's kept events stopped short: its counts are partial.
         summary.append(_c("warning") + _CUT_STREAM + _RESET)
@@ -908,7 +918,7 @@ def render_history(state: dict, cols: int, rows: int) -> str:
     top = max(0, min(top, max(0, len(rows_shown) - height)))
     b["top"] = top
     out = [_history_bar() + _fit(_history_header(state), cols) + _RESET]
-    out.append(_box_top("Keys" if state.get("help") else _box_title(state), cols))
+    out.append(_box_top("Keys" if state.get("help") else _box_title(state, cols - 5), cols))
     w = cols - 4
     body = []
     if state.get("help"):
@@ -948,7 +958,7 @@ def render_history(state: dict, cols: int, rows: int) -> str:
 def _history_keys_row(state: dict, cols: int) -> str:
     """The History screen's keys row, `cols` wide: what a first Ctrl+C or
     the last key said, or the overlay's own keys, else its labels as many
-    as fit (`fit_labels`)."""
+    as fit, the least wanted dropped first (`fit_ranked`)."""
     said = state.get("note") if state.get("note") and (state.get("note_until") == None or _clock(state) < state["note_until"]) else ""
     if _ctrl_c_note(state):
         return _warned(_fit(" " + _ctrl_c_note(state), cols))
@@ -956,7 +966,7 @@ def _history_keys_row(state: dict, cols: int) -> str:
         return _fit(" ↑↓ scroll · any other key closes", cols)
     if said:
         return _fit(" " + said, cols)
-    return _fit_labels(_history_keys_labels(state), cols)
+    return _fit_ranked(_history_keys_labels(state), cols)
 
 # A heading in the Metrics and Invocation tabs.
 

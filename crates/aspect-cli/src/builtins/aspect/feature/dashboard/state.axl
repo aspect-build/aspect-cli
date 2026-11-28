@@ -286,6 +286,7 @@ _UI_KEYS = {k: True for k in list(new_ui().keys()) + [
     "note_until",
     "holding",
     "ctrl_c_ms",
+    "q_ms",
     "leave_on_return",
 ]}
 

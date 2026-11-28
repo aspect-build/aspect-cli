@@ -83,11 +83,20 @@ _LEAVE_KEYS = ["q", "enter", "esc"]
 # what follows its build.
 _FINISHING = "Finishing…"
 
+# How long a first `q` during a build waits for a second, which cancels it.
+_Q_MS = 2000
+
+def _q_armed(state: dict) -> bool:
+    """Whether a first `q` during a build waits for a second (`_Q_MS`)."""
+    at = state.get("q_ms")
+    return at != None and _clock(state) - at <= _Q_MS
+
 def keys_row(state: dict, cols: int) -> str:
     """The keys row, `cols` wide: what is going on when that is all there is
     to say (cancelling, the live build too while a past run is shown, the
     countdown, the keys overlay open, the task finishing after its build,
-    when no key is read, a first Ctrl+C while browsing), else the keys for
+    when no key is read, a first Ctrl+C while browsing, a first `q` during
+    a build, in the warning colour), else the keys for
     what has focus, the likeliest first, as many as fit before `? keys`; a
     past run's, the way back to the History list."""
     if state["ended"] and state["cancelling"]:
@@ -103,6 +112,10 @@ def keys_row(state: dict, cols: int) -> str:
         return _fit(" ↑↓ scroll · any other key closes", cols)
     if _ctrl_c_note(state):
         return _warned(_fit(" " + _ctrl_c_note(state), cols))
+    if _q_armed(state):
+        # Its shorter form where the whole would be cut.
+        asked = " q again cancels the build · Esc keeps it"
+        return _warned(_fit(asked if _text_width(asked) <= cols else " q again cancels · Esc keeps it", cols), "q again")
     if state.get("note") and (state.get("note_until") == None or _clock(state) < state["note_until"]):
         return _fit(" " + state["note"], cols)
     if state.get("past") != None:
@@ -130,6 +143,19 @@ def fit_labels(parts: list, cols: int) -> str:
         text += " · " + part
     return _fit((text + " · ? keys") if text else " ? keys", cols)
 
+def fit_ranked(parts: list, cols: int) -> str:
+    """A keys row of `parts`, `(label, rank)` in reading order (rank 0 the
+    most wanted), `cols` wide: the least wanted dropped first until the
+    rest and `? keys`, always there, fit; drawn in reading order."""
+    kept = list(parts)
+    for _ in range(len(parts)):
+        if len(kept) <= 1 or _text_width(" " + " · ".join([l for l, _ in kept] + ["? keys"])) <= cols:
+            break
+        worst = max([rank for _, rank in kept])
+        at = [i for i, (_, rank) in enumerate(kept) if rank == worst][0]
+        kept = kept[:at] + kept[at + 1:]
+    return _fit(" " + " · ".join([l for l, _ in kept] + ["? keys"]), cols)
+
 def on_key(state: dict, key: str, page: int) -> bool:
     """Apply a key to the dashboard's state; whether it leaves the finished
     screen. The mouse (`mouse_key`) first, then an `early` entry of `KEYS`
@@ -140,12 +166,18 @@ def on_key(state: dict, key: str, page: int) -> bool:
     key but the arrows and the wheel). Else the first entry of `KEYS` that
     takes the key and applies now; a toggle's entry (`note`) has the keys
     row say, for `_NOTE_MS`, the state it left and how to undo it. Any key
-    clears the last one's note. The History screen takes only its own keys
-    (and the overlay's)."""
+    clears the last one's note, and a first `q` during a build waiting for
+    a second (`_k_leave`): Esc then only that. The History screen takes
+    only its own keys (and the overlay's)."""
 
     if _mouse_key(state, key):
         return False
     _say_note(state, "")
+    if state.get("q_ms") != None and key != "q":
+        armed = _q_armed(state)
+        state["q_ms"] = None
+        if armed and key == "esc":
+            return False
     for k in KEYS:
         if k.early and key in k.keys and k.when(state):
             return k.do(state, key, page)
@@ -508,6 +540,12 @@ def _k_leave(state: dict, key: str, page: int) -> bool:
     if state["ended"]:
         return _leave(state)
     if key == "q" and not state["cancelling"]:
+        # A first `q` asks (`_q_armed`); a second within `_Q_MS` cancels.
+        if not _q_armed(state):
+            state["q_ms"] = _clock(state)
+            return False
+        state["q_ms"] = None
+
         # The run's root token, cancelled once: Bazel gets its own interrupt
         # sequence from it, as for Ctrl+C. A SIGINT to the process group
         # would reach the Bazel client directly too, and count twice.
@@ -719,7 +757,7 @@ KEYS = [
     _key(["ctrl-o"], _always, _k_unfold, help = ("^O", "show the lines under each INFO: From (a successful action's output, folded to a count), and fold every one again"), group = "Screen", note = lambda s: "lines under each INFO: From shown · ^O folds them" if s.get("unfolded") else "lines under each INFO: From folded · ^O shows them"),
     _key(["z"], _always, _k_zoom, help = ("z", "the console fills the screen, and back"), group = "Screen", row = lambda s: ["z " + ("unzoom" if s.get("zoom") else "zoom")], note = lambda s: "console zoomed · z unzooms it" if s.get("zoom") else "console unzoomed · z zooms it"),
     _key(["m"], _always, _k_mouse, help = ("m", "the mouse to the terminal and back"), group = "Screen", note = _mouse_note),
-    _key(["q", "enter"], _always, _k_leave, help = ("q", "cancel the build; once it is done, leave"), group = "Leave", row = _row_leave, shown = lambda s: s.get("past") == None),
+    _key(["q", "enter"], _always, _k_leave, help = ("q", "cancel the build (q twice; Esc keeps it); once it is done, leave"), group = "Leave", row = _row_leave, shown = lambda s: s.get("past") == None),
     _documented("q  Esc", "on a past run: back to the History list", "Leave", shown = lambda s: s.get("past") != None),
     _key(["h"], lambda s: s.get("browser") != None, _k_open_history, help = ("h", "the History list of earlier runs: Enter opens one, f filters them, Esc back"), group = "Leave", row = lambda s: ["h history"] if s.get("browser") != None else []),
 ]
@@ -809,6 +847,7 @@ def row_labels(state: dict) -> list:
 
 dashboard_keys = namespace(
     fit_labels = fit_labels,
+    fit_ranked = fit_ranked,
     help_rows = help_rows,
     testonly_KEYS = KEYS,
     keys_row = keys_row,

@@ -93,6 +93,7 @@ load("./bazel_paths.axl", "last_used", "output_user_root")
 load("./environment.axl", "warn")
 load("./fs_tree.axl", "remove_tree")
 load("./process_info.axl", "alive", "is_same_process", "started_at")
+load("./worktree_layout.axl", _SLOT_PREFIX = "SLOT_PREFIX")
 
 _REGISTRY_VERSION = 1
 
@@ -103,10 +104,9 @@ FREE = "free"
 LEASED = "leased"
 RESERVED = "reserved"
 
-# Slot directory names carry this prefix. Public because `aspect gc` recognises
-# a pool's output bases by the workspace they were built for, which is one of
-# these, and a second copy of the spelling would be free to drift.
-SLOT_PREFIX = "aspect-worktree-"
+# Slot directory names carry this prefix (private/lib/worktree_layout.axl),
+# public here for the pool's own callers.
+SLOT_PREFIX = _SLOT_PREFIX
 
 # Removing a pool worktree always passes `--force` twice. Once overrides a dirty
 # tree; only twice overrides a *lock*, and every leased slot holds one (see

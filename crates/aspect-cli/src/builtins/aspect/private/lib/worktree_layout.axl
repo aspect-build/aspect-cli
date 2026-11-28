@@ -1,0 +1,24 @@
+"""Where `aspect worktree` keeps its slots (private/lib/worktree.axl), as a
+path tells it: `~/.aspect/worktrees/<pool>/aspect-worktree-<id>`, the pool
+keyed by the normalized `origin` remote (`<host>/<org>/<repo>`), and a
+slot's short name (`slot_name`), without loading the pool's own code."""
+
+# Slot directory names carry this prefix. Public because `aspect gc` recognises
+# a pool's output bases by the workspace they were built for, which is one of
+# these, and a second copy of the spelling would be free to drift.
+SLOT_PREFIX = "aspect-worktree-"
+
+# Where the pools live under a home directory.
+_POOLS = "/.aspect/worktrees/"
+
+def slot_name(path: str) -> str | None:
+    """A slot's checkout `path` named by its repository and the start of its
+    id (`aspect-cli·9c1239a4`), as the pool's layout spells it; None for a
+    path that is no slot's."""
+    pools, found, rest = path.rstrip("/").partition(_POOLS)
+    if not found or not pools:
+        return None
+    pool, _, leaf = rest.rpartition("/")
+    if not pool or not leaf.startswith(SLOT_PREFIX) or len(leaf) == len(SLOT_PREFIX):
+        return None
+    return pool.rpartition("/")[2] + "·" + leaf[len(SLOT_PREFIX):][:8]

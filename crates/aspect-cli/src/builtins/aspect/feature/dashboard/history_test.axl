@@ -184,11 +184,14 @@ def _test_screen(ctx):
     screen = _visible(render(state, 120, 20)).replace("\r", "")
     lines = screen.split("\n")
     _eq("the header: the runs kept, the live build in its one form", lines[0].strip(), "aspect history · 7,702 runs kept · live ⠋ 21/35")
-    _eq("the title: what is listed, where, how many", "Runs · builds · this workspace (2)" in lines[1], True)
+    _eq("the title: what is listed, where, how many, the live build's row too", "Runs · builds · this workspace (2 + live)" in lines[1], True)
     live_row = [l for l in lines if "examples:demo" in l][0]
     _eq("the live build's row in the runs' columns, live as its ID", (live_row.strip("│ ").startswith("⠋ 21/35"), live_row.rstrip(" │").endswith("live")), (True, True))
     _eq("builds in this workspace, by default", ("aaaa1111" in screen, "bbbb2222" in screen, "hhhh0000" in screen, "oooo0000" in screen), (True, True, False, False))
-    _eq("the keys, the likeliest first, ? keys kept", lines[-1].strip(), "Enter open · ↑↓ choose · Esc live build · f show: builds · w: this workspace · ? keys")
+    _eq("the keys in reading order, ? keys kept", lines[-1].strip(), "↑↓ choose · Enter open · f show · w where · Esc live · ? keys")
+    _eq("at 80 every key", _visible(render(state, 80, 20)).replace("\r", "").split("\n")[-1].strip(), "↑↓ choose · Enter open · f show · w where · Esc live · ? keys")
+    _eq("at 40 the title drops Runs first", "─ builds · this workspace (2 + live) ─" in _visible(render(state, 40, 20)), True)
+    _eq("at 60 the least wanted go first, f and w kept", _visible(render(state, 60, 20)).replace("\r", "").split("\n")[-1].strip(), "Enter open · f show · w where · Esc live · ? keys")
     _eq("asked for builds here", state["browser"]["history"].asked[-1], (None, True, "/ws"))
     _eq("a row: status, when, time, command, id last", [l for l in lines if "aaaa1111" in l][0].strip("│ ").startswith("✗ exit 1"), True)
     _eq("no aspect before the command", " aspect build" in [l for l in lines if "bbbb2222" in l][0], False)
@@ -217,8 +220,8 @@ def _test_screen(ctx):
     _eq("f says what it shows, and what it shows next", "failed builds · f: all runs" in _visible(render(state, 120, 20)), True)
     say_note(state, "")
     failed = _visible(render(state, 120, 20))
-    _eq("f: failed builds", ("f show: failed builds" in failed, "aaaa1111" in failed, "bbbb2222" in failed, state["browser"]["history"].asked[-1]), (True, True, False, ("failed", True, "/ws")))
-    _eq("its count in the title", "Runs · failed builds · this workspace (1)" in failed, True)
+    _eq("f: failed builds", ("Runs · failed builds" in failed, "aaaa1111" in failed, "bbbb2222" in failed, state["browser"]["history"].asked[-1]), (True, True, False, ("failed", True, "/ws")))
+    _eq("its count in the title", "Runs · failed builds · this workspace (1 + live)" in failed, True)
     on_key(state, "e", 10)
     _eq("e: back to builds, and says so", (state["browser"]["filter"], "builds · e: failed builds only" in _visible(render(state, 120, 20))), ("builds", True))
     on_key(state, "e", 10)
@@ -228,7 +231,7 @@ def _test_screen(ctx):
     _eq("w says whose runs, and how to go back", "every workspace · w: this one" in _visible(render(state, 120, 20)), True)
     say_note(state, "")
     every = _visible(render(state, 120, 20))
-    _eq("f: all runs, w: every workspace", ("hhhh0000" in every, "oooo0000" in every, "w: every workspace" in every, state["browser"]["history"].asked[-1]), (True, True, True, (None, False, None)))
+    _eq("f: all runs, w: every workspace", ("hhhh0000" in every, "oooo0000" in every, "Runs · all runs · every workspace" in every, state["browser"]["history"].asked[-1]), (True, True, True, (None, False, None)))
     other = [l for l in every.split("\n") if "oooo0000" in l][0]
     _eq("every workspace's runs, a workspace column", (" other " in other, " ws " in [l for l in every.split("\n") if "bbbb2222" in l][0]), (True, True))
     on_key(state, "f", 10)
@@ -244,6 +247,7 @@ def _test_screen(ctx):
     shown = _visible(render(state, 120, 20))
     head = shown.split("\n")[0]
     _eq("the header leads with History, the run's glyph after it, the live build on the right", (head.strip().startswith("History · ✔ build //... · ok · 6.3s"), head.rstrip().endswith("live ⠋ 21/35")), (True, True))
+    _eq("too narrow for both, the past run's alone", "live" in _visible(render(state, 60, 20)).split("\n")[0], False)
     _eq("its status bar in the accent's colour too", (_role("status_bar") + _role("accent")) in render(state, 120, 20).split("\n")[0], True)
     _eq("no console kept: no replay", (" replay ─" in shown, "following" in shown), (False, False))
     _eq("its keys: back to the list", ("q history · ? keys" in shown, "Done" in shown, "open in" in shown), (True, False, False))
@@ -262,10 +266,15 @@ def _test_screen(ctx):
     stopped = past_run(state, _record("ssss0000", "cancelled", cancelled = True))
     _eq("a cancelled run, ■", past_header(dict(state, past = stopped["past"])).startswith(" History · ■"), True)
     state["browser"]["now_ms"] = stamp_ms("2026-11-21T15:41:39.143Z")
-    long = past_header(dict(state, past = _record("llll0000", "failed", argv = ["/bin/aspect", "build", "//very/long/package/path:target", "--config=<REDACTED>"] + ["--flag%d" % i for i in range(20)], bazel = [{"patterns": ["//very/long/package/path:target"]}])), 80)
-    _eq("a long command's flags go first, the outcome, time and when kept", ("exit 1 · 6.3s ·" in long, text_width(long) <= 80, "//very/long/package/path:target" in long, "<REDACTED>" in long), (True, True, True, False))
-    tight = past_header(dict(state, past = _record("llll0000", "failed", argv = ["/bin/aspect", "build", "//very/long/package/path:target"], bazel = [{"patterns": ["//very/long/package/path:target"]}])), 62)
-    _eq("then its package shortened in the middle", ("//…/path:target" in tight, text_width(tight) <= 62, tight.rstrip().endswith("exit 1 · 6.3s · 2m ago")), (True, True, True))
+    demo = _record("llll0000", "failed", duration_ms = 3600, argv = ["/bin/aspect", "build", "//examples/dashboard:demo", "--keep_going", "--action_env=X=<REDACTED>"], bazel = [{"patterns": ["//examples/dashboard:demo"]}])
+    at = lambda cols: past_header(dict(state, past = demo), cols).rstrip()
+    _eq("wide: the flags, the outcome, the time and the age", at(120), " History · ✗ build //examples/dashboard:demo --keep_going --action_env=X=<REDACTED> · exit 1 · 3.6s · 2m ago")
+    _eq("then the redacted flag first, marked", at(86), " History · ✗ build //examples/dashboard:demo --keep_going … · exit 1 · 3.6s · 2m ago")
+    _eq("then every flag, still marked", at(80), " History · ✗ build //examples/dashboard:demo … · exit 1 · 3.6s · 2m ago")
+    _eq("at 60: the age then gone before the target is cut", at(60), " History · ✗ build //examples/dashboard:demo · exit 1 · 3.6s")
+    _eq("at 40: the duration too, then the package, never the name", at(40), " History · ✗ build //…:demo · exit 1")
+    for cols in (120, 80, 60, 50, 40, 30):
+        _eq("the header fits %d" % cols, text_width(at(cols)) <= cols, True)
     elsewhere = past_run(state, _record("rrrr0000", "running"))
     _eq("one still running elsewhere, as of when", "running, as of" in past_header(dict(state, past = elsewhere["past"])), True)
     nobuild = past_run(state, _record("nnnn0000", bazel = [], argv = ["/bin/aspect", "worktree", "list"]))
@@ -326,6 +335,23 @@ def _test_screen(ctx):
     state["screen"] = None
     state["holding"] = False
 
+    # From a past run, q goes back to the list, q again back to the live
+    # build, and a third q only asks before it cancels that.
+    asked = []
+    state["cancellation"] = struct(root = struct(cancel = lambda: asked.append(1)))
+    state["live"] = None
+    state["past"] = None
+    state["ended"] = False
+    state["cancelling"] = False
+    state["mode"] = "run"
+    on_key(state, "h", 10)
+    on_key(state, "down", 10)
+    on_key(state, "enter", 10)
+    for _ in range(3):
+        on_key(state, "q", 10)
+    _eq("h, Enter, q, q, q: back on the live build, asked, nothing cancelled", (state["mode"], state.get("past"), len(asked), state["cancelling"], "q again cancels the build · Esc keeps it" in _visible(render(state, 120, 20))), ("run", None, 0, False, True))
+    state["cancellation"] = None
+
     # "all runs" lists as many as it can, though the live run, which has a
     # row of its own, is among the newest.
     many = [_record("live", "running")] + [_record("run" + str(10000 + i)) for i in range(600)]
@@ -334,11 +360,11 @@ def _test_screen(ctx):
     full["browser"]["filter"] = "all runs"
     full["browser"]["records"] = None
     _eq("500 listed, not the live one", (len(history_records(full)), [r for r in full["browser"]["records"] if r["task"]["id"] == "live"]), (500, []))
-    _eq("and says they are the newest", "Runs · all runs · this workspace (500 newest)" in _visible(render(full, 120, 20)), True)
+    _eq("and says they are the newest", "Runs · all runs · this workspace (500 newest + live)" in _visible(render(full, 120, 20)), True)
     one = _history_state(ctx, [_record("live", "running")])
     open_history(one)
     lone = _visible(render(one, 120, 20))
-    _eq("no earlier build: said under the live row", ("No earlier builds in this workspace." in lone, "(0)" in lone), (True, True))
+    _eq("no earlier build: said under the live row", ("No earlier builds in this workspace." in lone, "(0 + live)" in lone), (True, True))
 
     # The chosen run stays chosen as newer runs come above it.
     runs = [_record("aaaa1111"), _record("bbbb2222"), _record("cccc3333")]
@@ -357,7 +383,7 @@ def _test_screen(ctx):
     alone["cli_version"] = "2026.48.0"
     open_history(alone)
     listed = _visible(render(alone, 120, 20))
-    _eq("q quit, standalone, no live row, the version at the end", ("q quit" in listed, " live" in listed, listed.rstrip().endswith("aspect 2026.48.0")), (True, False, True))
+    _eq("q quit, standalone, no live row, the version at the end", ("q quit" in listed, " live" in listed, listed.rstrip().endswith("aspect 2026.48.0"), "(2)" in listed), (True, False, True, True))
     _eq("what the list leaves out counted under it, and why", ("2 runs from a newer aspect, not listed (upgrade to read them)" in listed, "749 folders without a record" in listed), (True, True))
     on_key(alone, "?", 10)
     _eq("? standalone: q quits", ("quit" in _visible(render(alone, 120, 20)), "back to the live build" in _visible(render(alone, 120, 20))), (True, False))
@@ -389,8 +415,10 @@ def _test_layout(ctx):
     _eq("every flag when they fit", command_cell(long, flags, 81), "build //examples/dashboard:demo --keep_going --config=<REDACTED> --action_env=X=1")
     _eq("a redacted flag goes first", command_cell(long, flags, 70), "build //examples/dashboard:demo --keep_going --action_env=X=1 …")
     _eq("then the others from the end", command_cell(long, flags, 50), "build //examples/dashboard:demo --keep_going …")
-    _eq("then the label alone, whole", command_cell(long, flags, 34), long)
-    _eq("then its package in the middle", command_cell(long, flags, 24), "build //…/dashboard:demo")
+    _eq("then the label alone, whole, marked", command_cell(long, flags, 34), long + " …")
+    _eq("then unmarked", command_cell(long, flags, 31), long)
+    _eq("then its package in the middle, its last folder kept", command_cell(long, flags, 24), "build //…/dashboard:demo")
+    _eq("then none, the target's name whole", command_cell(long, flags, 14), "build //…:demo")
     _eq("then cut", text_width(command_cell(long, flags, 12)), 12)
     _eq("a workspace by the end that tells it apart", workspace_names(["/a/slots/aspect-worktree-1", "/a/slots/aspect-worktree-2", "/b/repo", "/a/repo"]), {"/a/slots/aspect-worktree-1": "aspect-worktree-1", "/a/slots/aspect-worktree-2": "aspect-worktree-2", "/b/repo": "b/repo", "/a/repo": "a/repo"})
     runs = [
@@ -400,8 +428,8 @@ def _test_layout(ctx):
     state = _history_state(ctx, runs, standalone = True)
     history_records(state)
     state["browser"]["now_ms"] = stamp_ms("2026-11-21T15:41:39.143Z")
-    wide = [_visible(r) for r in table_rows(state, history_rows(state), 116, -1)]
-    _eq("wide: every column, the ID near its command", ("aaaa1111" in wide[0], "--keep_going" in wide[0], wide[0].index("aaaa1111") < 100), (True, True, True))
+    wide = [_visible(r) for r in table_rows(state, history_rows(state), 130, -1)]
+    _eq("wide: every column and flag, the ID beside the widest command", ("--action_env=X=1  aaaa1111" in wide[0], "--config=<REDACTED>" in wide[0]), (True, True))
     _eq("a pruned run says so where its ID goes, dimmed", ("pruned" in wide[1], table_rows(state, history_rows(state), 116, -1)[1].startswith(_role("muted"))), (True, True))
     for width in (116, 76, 60, 52, 44):
         for chosen in (0, 1, -1):
@@ -412,14 +440,32 @@ def _test_layout(ctx):
     tighter = [_visible(r) for r in table_rows(state, history_rows(state), 50, -1)]
     _eq("at 50: the duration gone too, the label whole", ("6.3s" in tighter[0], "build //examples/dashboard:demo" in tighter[0]), (False, True))
     tightest = [_visible(r) for r in table_rows(state, history_rows(state), 42, -1)]
-    _eq("at 42: the label's package shortened", "build //…/dashboard:demo" in tightest[0], True)
-    slots = _history_state(ctx, [_record("ssss0001", workspace = "/x/slots/aspect-worktree-e943aed214d5"), _record("ssss0002", workspace = "/x/slots/aspect-worktree-9c1239a4beb3")], standalone = True)
+    _eq("at 42: status a glyph, the age short, the label whole", tightest[0].startswith("✗  2m   build //examples/dashboard:demo"), True)
+    step = _history_state(ctx, [_record("ssss0003", "failed", started = "2026-11-21T15:36:39.143Z", argv = ["/bin/aspect", "build", "//examples/dashboard:step3"], bazel = [{"patterns": ["//examples/dashboard:step3"]}])], standalone = True)
+    history_records(step)
+    step["browser"]["now_ms"] = stamp_ms("2026-11-21T15:41:39.143Z")
+    _eq("at 40: a glyph, the age short, its package shortened, the name whole", _visible(table_rows(step, history_rows(step), 36, -1)[0]).rstrip(), "✗  5m   build //…/dashboard:step3")
+    _eq("at 30: no folder either, the target's name whole", "build //…:demo" in _visible(table_rows(state, history_rows(state), 30, -1)[0]), True)
+    going = _history_state(ctx, [_record("rrrr0009", "running", duration_ms = None)], standalone = True)
+    history_records(going)
+    going["browser"]["now_ms"] = stamp_ms("2026-11-21T15:41:39.143Z")
+    _eq("a run still going elsewhere: its time so far, open-ended", "2m00s…" in _visible(table_rows(going, history_rows(going), 76, -1)[0]), True)
+    pool = "/Users/u/.aspect/worktrees/github.com/aspect-build/aspect-cli/"
+    demo = ["/bin/aspect", "build", "//examples/dashboard:demo"]
+    slots = _history_state(ctx, [_record("ssss0001", workspace = pool + "aspect-worktree-e943aed214d5", argv = demo, bazel = [{"patterns": ["//examples/dashboard:demo"]}]), _record("ssss0002", workspace = pool + "aspect-worktree-9c1239a4beb3", argv = demo, bazel = [{"patterns": ["//examples/dashboard:demo"]}])], standalone = True)
     slots["browser"]["here"] = False
     history_records(slots)
     slots["browser"]["now_ms"] = stamp_ms("2026-11-21T15:41:39.143Z")
-    drawn = [_visible(r) for r in table_rows(slots, history_rows(slots), 76, -1)]
-    _eq("every workspace's runs: each named by its end, cut from its left", ("…" in drawn[0], "e943aed214d5" in drawn[0], "9c1239a4beb3" in drawn[1]), (True, True, True))
-    _eq("and the duration and ID beside them", ("6.3s" in drawn[0], "ssss0001" in drawn[0]), (True, True))
+    rows_at = lambda width: [_visible(r) for r in table_rows(slots, history_rows(slots), width, -1)]
+    _eq("a worktree slot named by its repository and id, as the pool lays it out", ("aspect-cli·e943aed2" in rows_at(100)[0], "aspect-cli·9c1239a4" in rows_at(100)[1]), (True, True))
+    _eq("every workspace's runs at 80: the ID first to go, the workspace kept", ("ssss0001" in rows_at(80)[0], "6.3s" in rows_at(80)[0], "aspect-cli·e943aed2" in rows_at(80)[0]), (False, True, True))
+    _eq("then the duration", ("6.3s" in rows_at(70)[0], "aspect-cli·e943aed2" in rows_at(70)[0]), (False, True))
+    _eq("then the workspace shortened, its end kept", ("…" in rows_at(60)[0], "e943aed2" in rows_at(60)[0]), (True, True))
+    _eq("then status and age short to keep it", rows_at(56)[0].startswith("✔  2m   …t-cli·e943aed2  build //examples/dashboard:demo"), True)
+    _eq("only then gone, the label whole", ("e943aed2" in rows_at(50)[0], "build //examples/dashboard:demo" in rows_at(50)[0]), (False, True))
+    _eq("a workspace by the end that tells it apart, elsewhere", workspace_names(["/a/x/repo", "/b/x/repo", "/c/other"]), {"/a/x/repo": "a/x/repo", "/b/x/repo": "b/x/repo", "/c/other": "other"})
+    aging = lambda now: [_visible(r).index("build") for r in table_rows(dict(slots, browser = dict(slots["browser"], now_ms = stamp_ms(now))), history_rows(slots), 80, -1)]
+    _eq("a row that ages from just now changes no column", aging("2026-11-21T15:39:50.000Z"), aging("2026-11-21T15:41:39.143Z"))
     for cols, rows in ((80, 24), (120, 40), (40, 12)):
         drawn = render(state, cols, rows).split("\r\n")
         _eq("the screen fits %dx%d" % (cols, rows), [text_width(_visible(r)) <= cols for r in drawn if r], [True for r in drawn if r])
@@ -559,8 +605,9 @@ def _test_files(ctx):
     cut_state["panes"] = True
     cut_screen = _visible(render(cut_state, 160, 40))
     _eq("said in the header and the Results pane", (cut_screen.split("\n")[0].count("event stream ended early"), cut_screen.count("event stream ended early") >= 2), (1, True))
-    profile_row = [l for l in cut_screen.split("\n") if "Bazel's profile: " in l]
-    _eq("the profile it kept, named in the timings pane, its file's name kept", (len(profile_row), "/bazel/1/command.profile.gz " in profile_row[0] if profile_row else False), (1, True))
+    panes = cut_screen.split("\n")
+    at = [i for i, l in enumerate(panes) if "Bazel's profile:" in l]
+    _eq("the profile it kept, named in the timings pane, its path's end kept on a row of its own", (len(at), "/bazel/1/command.profile.gz " in panes[at[0] + 1] if at else False), (1, True))
     on_key(cut_state, "2", 10)
     _eq("a summary's failure is the Failures list's", "//a:b" in _visible(render(cut_state, 160, 40)), True)
     on_key(cut_state, "enter", 10)
@@ -569,6 +616,11 @@ def _test_files(ctx):
     running = past_run(files, _record("rrrr0001", "running", dir = tmp, bazel = [{"command": "build", "build_events": tmp + "/bazel/1/build_events.binpb"}]))
     _eq("a run still going is in progress, not cut short", ([b["outcome"] for b in running["builds"]], running.get("stream_cut")), (["in progress"], False))
     _eq("its build marked neither passed nor failed", "◌" in build_row(running["builds"][0], 80) and "✗" not in build_row(running["builds"][0], 80), True)
+    going = dict(files, search = new_search())
+    show_run(going, running)
+    going["panes"] = True
+    going_screen = _visible(render(going, 160, 40))
+    _eq("its Results and timings both say it is still running, no counts or profile yet", (going_screen.count("Still running (as of ") >= 2, "0 configured" in going_screen, "Bazel's profile" in going_screen), (True, False, False))
     earlier = past_run(files, _record("rrrr0002", "running", dir = tmp, bazel = [
         {"command": "build", "ended": "2026-11-21T15:40:00.000Z", "build_events": tmp + "/bazel/1/build_events.binpb", "summary": {"failures": [{"kind": "action", "label": "//a:b", "detail": "Genrule", "logs": []}]}},
         {"command": "test", "build_events": tmp + "/bazel/1/build_events.binpb"},

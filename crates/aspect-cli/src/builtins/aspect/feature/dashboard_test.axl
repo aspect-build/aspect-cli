@@ -481,6 +481,34 @@ def _impl(ctx: TaskContext) -> int:
     on_key(rooted, "q", 10)
     _eq("q cancels the run's root once, no SIGINT", (len(cancelled), len(interrupted)), (1, 1))
 
+    # A first q during a build asks, for two seconds; a second in them
+    # cancels. Esc keeps the build, as do any other key and the time
+    # running out. Once the task has ended, q leaves at once.
+    asked = []
+    confirm = _screen(ctx, ["x"], cancellation = struct(root = struct(cancel = lambda: asked.append(1))))
+    on_key(confirm, "q", 10)
+    row = keys_row(confirm, 120)
+    _eq("a first q only asks", (len(asked), confirm["cancelling"], _visible(row).strip()), (0, False, "q again cancels the build · Esc keeps it"))
+    _eq("in the warning colour, q again bold", (_role("warning") in row, _role("strong") + "q again" in row), (True, True))
+    _eq("shorter where the whole would be cut", _visible(keys_row(confirm, 40)).strip(), "q again cancels · Esc keeps it")
+    on_key(confirm, "q", 10)
+    _eq("a second cancels", (len(asked), confirm["cancelling"]), (1, True))
+    kept = _screen(ctx, ["x"], cancellation = struct(root = struct(cancel = lambda: asked.append(1))))
+    kept["tab"] = "metrics"
+    on_key(kept, "q", 10)
+    on_key(kept, "esc", 10)
+    _eq("Esc keeps the build, and only that", (len(asked), "q again" in keys_row(kept, 120), kept["tab"]), (1, False, "metrics"))
+    on_key(kept, "q", 10)
+    on_key(kept, "j", 10)
+    on_key(kept, "q", 10)
+    _eq("any other key keeps it too, the next q asking again", (len(asked), "q again" in keys_row(kept, 120)), (1, True))
+    kept["now_ms"] += 2001
+    _eq("the question goes after two seconds", "q again" in keys_row(kept, 120), False)
+    on_key(kept, "q", 10)
+    _eq("a q after it asks again", (len(asked), kept["cancelling"]), (1, False))
+    done = _screen(ctx, ["x"], ended = True, building = False, cancellation = struct(root = struct(cancel = lambda: asked.append(1))))
+    _eq("the finished screen: q leaves at once", (on_key(done, "q", 10), len(asked), "q again" in keys_row(done, 120)), (True, 1, False))
+
     # The search bar: typed into live, a regex, toggles, Enter keeps, Esc clears.
     find = {"scroll": 4, "filter": "all", "search": new_search(), "fails": [], "selected": 0, "focus": "console", "view": None, "re": ctx.std.re, "cancelling": False, "ended": False, "log": [
         "INFO: Build ok",

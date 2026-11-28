@@ -358,7 +358,8 @@ unfolds every fold; `z` gives the console the whole screen. A click on a
 path peeks at the file, `o` opens it in your editor (`editor` in
 `~/.aspect/config.json`, or `--console:file-hyperlink-format`) and `O` picks
 another; a drag selects and copies; `m` gives the mouse back to the terminal
-(`--dashboard:mouse=false`). `q` or Ctrl+C cancels the build.
+(`--dashboard:mouse=false`). `q` twice (the first asks; Esc keeps the
+build) or Ctrl+C cancels the build; once it has ended, `q` leaves.
 
 `h` opens the History screen: the live build first, then the runs the task
 history keeps that started Bazel in this workspace, newest first (`f` cycles
