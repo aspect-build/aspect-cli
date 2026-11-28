@@ -388,7 +388,7 @@ def _actions_tests(ctx):
     # The same run with every action asked for: each event names a local
     # file the dead cache would get, and Bazel's stream stopped after
     # `configuration`. So with a remote cache the build gets failed ones
-    # only (`publish_all_actions_unless_sent_out`), and says `other`.
+    # only (`publish_all_actions_unless_sent_out`), and says `? unreported`.
     early = _screen(ctx, ["x"], building = False, ended = True, done_total = (4, 4, False), all_actions = False, inv = {"build_finished": struct(exit_code = struct(name = "REMOTE_ERROR", code = 34))})
     split = action_split(early)
     _eq("cut after configuration", [split[k] for k in ("final", "ran", "unreported", "failed", "done")], [False, 0, 4, 0, 4])
