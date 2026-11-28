@@ -37,6 +37,9 @@ _BAZEL = struct(
     error_in = "Error in ",
     fatal = "FATAL: ",
     server_died = "Server terminated abruptly",
+    # Bazel's message for an interrupted command (`BuildTool.java`): the line
+    # it writes, and an interrupted `build`'s `BuildFinished.failure_detail`.
+    interrupted = "build interrupted",
 )
 
 def _bazel_headers(state: dict, blocks: list, bounds: list, text: str) -> list:
@@ -593,16 +596,16 @@ def _claim_named_failures(state: dict, headers: list, by: dict, claimed: dict) -
 
 def _claim_interrupted(state: dict, by: dict, claimed: dict) -> None:
     """Claim the one line that is Bazel restating an interrupted build's
-    outcome (`ERROR: build interrupted`): where `BuildFinished`'s exit code
-    is named `INTERRUPTED`, the one header whose text is its
-    `failure_detail`'s message, which the summary's interrupted mark says
-    instead. One with no message there (Bazel 9.3.3's interrupted `test`
-    command) leaves its line among Bazel's other errors."""
+    outcome (`ERROR: build interrupted`), which the summary's interrupted
+    mark says instead: where `BuildFinished`'s exit code is named
+    `INTERRUPTED`, the one header whose text is its `failure_detail`'s
+    message, or, where it carries none (an interrupted `test` on Bazel 7, 8
+    and 9), Bazel's own message for it (`_BAZEL.interrupted`)."""
     inv = state.get("inv") or {}
     if _build_outcome(inv) != "interrupted":
         return
-    message = str(bes_get(bes_get(inv.get("build_finished"), "failure_detail"), "message", "") or "")
-    k = _tie(by["message"].get(message, [])) if message else None
+    message = str(bes_get(bes_get(inv.get("build_finished"), "failure_detail"), "message", "") or "") or _BAZEL.interrupted
+    k = _tie(by["message"].get(message, []))
     if k != None:
         claimed[k] = True
 
