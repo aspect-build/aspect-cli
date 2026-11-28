@@ -278,9 +278,12 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
                         return Ok(ExitCode::from(err.exit_code() as u8));
                     }
                     // A usage error on a command that runs degraded is Clap's to
-                    // report: the task it names loaded, so the load failure did
-                    // not cause it.
+                    // report when the task it names loaded and no feature file
+                    // failed: only a feature adds flags to the built-in tasks,
+                    // so a flag Clap rejects may be one a broken feature file
+                    // declares, and then the load failure is the cause.
                     if !unloadable.is_empty()
+                        && unloadable.lost_feature_files().is_empty()
                         && let Some(entry) = cmd.degraded_usage(&root_cmd, &argv)
                     {
                         let lines = DegradedLines::of(&unloadable, &cmd, entry, None);
@@ -753,10 +756,9 @@ struct DegradedLines {
     /// The features that still run, when a config failed: it may have turned
     /// the others off, so every other feature is off.
     running: Option<String>,
-    /// The feature files that failed, when every config loaded: the other
-    /// features run as ever, since which are enabled is known and a feature
-    /// cannot change another, and only these files' features and their
-    /// hooks are missing.
+    /// The feature files that failed, when every config loaded: the configs
+    /// decided which features run, so the others run as ever, and only these
+    /// files' features, and the hooks they add, are missing.
     missing: Vec<String>,
     /// The flags of the features that are off which the command line gave,
     /// as typed. Not the console's, whose flags the runtime reads before the

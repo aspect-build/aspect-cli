@@ -389,6 +389,26 @@ fn a_usage_error_on_a_degraded_command_is_reported_as_one() {
                 sync = task(group = [\"worktree\"], summary = \"Mine.\", implementation = _impl)\n";
     let ws = Workspace::new(&[(".aspect/mytask.axl", sync)]);
     assert_fails_on(&ws.aspect(&["worktree", "sync"]), headline);
+
+    // A flag a broken feature file would have added is unknown to Clap
+    // because the file failed, so the load failure is the error.
+    let feature = "load(\"@aspect//traits.axl\", \"NoSuchTrait\")\n\n\
+                   def _impl(ctx: FeatureContext):\n    pass\n\n\
+                   Mine = feature(implementation = _impl, args = {\"opt\": args.string(default = \"d\")})\n";
+    let ws = Workspace::new(&[
+        (
+            "MODULE.aspect",
+            "use_feature(\"tools/feat.axl\", \"Mine\")\n",
+        ),
+        ("tools/feat.axl", feature),
+    ]);
+    let out = ws.aspect(&["worktree", "list", "--mine:opt=x"]);
+    assert_fails_on(&out, headline);
+    assert!(
+        !stderr(&out).contains("unexpected argument"),
+        "{}",
+        stderr(&out)
+    );
 }
 
 /// With only a task file broken the configs ran in full, so the run is not
@@ -441,9 +461,9 @@ fn a_broken_task_file_alone_leaves_settings_and_features_alone() {
 
 /// A feature file alone leaves every config loaded, so the grace period a
 /// config sets is known: its 2 hours let `release` end a stopped session's
-/// lease idle for 3, which the 24-hour default would keep. Which features are
-/// enabled is known too, and one feature cannot change another, so a healthy
-/// repository feature still runs, its `score_slot` hook included. The warning
+/// lease idle for 3, which the 24-hour default would keep. The configs decide
+/// which features run, so a healthy repository feature still runs, its
+/// `score_slot` hook included. The warning
 /// lists no setting, and names the broken file as a feature file whose hooks
 /// are off.
 #[test]
