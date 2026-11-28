@@ -5,7 +5,7 @@ use std::io;
 use crate::engine::error::native_error;
 
 native_error! {
-    /// A failed I/O operation: what `std.net` raises.
+    /// A failed I/O operation: what `std.fs` and `std.net` raise.
     ///
     /// `std.io.Error` derives from `error`, so `isinstance(e, error)` holds
     /// too, and it adds one field, `kind`, saying what went wrong. `message`

@@ -33,9 +33,11 @@ load("./private/lib/artifacts.axl", "artifacts")
 load("./private/lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "bb_clientd_root", "bes_get", "local_output_path", "now_ms", "process_event", "usable_bb_clientd_root")
 load("./private/lib/change_detection.axl", "BASE_REF_DESCRIPTION_TAIL")
 load("./private/lib/environment.axl", "detect_ci", "error", "warn")
+load("./private/lib/fix_patch.axl", "apply_fix_patch", "fix_step_ready")
 load("./private/lib/github.axl", "detect_changed_files", "detect_ci_base_ref", "print_changed_files_listing")
 load("./private/lib/lifecycle.axl", "phases")
 load("./private/lib/lint_results.axl", "detect_lint_tool", lint_accumulate = "accumulate", lint_conclusion = "conclusion", lint_init_data = "init_data", lint_strategy_label = "strategy_label")
+load("./private/lib/patch.axl", patch_parse = "parse")
 load("./private/lib/repro_commands.axl", "build_aspect_command", "explicit_flags", "flavor_allows", "print_repro_and_fix", "repro_flavor_args", "repro_prefix", "task_cli_path")
 load("./private/lib/sarif.axl", "format_location", "get_sarif_summary", "parse_sarif", "sarif_diagnostics", "scope_files")
 load("./private/lib/tar.axl", "tar_create")
@@ -107,52 +109,25 @@ def filter_hunks(diagnostics, changed_files):
 def parse_patch_hunks(content):
     """Extract the (file, line) span of every hunk in a unified diff.
 
-    Returns `{file, start_line, end_line}` per hunk; `file` is the post-fix
-    `+++ b/<path>` side (leading `b/` stripped), lines 1-based inclusive.
-    Empty list when unparseable — callers treat that as "leave the patch alone".
-
-    A hunk's declared line count is clamped to the number of lines in the
-    patch, since no hunk can cover more than that. The count comes from the
-    `@@` header, and a malformed or truncated patch can declare a span far
-    larger than its body; callers expand each hunk to one entry per line, so
-    an unclamped count allocates proportional to the declared number.
+    Returns `{file, start_line, end_line}` per hunk with new-side lines,
+    from `patch.axl`'s `parse`: `file` is the post-fix side without its
+    `b/` prefix, lines 1-based inclusive. A hunk adding no lines is left
+    out. A malformed hunk drops every hunk of its own file and of the files
+    after it, so only the files before it keep theirs (an empty list when it
+    is in the first); callers treat an empty list as "leave the patch
+    alone". A hunk's span is what its body holds, so a malformed count
+    can't make one span more lines than the patch has.
     """
     hunks = []
-    current_file = ""
-    lines = content.split("\n")
-    max_count = len(lines)
-    for line in lines:
-        if line.startswith("+++ "):
-            rest = line[4:]
-            if rest.startswith("b/"):
-                rest = rest[2:]
-            tab_idx = rest.find("\t")
-            current_file = (rest[:tab_idx] if tab_idx >= 0 else rest).strip()
-            continue
-        if not current_file or not line.startswith("@@"):
-            continue
-
-        # Hunk header `@@ -X,Y +A,B @@`: the `+A,B` side is the post-fix range
-        # (1-based, B lines). `,B` omitted when B == 1.
-        parts = line.split(" ")
-        if len(parts) < 3 or not parts[2].startswith("+"):
-            continue
-        add_spec = parts[2][1:]
-        if "," in add_spec:
-            a_str, b_str = add_spec.split(",", 1)
-        else:
-            a_str, b_str = add_spec, "1"
-        if not (a_str.isdigit() and b_str.isdigit()):
-            continue
-        start = int(a_str)
-        count = min(int(b_str), max_count)
-        if count <= 0:
-            continue
-        hunks.append({
-            "file": current_file,
-            "start_line": start,
-            "end_line": start + count - 1,
-        })
+    for f in patch_parse(content):
+        for h in f["hunks"]:
+            if h["new_count"] <= 0:
+                continue
+            hunks.append({
+                "file": f["file"],
+                "start_line": h["new_start"],
+                "end_line": h["new_start"] + h["new_count"] - 1,
+            })
     return hunks
 
 def _filter_patches_by_strategy(ctx, patches, strategy_for, changed_files):
@@ -745,7 +720,7 @@ def _try_process_lint_file(ctx, file, filepath, data, strategy_for, changed_file
     if file.name.endswith(".patch"):
         # Readability gate (content discarded): requeues until the blob is
         # whole, since lint_patch hooks buffer the path and re-read it later
-        # with a plain read_to_string that has no completeness check.
+        # with no completeness check.
         if _read_lint_file(ctx, filepath, probe_timeout_ms, expected_len) == None:
             return None
         patches.append({"path": filepath, "name": file.name})
@@ -1141,7 +1116,12 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     # subset. Applying auto-fixes against a broken build risks compounding the
     # breakage. Skipping the phase emit also keeps current_phase() on `lint` so
     # the breakdown tags the right phase and no zero-work `Apply` row appears.
-    if not build_failed and fix_apply and scoped_patches:
+    # With no `patch` to run, one ERROR line says so and none is applied; the
+    # exit code is the findings', as it is otherwise.
+    apply_fixes = not build_failed and fix_apply and bool(scoped_patches)
+    if apply_fixes and not fix_step_ready(ctx):
+        apply_fixes = False
+    if apply_fixes:
         patches_label = pluralize(len(scoped_patches), "auto-fix patch", plural = "auto-fix patches")
         status = _pick_status(data, had_failure = False, terminal = False)
         ph.update(
@@ -1154,9 +1134,9 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
             data = data,
             phase = phases.Phase(name = "apply", description = "Apply auto-fix patches", emoji = "📦"),
         )
+        applied = []
         for patch in scoped_patches:
-            ctx.std.process.command("patch").arg("-p1").arg("--input=" + patch) \
-                .current_dir(ctx.std.env.current_dir()).spawn().wait()
+            apply_fix_patch(ctx, patch, seen = applied)
 
     # 10. Strategy filter → relevant diagnostics for reporting + exit code.
     # Skip the `filter` phase emit when the build failed or no aspect ran:

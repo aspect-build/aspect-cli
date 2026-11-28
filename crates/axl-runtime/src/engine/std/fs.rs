@@ -96,6 +96,10 @@ starlark_simple_value!(FrozenDirEntry);
 #[display(
     "<fs.Metadata is_dir:{is_dir} is_file:{is_file} is_symlink:{is_symlink} executable:{executable} size:{size}>"
 )]
+/// A file's metadata. `dev` and `ino` (None off Unix) say which file it is:
+/// two paths with the same pair are one file, whatever their spelling (case,
+/// Unicode normalization, a hard link). `mode` is its permission bits, such
+/// as `0o644` (None off Unix), what `set_permissions` takes.
 pub struct Metadata<'v> {
     is_dir: values::Value<'v>,
     is_file: values::Value<'v>,
@@ -106,6 +110,9 @@ pub struct Metadata<'v> {
     accessed: values::Value<'v>,
     created: values::Value<'v>,
     readonly: values::Value<'v>,
+    dev: values::Value<'v>,
+    ino: values::Value<'v>,
+    mode: values::Value<'v>,
 }
 
 #[starlark_value(type = "fs.Metadata")]
@@ -121,6 +128,9 @@ impl<'v> values::StarlarkValue<'v> for Metadata<'v> {
             "accessed" => Some(self.accessed),
             "created" => Some(self.created),
             "readonly" => Some(self.readonly),
+            "dev" => Some(self.dev),
+            "ino" => Some(self.ino),
+            "mode" => Some(self.mode),
             _ => None,
         }
     }
@@ -135,6 +145,9 @@ impl<'v> values::StarlarkValue<'v> for Metadata<'v> {
             "accessed".into(),
             "created".into(),
             "readonly".into(),
+            "dev".into(),
+            "ino".into(),
+            "mode".into(),
         ]
     }
 }
@@ -157,6 +170,9 @@ pub struct FrozenMetadata {
     accessed: values::FrozenValue,
     created: values::FrozenValue,
     readonly: values::FrozenValue,
+    dev: values::FrozenValue,
+    ino: values::FrozenValue,
+    mode: values::FrozenValue,
 }
 
 #[starlark_value(type = "fs.Metadata")]
@@ -177,12 +193,17 @@ impl<'v> values::Freeze for Metadata<'v> {
             accessed: freezer.freeze(self.accessed)?,
             created: freezer.freeze(self.created)?,
             readonly: freezer.freeze(self.readonly)?,
+            dev: freezer.freeze(self.dev)?,
+            ino: freezer.freeze(self.ino)?,
+            mode: freezer.freeze(self.mode)?,
         })
     }
 }
 
 starlark_simple_value!(FrozenMetadata);
 
+/// `std.fs`. A method that fails on the filesystem raises `std.io.Error`, so
+/// a task can catch that failure by type and not a bug in its own code.
 #[derive(Debug, Display, ProvidesStaticType, NoSerialize, Allocative)]
 #[display("<std.Filesystem>")]
 pub struct Filesystem {}
@@ -203,9 +224,15 @@ impl<'v> values::StarlarkValue<'v> for Filesystem {
 
 starlark_simple_value!(Filesystem);
 
+/// `result` with its I/O error raised as `std.io.Error`.
+fn io<T>(result: std::io::Result<T>) -> anyhow::Result<T> {
+    result.map_err(|err| IoError::from(err).into())
+}
+
 /// A background read whose completion callers poll for. `state` is `None`
 /// while a reader is still working on it; `Some(result)` once it finished
-/// (`result` is `None` on any I/O/UTF-8 error, `Some(content)` on success).
+/// (`result` is `None` on any I/O error or short read, `Some(content)` on
+/// success, non-UTF-8 bytes replaced).
 struct ReadProbe {
     state: Mutex<Option<Option<String>>>,
     done: Condvar,
@@ -233,12 +260,7 @@ struct ReadJob {
 
 impl ReadJob {
     fn run(self) {
-        let result = fs::read_to_string(&self.path)
-            .ok()
-            .filter(|c| match self.expected_len {
-                Some(want) => c.len() as u64 == want,
-                None => true,
-            });
+        let result = read_complete_lossy(&self.path, self.expected_len);
         self.probe.complete(result);
     }
 }
@@ -325,6 +347,17 @@ impl ReaderPool {
     fn workers(&self) -> usize {
         self.state.lock().unwrap().workers
     }
+}
+
+/// The file's contents if it reads as exactly `expected_len` bytes (any length
+/// when `None`), non-UTF-8 bytes replaced: the length is what says the file is
+/// whole, and a byte that isn't UTF-8 must not make it look unfinished.
+fn read_complete_lossy(path: &str, expected_len: Option<u64>) -> Option<String> {
+    let bytes = fs::read(path).ok()?;
+    if expected_len.is_some_and(|want| bytes.len() as u64 != want) {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 /// Poll a coalesced background read of `path` (see `poll_read_to_string` for
@@ -445,7 +478,7 @@ pub(crate) fn filesystem_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = pos)] from: values::StringValue,
         #[starlark(require = pos)] to: values::StringValue,
     ) -> anyhow::Result<u64> {
-        Ok(fs::copy(from.as_str(), to.as_str())?)
+        Ok(io(fs::copy(from.as_str(), to.as_str()))?)
     }
 
     /// Creates a new, empty directory at the provided path.
@@ -460,7 +493,7 @@ pub(crate) fn filesystem_methods(registry: &mut MethodsBuilder) {
         #[allow(unused)] this: values::Value<'v>,
         #[starlark(require = pos)] path: values::StringValue,
     ) -> anyhow::Result<NoneType> {
-        fs::create_dir(path.as_str())?;
+        io(fs::create_dir(path.as_str()))?;
         Ok(NoneType)
     }
 
@@ -474,7 +507,7 @@ pub(crate) fn filesystem_methods(registry: &mut MethodsBuilder) {
         #[allow(unused)] this: values::Value<'v>,
         #[starlark(require = pos)] path: values::StringValue,
     ) -> anyhow::Result<NoneType> {
-        fs::create_dir_all(path.as_str())?;
+        io(fs::create_dir_all(path.as_str()))?;
         Ok(NoneType)
     }
 
@@ -494,7 +527,7 @@ pub(crate) fn filesystem_methods(registry: &mut MethodsBuilder) {
             std::path::PathBuf::from(parent)
         };
         let prefix = if prefix.is_empty() { "axl-" } else { prefix };
-        let dir = create_temp_dir(&base, prefix)?;
+        let dir = io(create_temp_dir(&base, prefix))?;
         let path = dir
             .to_str()
             .ok_or_else(|| anyhow::anyhow!("temp dir path is non-UTF-8"))?;
@@ -515,7 +548,7 @@ pub(crate) fn filesystem_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = pos)] original: values::StringValue,
         #[starlark(require = pos)] link: values::StringValue,
     ) -> anyhow::Result<NoneType> {
-        fs::hard_link(original.as_str(), link.as_str())?;
+        io(fs::hard_link(original.as_str(), link.as_str()))?;
         Ok(NoneType)
     }
 
@@ -531,7 +564,7 @@ pub(crate) fn filesystem_methods(registry: &mut MethodsBuilder) {
         #[allow(unused)] this: values::Value<'v>,
         #[starlark(require = pos)] path: values::StringValue,
     ) -> anyhow::Result<bool> {
-        Ok(fs::exists(path.as_str())?)
+        Ok(io(fs::exists(path.as_str()))?)
     }
 
     /// Returns true if this path is for a directory.
@@ -543,7 +576,7 @@ pub(crate) fn filesystem_methods(registry: &mut MethodsBuilder) {
         #[allow(unused)] this: values::Value<'v>,
         #[starlark(require = pos)] path: values::StringValue,
     ) -> anyhow::Result<bool> {
-        let metadata = fs::metadata(path.as_str())?;
+        let metadata = io(fs::metadata(path.as_str()))?;
         Ok(metadata.is_dir())
     }
 
@@ -560,7 +593,7 @@ pub(crate) fn filesystem_methods(registry: &mut MethodsBuilder) {
             r#"Deprecated: is_file is deprecated and will be removed in a future version of AXL.
             Use `fs.metadata().is_file` instead."#
         );
-        let metadata = fs::metadata(path.as_str())?;
+        let metadata = io(fs::metadata(path.as_str()))?;
         Ok(metadata.is_file())
     }
 
@@ -578,7 +611,7 @@ pub(crate) fn filesystem_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = pos)] path: values::StringValue,
         heap: Heap<'v>,
     ) -> anyhow::Result<Metadata<'v>> {
-        let m = fs::metadata(path.as_str())?;
+        let m = io(fs::metadata(path.as_str()))?;
         Ok(marshal_metadata(&m, heap))
     }
 
@@ -593,7 +626,7 @@ pub(crate) fn filesystem_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = pos)] path: values::StringValue,
         heap: Heap<'v>,
     ) -> anyhow::Result<ValueOfUnchecked<'v, UnpackList<DirEntry<'v>>>> {
-        let metadata = fs::read_dir(path.as_str())?;
+        let metadata = io(fs::read_dir(path.as_str()))?;
         Ok(heap
             .alloc_typed_unchecked(values::list::AllocList(metadata.map(|entry| {
                 let entry = entry.unwrap();
@@ -678,7 +711,7 @@ pub(crate) fn filesystem_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = pos)] path: values::StringValue,
         heap: Heap<'v>,
     ) -> anyhow::Result<values::StringValue<'v>> {
-        let r = fs::read_link(path.as_str())
+        let r = io(fs::read_link(path.as_str()))
             .map(|f| heap.alloc_str(&f.as_os_str().to_string_lossy().to_string()))?;
         Ok(r)
     }
@@ -694,7 +727,7 @@ pub(crate) fn filesystem_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = pos)] path: values::StringValue,
         heap: Heap<'v>,
     ) -> anyhow::Result<values::StringValue<'v>> {
-        let r = fs::read_to_string(path.as_str()).map(|f| heap.alloc_str(f.as_str()))?;
+        let r = io(fs::read_to_string(path.as_str())).map(|f| heap.alloc_str(f.as_str()))?;
         Ok(r)
     }
 
@@ -712,7 +745,7 @@ pub(crate) fn filesystem_methods(registry: &mut MethodsBuilder) {
         #[allow(unused)] this: values::Value<'v>,
         #[starlark(require = pos)] path: values::StringValue,
     ) -> anyhow::Result<NoneType> {
-        fs::remove_dir(path.as_str())?;
+        io(fs::remove_dir(path.as_str()))?;
         Ok(NoneType)
     }
 
@@ -725,7 +758,7 @@ pub(crate) fn filesystem_methods(registry: &mut MethodsBuilder) {
         #[allow(unused)] this: values::Value<'v>,
         #[starlark(require = pos)] path: values::StringValue,
     ) -> anyhow::Result<NoneType> {
-        fs::remove_dir_all(path.as_str())?;
+        io(fs::remove_dir_all(path.as_str()))?;
         Ok(NoneType)
     }
 
@@ -742,7 +775,7 @@ pub(crate) fn filesystem_methods(registry: &mut MethodsBuilder) {
         #[allow(unused)] this: values::Value<'v>,
         #[starlark(require = pos)] path: values::StringValue,
     ) -> anyhow::Result<NoneType> {
-        fs::remove_file(path.as_str())?;
+        io(fs::remove_file(path.as_str()))?;
         Ok(NoneType)
     }
 
@@ -759,7 +792,7 @@ pub(crate) fn filesystem_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = pos)] from: values::StringValue,
         #[starlark(require = pos)] to: values::StringValue,
     ) -> anyhow::Result<NoneType> {
-        fs::rename(from.as_str(), to.as_str())?;
+        io(fs::rename(from.as_str(), to.as_str()))?;
         Ok(NoneType)
     }
 
@@ -779,7 +812,10 @@ pub(crate) fn filesystem_methods(registry: &mut MethodsBuilder) {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(path.as_str(), fs::Permissions::from_mode(mode))?;
+            io(fs::set_permissions(
+                path.as_str(),
+                fs::Permissions::from_mode(mode),
+            ))?;
         }
         #[cfg(not(unix))]
         {
@@ -806,7 +842,7 @@ pub(crate) fn filesystem_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = pos)] path: values::StringValue,
         heap: Heap<'v>,
     ) -> anyhow::Result<Metadata<'v>> {
-        let m = fs::symlink_metadata(path.as_str())?;
+        let m = io(fs::symlink_metadata(path.as_str()))?;
         Ok(marshal_metadata(&m, heap))
     }
 
@@ -820,7 +856,7 @@ pub(crate) fn filesystem_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = pos)] path: values::StringValue,
         #[starlark(require = pos)] content: values::StringValue,
     ) -> anyhow::Result<NoneType> {
-        fs::write(path.as_str(), content.as_str())?;
+        io(fs::write(path.as_str(), content.as_str()))?;
         Ok(NoneType)
     }
 
@@ -875,7 +911,8 @@ pub(crate) fn filesystem_methods(registry: &mut MethodsBuilder) {
     /// taken after can have caught up with a writer that finished mid-read, so
     /// either would accept a prefix. `None` means "not complete yet" — poll
     /// again. A negative `expected_len` disables the check and accepts
-    /// whatever the read returns.
+    /// whatever the read returns. Non-UTF-8 bytes are replaced, never a reason
+    /// for `None`.
     ///
     /// This is the non-blocking counterpart to `poll_read_to_string`, which
     /// applies the same length gate to reads that can block indefinitely.
@@ -885,13 +922,11 @@ pub(crate) fn filesystem_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = named, default = -1)] expected_len: i64,
         heap: Heap<'v>,
     ) -> anyhow::Result<NoneOr<values::StringValue<'v>>> {
-        let Ok(s) = fs::read_to_string(path.as_str()) else {
-            return Ok(NoneOr::None);
-        };
-        if expected_len >= 0 && s.len() as u64 != expected_len as u64 {
-            return Ok(NoneOr::None);
-        }
-        Ok(NoneOr::Other(heap.alloc_str(s.as_str())))
+        let expected_len = (expected_len >= 0).then_some(expected_len as u64);
+        Ok(match read_complete_lossy(path.as_str(), expected_len) {
+            Some(s) => NoneOr::Other(heap.alloc_str(s.as_str())),
+            None => NoneOr::None,
+        })
     }
 
     /// Reads the entire contents of a file into a string without ever
@@ -905,8 +940,9 @@ pub(crate) fn filesystem_methods(registry: &mut MethodsBuilder) {
     /// waits up to `timeout_ms` for it, and while that read is still in
     /// flight, subsequent calls for the same path return `None` immediately
     /// rather than starting another read. Whenever the read eventually
-    /// completes, the next call returns its result: the file contents, or
-    /// `None` on any I/O/UTF-8 error (including a missing file).
+    /// completes, the next call returns its result: the file contents
+    /// (non-UTF-8 bytes replaced), or `None` on any I/O error (including a
+    /// missing file).
     ///
     /// Callers are expected to poll until content or a caller-side deadline:
     /// `None` always means "not readable yet", never "empty file" (an empty
@@ -976,7 +1012,7 @@ pub(crate) fn filesystem_methods(registry: &mut MethodsBuilder) {
         #[allow(unused)] this: values::Value<'v>,
         #[starlark(require = pos)] path: values::StringValue,
     ) -> anyhow::Result<stream::Readable> {
-        let file = fs::File::open(path.as_str())?;
+        let file = io(fs::File::open(path.as_str()))?;
         Ok(stream::Readable::File(Arc::new(Mutex::new(file))))
     }
 
@@ -988,7 +1024,7 @@ pub(crate) fn filesystem_methods(registry: &mut MethodsBuilder) {
         #[allow(unused)] this: values::Value<'v>,
         #[starlark(require = pos)] path: values::StringValue,
     ) -> anyhow::Result<stream::Writable> {
-        let file = fs::File::create(path.as_str())?;
+        let file = io(fs::File::create(path.as_str()))?;
         Ok(stream::Writable::from(file))
     }
 
@@ -1056,6 +1092,20 @@ fn marshal_metadata<'v>(m: &fs::Metadata, heap: Heap<'v>) -> Metadata<'v> {
     };
     #[cfg(not(unix))]
     let executable = heap.alloc(false);
+    #[cfg(unix)]
+    let mode = {
+        use std::os::unix::fs::PermissionsExt;
+        heap.alloc(permissions.mode() & 0o7777)
+    };
+    #[cfg(not(unix))]
+    let mode = heap.alloc(NoneType);
+    #[cfg(unix)]
+    let (dev, ino) = {
+        use std::os::unix::fs::MetadataExt;
+        (heap.alloc(m.dev()), heap.alloc(m.ino()))
+    };
+    #[cfg(not(unix))]
+    let (dev, ino) = (heap.alloc(NoneType), heap.alloc(NoneType));
     Metadata {
         is_dir: heap.alloc(file_type.is_dir()),
         is_file: heap.alloc(file_type.is_file()),
@@ -1066,6 +1116,9 @@ fn marshal_metadata<'v>(m: &fs::Metadata, heap: Heap<'v>) -> Metadata<'v> {
         accessed,
         created,
         readonly: heap.alloc(permissions.readonly()),
+        dev,
+        ino,
+        mode,
     }
 }
 
@@ -1151,6 +1204,69 @@ Test = task(implementation = _impl)
         assert_eq!(exit, Some(0));
     }
 
+    /// A failed filesystem call raises `std.io.Error`, caught by type with
+    /// its `kind`.
+    #[test]
+    fn a_failed_call_raises_std_io_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let gone = serde_json::to_string(dir.path().join("gone").to_str().unwrap()).unwrap();
+        let exit = crate::test::eval(&format!(
+            r#"
+def _impl(ctx):
+    fs = ctx.std.fs
+    for call in (fs.copy, fs.rename):
+        err, _ = catch(call, {gone}, {gone} + ".2", types = [std.io.Error])
+        if err == None or err.kind != "not_found":
+            fail("%r: got %r" % (call, err))
+    err, _ = catch(fs.remove_file, {gone}, types = [std.io.Error])
+    if err == None or err.kind != "not_found":
+        fail("remove_file: got %r" % err)
+    return 0
+
+Test = task(implementation = _impl)
+"#,
+        ))
+        .run_task(0)
+        .expect("run_task");
+        assert_eq!(exit, Some(0));
+    }
+
+    /// `dev` and `ino` name one file under each of its names (a hard link),
+    /// and two files apart.
+    #[cfg(unix)]
+    #[test]
+    fn metadata_names_a_file_by_dev_and_ino() {
+        let dir = tempfile::tempdir().unwrap();
+        let at =
+            |name: &str| serde_json::to_string(dir.path().join(name).to_str().unwrap()).unwrap();
+        fs::write(dir.path().join("a"), "x").unwrap();
+        fs::write(dir.path().join("b"), "x").unwrap();
+        fs::hard_link(dir.path().join("a"), dir.path().join("h")).unwrap();
+        let exit = crate::test::eval(&format!(
+            r#"
+def _impl(ctx):
+    fs = ctx.std.fs
+    a, b, h = fs.metadata({a}), fs.metadata({b}), fs.metadata({h})
+    if (a.dev, a.ino) != (h.dev, h.ino):
+        fail("a hard link is another file")
+    if (a.dev, a.ino) == (b.dev, b.ino):
+        fail("two files are one")
+    fs.set_permissions({b}, 0o640)
+    if fs.metadata({b}).mode != 0o640:
+        fail("mode: got %o" % fs.metadata({b}).mode)
+    return 0
+
+Test = task(implementation = _impl)
+"#,
+            a = at("a"),
+            b = at("b"),
+            h = at("h"),
+        ))
+        .run_task(0)
+        .expect("run_task");
+        assert_eq!(exit, Some(0));
+    }
+
     #[test]
     fn poll_read_returns_content_for_readable_file() {
         let dir = tempfile::tempdir().unwrap();
@@ -1171,14 +1287,11 @@ Test = task(implementation = _impl)
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("f.txt");
 
-        // Helper mirroring the builtin's body; the starlark wrapper only adds
-        // heap allocation on top of this.
         fn read_if_complete(path: &std::path::Path, expected_len: i64) -> Option<String> {
-            let s = fs::read_to_string(path).ok()?;
-            if expected_len >= 0 && s.len() as u64 != expected_len as u64 {
-                return None;
-            }
-            Some(s)
+            read_complete_lossy(
+                path.to_str().unwrap(),
+                (expected_len >= 0).then_some(expected_len as u64),
+            )
         }
 
         fs::write(&path, "half").unwrap();
@@ -1194,6 +1307,20 @@ Test = task(implementation = _impl)
         assert_eq!(read_if_complete(&empty, 0).as_deref(), Some(""));
         // A missing file is unreadable regardless of the expected length.
         assert_eq!(read_if_complete(&dir.path().join("nope"), -1), None);
+        // Non-UTF-8 is whole at its byte length, replaced rather than refused.
+        let latin1 = dir.path().join("latin1.patch");
+        fs::write(&latin1, b"caf\xe9\n").unwrap();
+        assert_eq!(
+            read_if_complete(&latin1, 5).as_deref(),
+            Some("caf\u{FFFD}\n")
+        );
+        assert_eq!(
+            read_if_complete(&latin1, 7),
+            None,
+            "lossy length isn't the gate"
+        );
+        let got = poll_read(latin1.to_str().unwrap(), Duration::from_secs(5), Some(5));
+        assert_eq!(got.as_deref(), Some("caf\u{FFFD}\n"));
     }
 
     /// A read shorter than the authoritative length is a partially-materialized

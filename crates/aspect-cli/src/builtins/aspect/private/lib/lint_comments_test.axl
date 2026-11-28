@@ -4,7 +4,7 @@ Run with:
   aspect dev test-lint-comments
 """
 
-load("./lint_comments.axl", "build_marker", "can_attempt_comment", "diff_window", "extract_marker", "parse_marker", "suggestion_block")
+load("./lint_comments.axl", "build_marker", "can_attempt_comment", "diff_window", "extract_marker", "parse_marker", "patch_suggestions", "suggestion_block")
 
 def _eq(label, got, want):
     if got != want:
@@ -127,6 +127,21 @@ def _test_can_attempt_comment():
     _eq("namesake lines not crossed", can_attempt_comment(collide, "foo.ts", 100), False)
     _eq("workspace lines not crossed", can_attempt_comment(collide, "sub/foo.ts", 10), False)
 
+def _test_patch_suggestions(ctx: TaskContext):
+    fs = ctx.std.fs
+    dir = fs.mkdtemp()
+    ctx.defer(fs.remove_dir_all, dir)
+    status = ctx.std.process.command("sh").args(["-c", """
+printf -- '--- a/s.sh\\n+++ b/s.sh\\n@@ -1,4 +1,4 @@\\n-a\\n+A\\n ok\\n-c\\n+caf\\351\\n ok\\n' > mixed.patch
+printf -- '--- a/s.sh\\n+++ b/s.sh\\n@@ -1 +1 @@\\n-a\\n+A\\n' > big.patch
+dd if=/dev/null of=big.patch bs=1 seek=67108865 2>/dev/null
+"""]).current_dir(dir).spawn().wait()
+    _eq("fixtures made", status.success, True)
+    got = patch_suggestions(fs, dir + "/mixed.patch")
+    _eq("a block with bytes that aren't UTF-8 is left out", [(f, b["start_line"], b["replacement"]) for f, b in got], [("s.sh", 1, "A")])
+    _eq("a patch past the cap suggests nothing", patch_suggestions(fs, dir + "/big.patch"), [])
+    _eq("a patch that isn't there suggests nothing", patch_suggestions(fs, dir + "/none.patch"), [])
+
 def _test_impl(ctx):
     m = build_marker("gl-123", "lint-bk", "ShellCheck", "a/b.sh", 42, "SC2164")
     _eq("marker shape", m, "<!-- aspect-lint:gl-123:lint-bk:ShellCheck:a/b.sh:42:SC2164 -->")
@@ -156,6 +171,7 @@ def _test_impl(ctx):
 
     _test_diff_window()
     _test_can_attempt_comment()
+    _test_patch_suggestions(ctx)
 
     print("lint_comments.axl: OK")
     return 0

@@ -435,6 +435,10 @@ fn manifest_dir() -> PathBuf {
         .unwrap_or_else(|| std::env::current_dir().expect("current_dir"))
 }
 
+/// How long `basil_bin`'s one-time `cargo build -p basil` may take: long
+/// enough for a cold build on a loaded machine.
+const BASIL_BUILD_TIMEOUT: Duration = Duration::from_secs(20 * 60);
+
 /// Locate the `basil` binary (the fake `bazel` used by tests that exercise
 /// `ctx.bazel.build`).
 ///
@@ -447,74 +451,104 @@ fn manifest_dir() -> PathBuf {
 ///   - **Cargo**: `cargo test -p axl-runtime` doesn't build sibling
 ///     workspace binaries, so we shell out once to `cargo build -p basil`
 ///     and locate the resulting binary alongside our own test exe. Same
-///     recursive-cargo pattern that `assert_cmd`/`escargot` use — by the
+///     recursive-cargo pattern that `assert_cmd`/`escargot` use: by the
 ///     time test binaries are running, the parent cargo's build lock is
 ///     released, so the inner `cargo build` succeeds.
+///
+/// The outcome is cached, a failure too: every test that needs basil panics
+/// with the same message, and a build that failed or wedged is never run
+/// again by the next thread waiting on it.
 pub fn basil_bin() -> &'static str {
-    static BIN: OnceLock<String> = OnceLock::new();
-    BIN.get_or_init(|| {
-        if let Ok(p) = std::env::var("BASIL_BIN") {
-            return std::fs::canonicalize(&p)
-                .unwrap_or_else(|e| panic!("BASIL_BIN={p:?} not found: {e}"))
-                .to_string_lossy()
-                .into_owned();
-        }
+    static BIN: OnceLock<Result<String, String>> = OnceLock::new();
+    match BIN.get_or_init(find_basil) {
+        Ok(path) => path,
+        Err(why) => panic!("{why}"),
+    }
+}
 
-        // CARGO and CARGO_MANIFEST_DIR are set by cargo for test binaries.
-        let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
-        let manifest_dir = manifest_dir();
-        let workspace_root = manifest_dir
-            .parent()
-            .and_then(|p| p.parent())
-            .expect("workspace root above crates/axl-runtime")
-            .to_path_buf();
-        // Cargo sets these for this test binary. Cargo reruns a build script
-        // that watches them (`ring`'s) when they change, so inheriting them
-        // would rebuild basil here, then again on the next `cargo build`.
-        let package_vars = std::env::vars().map(|(k, _)| k).filter(|k| {
-            k.starts_with("CARGO_PKG_")
-                || matches!(
-                    k.as_str(),
-                    "CARGO_MANIFEST_DIR"
-                        | "CARGO_MANIFEST_PATH"
-                        | "CARGO_CRATE_NAME"
-                        | "CARGO_BIN_NAME"
-                        | "CARGO_PRIMARY_PACKAGE"
-                        | "CARGO_TARGET_TMPDIR"
-                        | "CARGO_RUSTC_CURRENT_DIR"
-                        | "OUT_DIR"
-                )
-        });
-        let mut build = std::process::Command::new(&cargo);
-        for k in package_vars {
-            build.env_remove(k);
-        }
-        let status = build
-            .args(["build", "--quiet", "-p", "basil"])
-            .current_dir(&workspace_root)
-            .status()
-            .expect("failed to invoke cargo to build basil");
-        assert!(
-            status.success(),
-            "cargo build -p basil failed (status: {status})"
-        );
+/// [`basil_bin`]'s lookup, and under Cargo its one `cargo build -p basil`.
+fn find_basil() -> Result<String, String> {
+    if let Ok(p) = std::env::var("BASIL_BIN") {
+        return std::fs::canonicalize(&p)
+            .map(|path| path.to_string_lossy().into_owned())
+            .map_err(|e| format!("BASIL_BIN={p:?} not found: {e}"));
+    }
 
-        // Cargo writes the binary alongside the test binary's parent.
-        // current_exe() = target/<profile>/deps/<test>-<hash>;
-        // basil lives at target/<profile>/basil.
-        let test_exe = std::env::current_exe().expect("current_exe");
-        let mut path: PathBuf = test_exe.parent().unwrap().to_path_buf();
-        if path.ends_with("deps") {
-            path.pop();
+    // CARGO and CARGO_MANIFEST_DIR are set by cargo for test binaries.
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+    let manifest_dir = manifest_dir();
+    let workspace_root = manifest_dir
+        .parent()
+        .and_then(|p| p.parent())
+        .ok_or("no workspace root above crates/axl-runtime")?
+        .to_path_buf();
+    // Cargo sets these for this test binary. Cargo reruns a build script
+    // that watches them (`ring`'s) when they change, so inheriting them
+    // would rebuild basil here, then again on the next `cargo build`.
+    let package_vars = std::env::vars().map(|(k, _)| k).filter(|k| {
+        k.starts_with("CARGO_PKG_")
+            || matches!(
+                k.as_str(),
+                "CARGO_MANIFEST_DIR"
+                    | "CARGO_MANIFEST_PATH"
+                    | "CARGO_CRATE_NAME"
+                    | "CARGO_BIN_NAME"
+                    | "CARGO_PRIMARY_PACKAGE"
+                    | "CARGO_TARGET_TMPDIR"
+                    | "CARGO_RUSTC_CURRENT_DIR"
+                    | "OUT_DIR"
+            )
+    });
+    let mut build = std::process::Command::new(&cargo);
+    for k in package_vars {
+        build.env_remove(k);
+    }
+    // Its own bound, so a build that wedges fails here, named, rather than
+    // in whichever hang bound is waiting on it.
+    let mut child = build
+        .args(["build", "--quiet", "-p", "basil"])
+        .current_dir(&workspace_root)
+        .spawn()
+        .map_err(|e| format!("failed to invoke cargo to build basil: {e}"))?;
+    let deadline = std::time::Instant::now() + BASIL_BUILD_TIMEOUT;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {}
+            Err(e) => return Err(format!("waiting on `cargo build -p basil`: {e}")),
         }
-        path.push("basil");
-        assert!(
-            path.exists(),
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!(
+                "`cargo build -p basil` for the fake-Bazel tests took over {BASIL_BUILD_TIMEOUT:?}"
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    };
+    if !status.success() {
+        return Err(format!("cargo build -p basil failed (status: {status})"));
+    }
+
+    // Cargo writes the binary alongside the test binary's parent.
+    // current_exe() = target/<profile>/deps/<test>-<hash>;
+    // basil lives at target/<profile>/basil.
+    let test_exe = std::env::current_exe().map_err(|e| format!("current_exe: {e}"))?;
+    let mut path: PathBuf = test_exe
+        .parent()
+        .ok_or("the test binary has no parent directory")?
+        .to_path_buf();
+    if path.ends_with("deps") {
+        path.pop();
+    }
+    path.push("basil");
+    if !path.exists() {
+        return Err(format!(
             "basil not found at {} after `cargo build -p basil`",
             path.display()
-        );
-        path.to_string_lossy().into_owned()
-    })
+        ));
+    }
+    Ok(path.to_string_lossy().into_owned())
 }
 
 /// Point axl-runtime at basil. Idempotent and safe under parallel test
@@ -543,11 +577,17 @@ pub fn install_basil() {
 /// the only thing observing it, and pulling it out from under that worker turns
 /// one timeout into a run of unrelated failures. See
 /// `build::tests::DaemonStandIn::leak`.
+///
+/// Before the clock starts, the fake Bazel most callers run is found (under
+/// Cargo, built, once per test binary): a first `cargo build -p basil` can
+/// take minutes on a loaded machine, and is no part of what a hang bound
+/// measures.
 pub fn with_timeout<F, R>(timeout: Duration, f: F) -> Option<R>
 where
     F: FnOnce() -> R + Send + 'static,
     R: Send + 'static,
 {
+    basil_bin();
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let _ = tx.send(f());

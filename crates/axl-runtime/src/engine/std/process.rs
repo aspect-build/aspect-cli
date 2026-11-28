@@ -763,24 +763,47 @@ pub(crate) fn output_methods(registry: &mut MethodsBuilder) {
         Ok(ExitStatus(out.0.status))
     }
 
-    /// The data that the process wrote to stderr.
+    /// The text that the process wrote to stderr. Bytes that aren't UTF-8
+    /// are replaced with U+FFFD, so a child's output never fails the read.
     #[starlark(attribute)]
     fn stderr<'v>(this: values::Value<'v>) -> anyhow::Result<String> {
         let out = this.downcast_ref_err::<Output>().into_anyhow_result()?;
-        Ok(String::from_utf8(out.0.stderr.clone())?)
+        Ok(String::from_utf8_lossy(&out.0.stderr).into_owned())
     }
 
-    /// The data that the process wrote to stdout.
+    /// The text that the process wrote to stdout. Bytes that aren't UTF-8
+    /// are replaced with U+FFFD, so a child's output never fails the read.
     #[starlark(attribute)]
     fn stdout<'v>(this: values::Value<'v>) -> anyhow::Result<String> {
         let out = this.downcast_ref_err::<Output>().into_anyhow_result()?;
-        Ok(String::from_utf8(out.0.stdout.clone())?)
+        Ok(String::from_utf8_lossy(&out.0.stdout).into_owned())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A child's output that isn't UTF-8 reads with its bad bytes replaced.
+    #[cfg(unix)]
+    #[test]
+    fn output_that_is_not_utf8_reads_lossily() {
+        let exit = crate::test::eval(
+            r#"
+def _impl(ctx):
+    out = ctx.std.process.command("sh").args(["-c", "printf 'caf\\351\\n'; printf 'x\\377' >&2"]) \
+        .stdout("piped").stderr("piped").spawn().wait_with_output()
+    if (out.stdout, out.stderr) != ("caf\ufffd\n", "x\ufffd"):
+        fail("got %r and %r" % (out.stdout, out.stderr))
+    return 0
+
+Test = task(implementation = _impl)
+"#,
+        )
+        .run_task(0)
+        .expect("run_task");
+        assert_eq!(exit, Some(0));
+    }
 
     #[test]
     fn spawn_error_excludes_sensitive_args() {

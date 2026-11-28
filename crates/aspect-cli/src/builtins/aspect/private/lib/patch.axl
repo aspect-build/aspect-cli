@@ -3,22 +3,23 @@
 aspect-cli's lint task collects per-target `.patch` files produced by
 linters that can suggest fixes (today: rules_lint's shellcheck wrapper
 running with `--format=diff`). Those patches are unified diffs in the
-same shape `git diff` / `diff -u` emit. This module parses them into
-structured hunks so consumers can:
+same shape `git diff` / `diff -u` emit. `scan` walks them the way
+`patch` does, so a line inside a hunk's body is never read as a header,
+and both consumers build on it:
 
-  - apply them to the working tree (existing behavior, via `patch -p1`)
-  - generate per-edit-block PR review comments with a GitHub
-    `suggestion` block, so reviewers can click "Commit suggestion" to
-    accept the linter's proposed fix without leaving the PR
+  - `fix_patch.axl` applies them to the working tree, one file section
+    at a time
+  - `parse` turns them into hunks for per-edit-block PR review comments
+    with a `suggestion` block, so reviewers can click "Commit suggestion"
+    to accept the linter's proposed fix without leaving the PR
 
-The parser is deliberately small and unified-diff-only — no rename
-detection, no binary-patch decoding, no fuzz/offset handling. Inputs
-are linter-emitted patches, which are well-formed by construction.
+Unified diffs only: no rename detection, no binary-patch decoding, no
+fuzz/offset handling.
 
 A patch represents one or more *file changes*; each file change has
 one or more *hunks*; each hunk has a sequence of *ops* (context, add,
 remove). A single hunk can carry multiple non-adjacent edits when the
-unified-diff context window groups them — `hunk_edit_blocks(hunk)`
+unified-diff context window groups them: `hunk_edit_blocks(hunk)`
 splits each contiguous run of `+`/`-` ops into its own block, so each
 distinct edit gets its own focused review-comment suggestion rather
 than one big one that swallows the surrounding context lines.
@@ -48,93 +49,153 @@ The shape returned by `parse(patch_text)`:
     ]
 """
 
-def parse(patch_text):
-    """Parse unified-diff text into [{file, hunks: [...]}].
+# The most of a patch file read. A larger one is skipped, as anything past
+# the cap would be missed.
+PATCH_CAP = 64 * 1024 * 1024
 
-    Returns an empty list for empty/invalid input. Tolerates trailing
-    "\\ No newline at end of file" markers.
-    """
+Hunk = record(
+    old_start = int,
+    old_count = int,
+    new_start = int,
+    new_count = int,
+    # Index of its `@@` line, and of the line after its body.
+    first = int,
+    end = int,
+)
+
+# One file's diff: the text after `--- ` and `+++ ` on its header lines
+# (`start` and the line after it) and its hunks; `end` is the line after
+# its last hunk.
+Section = record(
+    old = str,
+    new = str,
+    start = int,
+    end = int,
+    hunks = list,
+)
+
+# A walk of a diff's lines: its sections; every other line outside them,
+# as `(index, line)`; and why the walk stopped short, or None.
+Diff = record(
+    sections = list,
+    stray = list,
+    problem = field(str | None, default = None),
+)
+
+def _range(spec: str) -> tuple | None:
+    """`(start, count)` of a hunk range `-a,b` or `+c,d` (count 1 when `,b`
+    is left out), or None when it isn't numbers."""
+    start, _, count = spec[1:].partition(",")
+    count = count or "1"
+    if not (start.isdigit() and count.isdigit()):
+        return None
+    return int(start), int(count)
+
+def _section(header: tuple, hunks: list) -> Section:
+    """The `Section` for `header`, `(old, new, start)`, and its `hunks`."""
+    old, new, start = header
+    return Section(old = old, new = new, start = start, end = hunks[-1].end if hunks else start + 2, hunks = hunks)
+
+def scan(lines: list) -> Diff:
+    """Walk a diff's `lines` (its text split at newlines) as `patch` reads
+    it. A `--- ` line followed by a `+++ ` one starts a file's section; each
+    `@@ ` line right after it, or after the previous hunk, starts a hunk
+    whose body is as many lines as its ranges count (an empty line counts
+    as context, a `\\` line as none). Any other line ends the section and
+    is stray. Stops at a hunk range that isn't numbers or a body that ends
+    before its count."""
+    if lines and lines[-1] == "":
+        lines = lines[:-1]
+    sections = []
+    stray = []
+    current = None
+    hunks = []
+    i = 0
+    for _ in range(len(lines) + 1):
+        if i >= len(lines):
+            break
+        line = lines[i]
+        if line.startswith("--- ") and i + 1 < len(lines) and lines[i + 1].startswith("+++ "):
+            if current != None:
+                sections.append(_section(current, hunks))
+            current = (line[4:], lines[i + 1][4:], i)
+            hunks = []
+            i += 2
+            continue
+        if line.startswith("@@ ") and current != None:
+            ranges = line.split(" ")
+            old = _range(ranges[1]) if len(ranges) > 2 and ranges[1].startswith("-") else None
+            new = _range(ranges[2]) if len(ranges) > 2 and ranges[2].startswith("+") else None
+            if old == None or new == None:
+                return Diff(sections = sections, stray = stray, problem = "a hunk's line range isn't numbers")
+            old_left, new_left = old[1], new[1]
+            j = i + 1
+            for _ in range(len(lines)):
+                if j >= len(lines) or (old_left <= 0 and new_left <= 0 and not lines[j].startswith("\\")):
+                    break
+                body = lines[j]
+                if body.startswith("\\"):
+                    pass
+                elif body.startswith("-"):
+                    old_left -= 1
+                elif body.startswith("+"):
+                    new_left -= 1
+                else:
+                    old_left -= 1
+                    new_left -= 1
+                j += 1
+            if old_left > 0 or new_left > 0:
+                return Diff(sections = sections, stray = stray, problem = "a hunk ends before its line count")
+            hunks.append(Hunk(old_start = old[0], old_count = old[1], new_start = new[0], new_count = new[1], first = i, end = j))
+            i = j
+            continue
+        if current != None:
+            sections.append(_section(current, hunks))
+            current = None
+            hunks = []
+        stray.append((i, line))
+        i += 1
+    if current != None:
+        sections.append(_section(current, hunks))
+    return Diff(sections = sections, stray = stray)
+
+def section_ranges(section: Section) -> list:
+    """The line ranges `[first, end)` holding `section` alone: its header
+    lines and each hunk, nothing between them."""
+    return [(section.start, section.start + 2)] + [(h.first, h.end) for h in section.hunks]
+
+def parse(patch_text: str) -> list:
+    """Parse unified-diff text into [{file, hunks: [...]}], one per
+    `scan` section, `file` its new side's name without a `b/` prefix or
+    timestamp. Returns an empty list for empty input; a diff `scan` stops
+    short on gives the sections before."""
     if not patch_text:
         return []
-
+    lines = patch_text.split("\n")
     files = []
-    current = None  # current file dict
-    current_hunk = None  # current hunk dict
-    for line in patch_text.split("\n"):
-        if line.startswith("+++ b/"):
-            path = line[len("+++ b/"):]
-            current = {"file": path, "hunks": []}
-            files.append(current)
-            current_hunk = None
-            continue
-        if line.startswith("+++ "):
-            # Some tools emit `+++ <path>` without the `b/` prefix.
-            path = line[len("+++ "):]
-            current = {"file": path, "hunks": []}
-            files.append(current)
-            current_hunk = None
-            continue
-        if line.startswith("--- ") or line.startswith("diff ") or line.startswith("index "):
-            continue
-        if line.startswith("@@"):
-            if current == None:
-                continue
-            old_start, old_count, new_start, new_count = _parse_hunk_header(line)
-            current_hunk = {
-                "old_start": old_start,
-                "old_count": old_count,
-                "new_start": new_start,
-                "new_count": new_count,
-                "ops": [],
-            }
-            current["hunks"].append(current_hunk)
-            continue
-        if current_hunk == None:
-            continue
-        if line.startswith("\\"):
-            # `\ No newline at end of file` etc. — diff metadata, skip.
-            continue
-        if line.startswith("+"):
-            current_hunk["ops"].append({"kind": "add", "text": line[1:]})
-            continue
-        if line.startswith("-"):
-            current_hunk["ops"].append({"kind": "remove", "text": line[1:]})
-            continue
-        if line.startswith(" "):
-            current_hunk["ops"].append({"kind": "context", "text": line[1:]})
-            continue
-
-        # Anything else (blank trailing line at EOF, junk before first
-        # @@, etc.) is ignored.
-
+    for section in scan(lines).sections:
+        path = section.new.partition("\t")[0].removesuffix("\r")
+        hunks = []
+        for h in section.hunks:
+            ops = []
+            for line in lines[h.first + 1:h.end]:
+                if line.startswith("\\"):
+                    continue
+                if line.startswith("+"):
+                    ops.append({"kind": "add", "text": line[1:]})
+                elif line.startswith("-"):
+                    ops.append({"kind": "remove", "text": line[1:]})
+                else:
+                    ops.append({"kind": "context", "text": line[1:]})
+            hunks.append({
+                "old_start": h.old_start,
+                "old_count": h.old_count,
+                "new_start": h.new_start,
+                "new_count": h.new_count,
+                "ops": ops,
+            })
+        files.append({"file": path.removeprefix("b/"), "hunks": hunks})
     return files
-
-def _parse_hunk_header(line):
-    """Parse `@@ -a,b +c,d @@ ...` → (a, b, c, d).
-
-    The `,b` / `,d` are optional in unified diff (default 1 when
-    omitted, e.g. single-line change `@@ -5 +5 @@`).
-    """
-    parts = line.split(" ")
-    old = ""
-    new = ""
-    for p in parts:
-        if p.startswith("-"):
-            old = p[1:]
-        elif p.startswith("+"):
-            new = p[1:]
-    old_start, old_count = _parse_range(old)
-    new_start, new_count = _parse_range(new)
-    return (old_start, old_count, new_start, new_count)
-
-def _parse_range(spec):
-    """`12,3` → (12, 3); `12` → (12, 1); empty → (0, 0)."""
-    if not spec:
-        return (0, 0)
-    if "," in spec:
-        a, b = spec.split(",", 1)
-        return (int(a), int(b))
-    return (int(spec), 1)
 
 def hunk_edit_blocks(hunk):
     """Split a hunk into discrete edit blocks for one-suggestion-per-edit posting.

@@ -21,9 +21,8 @@ load("../private/lib/environment.axl", "debug", "feature_logger")
 load("../private/lib/gitlab.axl", "gitlab")
 load("../private/lib/gitlab_detect.axl", "detect_gitlab_mr")
 load("../private/lib/gitlab_token_cache.axl", "gitlab_token_cache")
-load("../private/lib/lint_comments.axl", "build_marker", "can_attempt_comment", "diff_window", "extract_marker", "parse_marker", "suggestion_block")
+load("../private/lib/lint_comments.axl", "build_marker", "can_attempt_comment", "diff_window", "extract_marker", "parse_marker", "patch_suggestions", "suggestion_block")
 load("../private/lib/lint_results.axl", "diagnostics_by_anchor", "patch_linter")
-load("../private/lib/patch.axl", patch_hunk_edit_blocks = "hunk_edit_blocks", patch_parse = "parse")
 load("../private/lib/sarif.axl", "parse_sarif_diagnostics", "sarif_to_review_comments")
 
 _LOG = feature_logger("GitLab lint comments")
@@ -292,63 +291,55 @@ def _build_suggestion_comments(ctx, run_id, task_key, relevant_diagnostics, pend
     comments = []
     diag_by_anchor = diagnostics_by_anchor(relevant_diagnostics)
     for entry in pending_patches:
-        content = ctx.std.fs.read_to_string(entry["path"])
-        if not content:
-            continue
         tool = patch_linter(entry["name"])
         tool_key = tool.lower()
-        for f in patch_parse(content):
-            file_path = f["file"]
-            for h in f["hunks"]:
-                for block in patch_hunk_edit_blocks(h):
-                    if block["adds"] == 0 and block["removes"] == 0:
-                        continue
-                    start_line = block["start_line"]
-                    end_line = block["end_line"]
-                    replacement = block["replacement"]
-                    diag = None
-                    for ln in range(start_line, end_line + 1):
-                        d = diag_by_anchor.get((file_path, ln, tool_key))
-                        if d:
-                            diag = d
-                            break
-                    correlated = diag != None
-                    severity = diag.get("severity", "") if diag else ""
-                    sarif_rule_id = diag.get("rule_id", "") if diag else ""
-                    sarif_tool = diag.get("tool", "") if diag else ""
-                    sarif_message = diag.get("message", "") if diag else ""
-                    display_tool = sarif_tool if correlated and sarif_tool else tool
-                    rule_id = "patch_%d_%d" % (start_line, end_line)
-                    marker = build_marker(run_id, task_key, display_tool, file_path, end_line, rule_id)
-                    suggestion_fence = suggestion_block(replacement, current = end_line, start_line = start_line, end_line = end_line, vcs = "gitlab")
-                    if correlated:
-                        sev_icon = _SUGGESTION_SEVERITY_ICONS.get(severity, "🔧")
-                        header_bits = ["**%s**" % display_tool]
-                        if sarif_rule_id:
-                            header_bits.append("`%s`" % sarif_rule_id)
-                        header = "%s %s" % (sev_icon, " · ".join(header_bits))
-                        body_lines = [marker, header]
-                        if sarif_message:
-                            body_lines.append("")
-                            body_lines.append(sarif_message)
-                        body_lines.append("")
-                        body_lines.append(suggestion_fence)
-                    else:
-                        body_lines = [marker, "🔧 **%s**" % display_tool, "", suggestion_fence]
-                    body = "\n".join(body_lines) + _task_attribution_footer(task_key)
-                    cap_severity = severity if correlated and severity else "warning"
+        for file_path, block in patch_suggestions(ctx.std.fs, entry["path"]):
+            start_line = block["start_line"]
+            end_line = block["end_line"]
+            replacement = block["replacement"]
+            diag = None
+            for ln in range(start_line, end_line + 1):
+                d = diag_by_anchor.get((file_path, ln, tool_key))
+                if d:
+                    diag = d
+                    break
+            correlated = diag != None
+            severity = diag.get("severity", "") if diag else ""
+            sarif_rule_id = diag.get("rule_id", "") if diag else ""
+            sarif_tool = diag.get("tool", "") if diag else ""
+            sarif_message = diag.get("message", "") if diag else ""
+            display_tool = sarif_tool if correlated and sarif_tool else tool
+            rule_id = "patch_%d_%d" % (start_line, end_line)
+            marker = build_marker(run_id, task_key, display_tool, file_path, end_line, rule_id)
+            suggestion_fence = suggestion_block(replacement, current = end_line, start_line = start_line, end_line = end_line, vcs = "gitlab")
+            if correlated:
+                sev_icon = _SUGGESTION_SEVERITY_ICONS.get(severity, "🔧")
+                header_bits = ["**%s**" % display_tool]
+                if sarif_rule_id:
+                    header_bits.append("`%s`" % sarif_rule_id)
+                header = "%s %s" % (sev_icon, " · ".join(header_bits))
+                body_lines = [marker, header]
+                if sarif_message:
+                    body_lines.append("")
+                    body_lines.append(sarif_message)
+                body_lines.append("")
+                body_lines.append(suggestion_fence)
+            else:
+                body_lines = [marker, "🔧 **%s**" % display_tool, "", suggestion_fence]
+            body = "\n".join(body_lines) + _task_attribution_footer(task_key)
+            cap_severity = severity if correlated and severity else "warning"
 
-                    # Unlike the GitHub path we don't set start_line/start_side:
-                    # GitLab anchors the discussion via position.new_line (set in
-                    # build_position) and the `suggestion:-X+Y` fence encodes the
-                    # multi-line replacement range itself, so no separate range
-                    # fields are needed on the comment dict.
-                    comments.append({
-                        "path": file_path,
-                        "line": end_line,
-                        "body": body,
-                        "_severity": cap_severity,
-                    })
+            # Unlike the GitHub path we don't set start_line/start_side:
+            # GitLab anchors the discussion via position.new_line (set in
+            # build_position) and the `suggestion:-X+Y` fence encodes the
+            # multi-line replacement range itself, so no separate range
+            # fields are needed on the comment dict.
+            comments.append({
+                "path": file_path,
+                "line": end_line,
+                "body": body,
+                "_severity": cap_severity,
+            })
     return comments
 
 def _ci_host_from_run_id(run_id):
@@ -601,3 +592,5 @@ GitlabLintComments = feature(
         ),
     },
 )
+
+testonly_build_suggestion_comments = _build_suggestion_comments

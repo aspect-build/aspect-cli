@@ -6,6 +6,7 @@ Run with:
 
 load(
     "./text.axl",
+    "ascii_escaped",
     "closest",
     "did_you_mean",
     "did_you_mean_then",
@@ -121,6 +122,8 @@ def _test_unsafe_characters(ctx):
     _eq("a line separator", has_unsafe_chars("a\u2028b"), True)
     _eq("line breaks kept when asked", printable("a\nb\u202ec", keep = "\n"), "a\nb\\u202ec")
     _eq("above U+FFFF, eight digits", printable("a\U000e0041b"), "a\\U000e0041b")
+    _eq("past ASCII escaped, NFC and NFD apart", (ascii_escaped("\u00e9"), ascii_escaped("e\u0301")), ("\\u00e9", "e\\u0301"))
+    _eq("a backslash doubled, a control character escaped", ascii_escaped("a\\b\x1b"), "a\\\\b\\u001b")
     _eq("a variation selector", has_unsafe_chars("a\ufe0fb"), True)
 
 _UNIT_TESTS = [
