@@ -11,6 +11,8 @@ two spellings but not the two hosts is the behaviour these pin down.
 
 load(
     "@aspect//worktree.axl",
+    "testonly_age_out",
+    "testonly_all_kept",
     "testonly_base_note",
     "testonly_being_set_up",
     "testonly_capped",
@@ -115,6 +117,7 @@ load(
     "work_in",
     "write_registry",
 )
+load("./worktrees_trait.axl", "testonly_pool_options")
 
 def _eq(label, got, want):
     if got != want:
@@ -315,6 +318,34 @@ def _test_prune_respects_the_age_threshold(ctx):
     }}
     _eq("over the line", prunable_slots(ctx.std, pool, registry, 30), ["stale"])
     _eq("everything, at zero", sorted(prunable_slots(ctx.std, pool, registry, 0)), ["fresh", "stale"])
+
+def _swept_by_add(ctx, **options) -> list[str]:
+    """The slots of a fresh pool that `add`'s sweep deletes with the pool's
+    settings at `options` over their defaults. The pool's slots are 29, 45 and
+    100 days idle."""
+    tmp = ctx.std.fs.mkdtemp(prefix = "aspect-wt-test")
+    root = ctx.std.fs.mkdtemp(prefix = "aspect-worktree-root")
+    pool = {"git_common_dir": tmp + "/.git", "dir": tmp + "/pool"}
+    registry = {"slots": {}}
+    for slot_id, days in [("day029", 29), ("day045", 45), ("day100", 100)]:
+        ctx.std.fs.create_dir_all(slot_path(pool, slot_id))
+        registry["slots"][slot_id] = _slot(pool["git_common_dir"], age_days = days)
+    before = list(registry["slots"].keys())
+    restore = testonly_pool_options(ctx, **options)
+    dropped = testonly_age_out(ctx, pool, registry, root)
+    restore()
+    ctx.std.fs.remove_dir_all(tmp)
+    ctx.std.fs.remove_dir_all(root)
+    gone = sorted([s for s in before if s not in registry["slots"]])
+    _eq("count returned for %r" % gone, dropped, len(gone))
+    return gone
+
+def _test_adds_sweep_uses_the_pools_idle_limit(ctx):
+    """`add` deletes free slots by the pool's idle limit, the one `prune`
+    uses, so a slot a config protects from `prune` survives `add` too: 45 days
+    is past the default 30 but inside a configured 90."""
+    _eq("the default", _swept_by_add(ctx), ["day045", "day100"])
+    _eq("configured to 90", _swept_by_add(ctx, max_idle_days = 90), ["day100"])
 
 def _test_prune_leaves_a_live_clones_slots_alone(ctx):
     """Two clones of one repository share a pool directory but not slots. A slot
@@ -2057,6 +2088,17 @@ def _test_an_empty_prune_says_which_of_three_reasons(ctx):
         "nothing to prune: no free slot has been idle for 30 days",
     )
 
+def _test_prune_messages_name_the_limit_only_above_zero(ctx):
+    """The idle limit is named in days, singular for one, and not at all at 0
+    or below, where every free slot was eligible whatever its age."""
+    mine = "/clone/.git"
+    recent = {"slots": {"s1": _slot(mine)}}
+    _eq("one day", testonly_nothing_to_prune(recent, mine, 1), "nothing to prune: no free slot has been idle for 1 day")
+    _eq("kept, one day", testonly_all_kept(1), "nothing to prune: every free slot that has been idle for 1 day was kept, for the reasons above")
+    _eq("kept, 30 days", testonly_all_kept(30), "nothing to prune: every free slot that has been idle for 30 days was kept, for the reasons above")
+    _eq("kept, below 0", testonly_all_kept(-3), "nothing to prune: every free slot was kept, for the reasons above")
+    _eq("kept, at 0", testonly_all_kept(0), "nothing to prune: every free slot was kept, for the reasons above")
+
 def _test_releasing_a_free_slot_points_at_prune(ctx):
     """A free slot handed to `release` is nothing to release — a success, so
     asking twice is safe. The command that deletes a free slot is named for
@@ -3763,6 +3805,7 @@ _UNIT_TESTS = [
     _test_reconcile_closes_the_history_entry_it_ends,
     _test_a_slot_answers_to_its_id_and_to_its_branch,
     _test_an_empty_prune_says_which_of_three_reasons,
+    _test_prune_messages_name_the_limit_only_above_zero,
     _test_releasing_a_free_slot_points_at_prune,
     _test_pruning_a_leased_slot_points_at_release,
     _test_pruning_another_sessions_slot_says_whose_it_is,
@@ -3775,6 +3818,7 @@ _UNIT_TESTS = [
     _test_a_recently_used_base_outranks_an_old_creation_floor,
     _test_prune_never_takes_a_leased_slot,
     _test_prune_respects_the_age_threshold,
+    _test_adds_sweep_uses_the_pools_idle_limit,
     _test_prune_leaves_a_live_clones_slots_alone,
     _test_owned_slots_counts_only_this_clone,
     _test_drop_slot_removes_the_entry_and_the_base,
