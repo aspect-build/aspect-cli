@@ -13,9 +13,10 @@ load("@aspect//feature/dashboard/keys.axl", "dashboard_keys")
 load("@aspect//feature/dashboard/log.axl", "dashboard_log")
 load("@aspect//feature/dashboard/pointer.axl", "dashboard_pointer")
 load("@aspect//feature/dashboard/render.axl", "dashboard_render")
+load("@aspect//feature/dashboard/state.axl", "dashboard_state")
 load("@aspect//feature/dashboard/testing.axl", "dashboard_testing")
 load("@aspect//feature/dashboard/view.axl", "dashboard_view")
-load("@aspect//feature/dashboard.axl", "end_build", "fold_build", "new_build", "new_state", "refusal")
+load("@aspect//feature/dashboard.axl", "refusal")
 load("@std//theme.axl", "theme")
 load("../private/lib/failure_records.axl", "failure_records")
 load("../private/lib/failures.axl", "failures")
@@ -23,6 +24,10 @@ load("../private/lib/results_pages.axl", "ASPECT_PAGE", "BES_PAGE")
 load("../private/lib/term_text.axl", "term_text")
 
 _NO_ENV = dashboard_testing.NO_ENV
+end_build = dashboard_state.end_build
+fold_build = dashboard_state.fold_build
+new_build = dashboard_state.new_build
+new_state = dashboard_state.new_state
 _visible = dashboard_testing.visible
 _eq = dashboard_testing.eq
 _screen = dashboard_testing.screen

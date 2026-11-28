@@ -22,12 +22,13 @@ goldens; review the diff.
 
 load("@aspect//feature/dashboard/actions.axl", "dashboard_actions")
 load("@aspect//feature/dashboard/render.axl", "dashboard_render")
-load("@aspect//feature/dashboard.axl", "new_state")
+load("@aspect//feature/dashboard/state.axl", "dashboard_state")
 load("../private/lib/failure_records.axl", "failure_records")
 load("../private/lib/failures.axl", "failures")
 load("../private/lib/term_text.axl", "term_text")
 
 ANSI = term_text.ANSI
+new_state = dashboard_state.new_state
 bep_progress = failure_records.testonly_bep_progress
 collect_event = failure_records.collect_event
 failure_entries = failures.failure_entries

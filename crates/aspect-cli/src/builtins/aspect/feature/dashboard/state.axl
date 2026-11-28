@@ -1,0 +1,170 @@
+"""The Dashboard's state: a Bazel attempt's (`attempt_state`), a build's
+start and end in the task's screen (`new_build`, `end_build`), each ended
+build folded to a row (`fold_build`), and the whole state before the task
+starts (`new_state`)."""
+
+load("@aspect//feature/dashboard/actions.axl", "dashboard_actions")
+load("@aspect//feature/dashboard/log.axl", "dashboard_log")
+load("../../private/lib/bazel_results.axl", "bes_get")
+load("../../private/lib/failure_records.axl", "failure_records")
+load("../../private/lib/failures.axl", "failures")
+
+_build_outcome = failure_records.build_outcome
+_build_succeeded = failure_records.build_succeeded
+_failure_counts = failures.failure_counts
+_action_split = dashboard_actions.action_split
+_actions_text = dashboard_actions.actions_text
+_new_search = dashboard_log.new_search
+
+def attempt_state(now_ms: int) -> dict:
+    """What a Bazel attempt starts with: its own counts, console, failures
+    and actions, nothing open, timed from `now_ms`."""
+    return dict(
+        failure_records.new_state(),
+        fresh = False,
+        phase = "Starting Bazel…",
+        selected = 0,
+        picked = 0,
+        cache = None,
+        unseen = 0,
+        focus = "console",
+        view = None,
+        log = [],
+        log_size = 0,
+        views = [],
+        parked = {},
+        seeded = 0,
+        seed_trimmed = 0,
+        tab_scroll = 0,
+        hover = None,
+        select = None,
+        kinds = [],
+        own = [],
+        closing = [],
+        closing_tail = [],
+        closing_cut = 0,
+        early = [],
+        dropped = 0,
+        unseen_errors = 0,
+        slowest = {},
+        critical = "",
+        spawn_slowest = [],
+        folded = [],
+        fold_src = [],
+        fold_head = [],
+        fold_open = {},
+        log_base = 0,
+        fold_n = -1,
+        fold_seen = 0,
+        scroll = 0,
+        start_ms = now_ms,
+        bazel_uuid = "",
+        exec_log_read = False,
+        done_total = None,
+        settled = 0,
+    )
+
+def _clear_build(state: dict) -> None:
+    """What a build keeps beside `attempt_state`'s, which the next build and a
+    retried attempt alike start without: the root causes it noted, and what
+    was worked out from them."""
+    state["root_causes"] = {}
+    for key in ("blocked_cache", "entries_cache", "own_cache", "ties_cache"):
+        state[key] = None
+
+# What a build has of its own, which the next build (or a retried attempt)
+# starts afresh; the console and what is open in it are the task's.
+_PER_BUILD = ["fails", "outputs", "selected", "picked", "cache", "last_attempts", "spread", "test_counts", "counts", "inv", "closing", "closing_tail", "closing_cut", "slowest", "spawn_slowest", "critical", "bazel_uuid", "exec_log_read", "done_total", "bep_done_total", "settled", "excerpts"]
+
+def new_build(state: dict, now_ms: int) -> None:
+    """Start the next build (or a retried attempt) in the task's screen: its
+    own counts, failures and invocation, timed from `now_ms`. The console is
+    the task's, so it, the search over it (its current match, where the bar
+    opened, whether it is anchored there) and what is open in it are kept.
+    The Failures list, if focused, goes back to the console, as its rows are
+    the old build's."""
+    fresh = attempt_state(now_ms)
+    for key in _PER_BUILD:
+        state[key] = fresh[key]
+    _clear_build(state)
+    state["progress"] = []
+    state["fresh"] = False
+    state["build_failed"] = False
+    state["build_start_ms"] = now_ms
+    state["picked_build"] = None
+    if state.get("focus") == "failures":
+        state["focus"] = "console"
+
+def end_build(state: dict, now_ms: int) -> None:
+    """A build's end, inside `wait()`: its execution log was read to its end
+    before then, so the build folded to a row (`fold_build`; the task goes
+    on, and its finished screen shows its builds) keeps that it was."""
+    state["exec_log_read"] = True
+    fold_build(state, now_ms)
+    state["building"] = False
+
+def fold_build(state: dict, now_ms: int) -> None:
+    """Keep the build that just ended as a folded row (`build_row`) and what
+    its tabs show, for `<`/`>` to pick it again."""
+    failed, blocked = _failure_counts(state)
+    started = state.get("inv", {}).get("build_started")
+    state.setdefault("builds", []).append(dict(
+        command = str(bes_get(started, "command", "") or "") or state.get("build_command", "") or "bazel",
+        actions = _actions_text(_action_split(dict(state, building = False))),
+        failed = failed,
+        blocked = blocked,
+        ok = failed == 0 and not state["counts"]["tests_failed"] and not state.get("build_failed") and _build_succeeded(state.get("inv") or {}),
+        outcome = _build_outcome(state.get("inv") or {}),
+        ms = max(0, now_ms - state.get("build_start_ms", now_ms)),
+        snapshot = dict({k: state.get(k) for k in _BUILD_KEYS}, building = False, blocked_cache = None, entries_cache = None, own_cache = None, ties_cache = None, excerpts = {}),
+    ))
+
+# What a folded build keeps for its tabs.
+_BUILD_KEYS = ["counts", "inv", "slowest", "spawn_slowest", "critical", "pages", "fails", "outputs", "test_counts", "last_attempts", "spread", "root_causes", "bes_base", "bazel_uuid", "exec_log_read", "done_total", "bep_done_total", "log_path", "collected_errors"]
+
+def new_state(**fields) -> dict:
+    """A Dashboard's whole state before its task starts: a first attempt's
+    (`attempt_state`), nothing taken or read yet, with `fields` set over
+    it (the task's arguments and runtime, or a test's)."""
+    state = attempt_state(0)
+    state.update(
+        screen = None,
+        task = "",
+        start_ms = 0,
+        now_ms = 0,
+        frames = 0,
+        progress = [],
+        filter = "all",
+        search = _new_search(),
+        re = None,
+        controls = None,
+        list = "failures",
+        help = False,
+        zoom = False,
+        mouse = False,
+        line_links = {},
+        frame = [],
+        pane = (-1, -1),
+        excerpt = None,
+        cols = 80,
+        osc = "",
+        note = "",
+        clock = None,
+        process = None,
+        countdown_ms = None,
+        all_actions = True,
+        ended = False,
+        pages = [],
+        bes_base = "",
+        update = {},
+    )
+    state.update(fields)
+    return state
+
+dashboard_state = namespace(
+    attempt_state = attempt_state,
+    end_build = end_build,
+    fold_build = fold_build,
+    new_build = new_build,
+    new_state = new_state,
+)

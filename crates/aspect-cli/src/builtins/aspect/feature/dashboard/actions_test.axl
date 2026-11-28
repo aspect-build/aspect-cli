@@ -8,8 +8,8 @@ Run with:
 load("@aspect//feature/dashboard/actions.axl", "dashboard_actions")
 load("@aspect//feature/dashboard/keys.axl", "dashboard_keys")
 load("@aspect//feature/dashboard/render.axl", "dashboard_render")
+load("@aspect//feature/dashboard/state.axl", "dashboard_state")
 load("@aspect//feature/dashboard/testing.axl", "dashboard_testing")
-load("@aspect//feature/dashboard.axl", "fold_build")
 load("@std//theme.axl", "theme")
 load("../../private/lib/failure_records.axl", "failure_records")
 load("../../private/lib/term_text.axl", "term_text")
@@ -26,6 +26,7 @@ build_progress = dashboard_actions.testonly_build_progress
 cache_kinds = dashboard_actions.testonly_cache_kinds
 count_event = failure_records.testonly_count_event
 count_spawn = failure_records.count_spawn
+fold_build = dashboard_state.fold_build
 help_rows = dashboard_keys.help_rows
 hit_count = dashboard_actions.testonly_hit_count
 hit_percent = dashboard_actions.testonly_hit_percent

@@ -2,8 +2,10 @@
 whole state over a console (`_screen`), a drawn row without its escapes,
 and the build metrics a few tests read."""
 
-load("@aspect//feature/dashboard.axl", "new_state")
+load("@aspect//feature/dashboard/state.axl", "dashboard_state")
 load("@std//theme.axl", "theme")
+
+_new_state = dashboard_state.new_state
 
 # An environment with nothing set, for the states the tests build.
 _NO_ENV = struct(var = lambda name: None)
@@ -29,7 +31,7 @@ def _eq(label, got, want):
 def _screen(ctx, log, **kw):
     """A dashboard's whole state, as the feature keeps it (`new_state`), over
     `log`, a build running, read by no machine's environment."""
-    return new_state(**dict(dict(task = "build", phase = "", log = log, re = ctx.std.re, env = _NO_ENV, building = True, logged_index = None), **kw))
+    return _new_state(**dict(dict(task = "build", phase = "", log = log, re = ctx.std.re, env = _NO_ENV, building = True, logged_index = None), **kw))
 
 def _role(name):
     return theme.sgr(name, stream = True)
