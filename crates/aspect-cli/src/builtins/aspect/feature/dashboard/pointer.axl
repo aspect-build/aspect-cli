@@ -354,7 +354,8 @@ def next_editor(state: dict) -> str:
 def _view_file(state: dict) -> tuple | None:
     """The file `o` opens, `(path, line)`: the peek's, the log shown's, or
     for the console the task's whole output (`output.log` in its history
-    folder, beside its builds' `bazel/<n>/`), else Bazel's console log."""
+    folder, beside its builds' `bazel/<n>/`, or a past run's own folder),
+    else Bazel's console log."""
     view = state["view"]
     if view != None and view.get("path"):
         return (view["path"], view.get("line", 1))
@@ -362,7 +363,7 @@ def _view_file(state: dict) -> tuple | None:
         paths = _log_paths(state, view["record"])
         return (paths[0][1] if paths else "", 1)
     console = state.get("log_path", "")
-    task_dir = console.rpartition("/bazel/")[0]
+    task_dir = console.rpartition("/bazel/")[0] or (state.get("past") or {}).get("dir", "")
     output = task_dir + "/output.log" if task_dir else ""
     if output and state.get("read") != None and state["read"](output, 0) != None:
         return (output, 1)

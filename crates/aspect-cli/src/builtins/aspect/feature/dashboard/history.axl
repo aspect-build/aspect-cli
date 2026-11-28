@@ -1,0 +1,780 @@
+"""The Dashboard's History screen (`h`, and `aspect history browse`): the
+runs the task history keeps (`new_browser`, `history_records`), a row each
+(`run_row`), and a past one read back from the history (`past_run`) and
+shown in the live run's place (`show_past`), as the dashboard showed it:
+its builds replayed from the events the history kept, its failures' logs
+the history's own copies (`use_kept_logs`), the Console its output as
+shown. dashboard/render.axl draws the screen (`render_history`) and a past
+run's header (`past_header`); dashboard/keys.axl reads its keys.
+
+While a past run is shown, the live one waits aside (`live`), and every
+hook changes it there (`on_live`, dashboard/state.axl). While browsing,
+Ctrl+C is a key (`set_interrupts`): a first says what a second does
+(`ctrl_c_note`).
+"""
+
+load("@aspect//feature/dashboard/actions.axl", "dashboard_actions")
+load("@aspect//feature/dashboard/log.axl", "dashboard_log")
+load("@aspect//feature/dashboard/state.axl", "dashboard_state")
+load("@std//time.axl", "local_offset_s", "monotonic", "now_ms")
+load("../../private/lib/failure_records.axl", "failure_records")
+load("../../private/lib/history_records.axl", "command", "outcome", "show_lines", "task_name", "took")
+load("../../private/lib/results_pages.axl", "results_pages")
+load("../../private/lib/term_text.axl", "term_text")
+load("../../private/lib/text.axl", "printable")
+
+_c = term_text.c
+_fit = term_text.fit
+_RESET = term_text.RESET
+_text_width = term_text.text_width
+_thousands = term_text.thousands
+_bazel_line = failure_records.bazel_line
+_progress_counts = failure_records.progress_counts
+_SPINNER = dashboard_actions.SPINNER
+_add_lines = dashboard_log.add_lines
+_MAX_LOG = dashboard_log.MAX_LOG
+_new_search = dashboard_log.new_search
+_refold = dashboard_log.refold
+_end_build = dashboard_state.end_build
+_live_of = dashboard_state.live_of
+_new_build = dashboard_state.new_build
+_new_run = dashboard_state.new_run
+_on_run = dashboard_state.on_run
+_run_of = dashboard_state.run_of
+_show_run = dashboard_state.show_run
+_take_event = dashboard_state.take_event
+
+# How many runs the screen lists, and the filters `f` cycles through.
+_LIMIT = 500
+
+_FILTERS = ["builds", "failed builds", "all runs"]
+
+# How long a first Ctrl+C while browsing waits for a second.
+_CTRL_C_MS = 2000
+
+def new_browser(history, exclude: str = "", standalone: bool = False, workspace: str = "") -> dict:
+    """What the History screen keeps: `history` (`ctx.std.history`), the
+    run it leaves out (`exclude`, the live task's ID, listed first as the
+    live build), whether it is the whole screen (`standalone`, no live run
+    to go back to), and the workspace it was opened in (`workspace`, its
+    root, "" outside one), whose runs it lists first."""
+    return {
+        "history": history,
+        "exclude": exclude,
+        "standalone": standalone,
+        "workspace": workspace,
+        "here": workspace != "",
+        "filter": _FILTERS[0],
+        "records": None,
+        "selected": 0,
+        "chosen": None,
+        "top": 0,
+        "reading": "",
+        "census": None,
+        "live_record": None,
+        "now_ms": 0,
+    }
+
+def history_records(state: dict) -> list:
+    """The runs the History screen lists, by its filter and workspace, read
+    once each time it opens or they change, the chosen one kept chosen when
+    it is still listed, though newer runs came above it. The history is read
+    whole once (`census()`), and the counts and the filters answer from
+    that read; read with them, the time now and the live run's own record,
+    which has a row of its own."""
+    b = state["browser"]
+    if b["records"] == None:
+        b["now_ms"] = now_ms()
+        b["census"] = b["history"].census()
+        if not b["standalone"] and b["exclude"]:
+            b["live_record"] = b["history"].get(b["exclude"])
+        listed = b["history"].list(
+            limit = _LIMIT + 1,
+            outcome = "failed" if b["filter"] == "failed builds" else None,
+            builds = b["filter"] != "all runs",
+            workspace = b["workspace"] if b["here"] and b["workspace"] else None,
+        )
+        b["records"] = [r for r in listed if r.get("task", {}).get("id") != b["exclude"]][:_LIMIT]
+        ids = [row_id(r) for r in history_rows(state)]
+        b["selected"] = ids.index(b["chosen"]) if b["chosen"] in ids else min(b["selected"], max(0, len(ids) - 1))
+    rows = history_rows(state)
+    b["chosen"] = row_id(rows[b["selected"]]) if rows else None
+    return b["records"]
+
+def history_rows(state: dict) -> list:
+    """The History screen's rows: the live build first (None) when there is
+    one to go back to, then the runs listed."""
+    b = state["browser"]
+    return ([None] if not b["standalone"] else []) + (b["records"] or [])
+
+def row_id(row: dict | None) -> str:
+    """A row's ID: `live` for the live build's, else its run's task ID."""
+    return "live" if row == None else row.get("task", {}).get("id", "")
+
+def cycle_filter(state: dict) -> None:
+    """`f`: the next filter (builds, failed builds, all runs), from the top."""
+    b = state["browser"]
+    b["filter"] = _FILTERS[(_FILTERS.index(b["filter"]) + 1) % len(_FILTERS)]
+    b["records"] = None
+    b["selected"] = 0
+    b["chosen"] = None
+
+def toggle_workspace(state: dict) -> bool:
+    """`w`: this workspace's runs, or every workspace's; whether there is a
+    workspace to toggle (none outside one)."""
+    b = state["browser"]
+    if not b["workspace"]:
+        return False
+    b["here"] = not b["here"]
+    b["records"] = None
+    return True
+
+def filter_note(state: dict) -> str:
+    """What `f` says it did, and what it lists next."""
+    shown = state["browser"]["filter"]
+    return "listing %s · f lists %s" % (shown, _FILTERS[(_FILTERS.index(shown) + 1) % len(_FILTERS)])
+
+def workspace_note(state: dict) -> str:
+    """What `w` says it did, and how to go back."""
+    return "this workspace's runs · w lists every workspace's" if state["browser"]["here"] else "every workspace's runs · w lists this one's"
+
+def open_history(state: dict, back: bool = False) -> None:
+    """Show the History screen, the history read anew and the first row
+    chosen; `back` from a past run, the run it showed still chosen and the
+    list from the same read. While the live build runs, Ctrl+C is a key
+    here (`set_interrupts`), so it never cancels the build unseen."""
+    if state.get("browser") == None:
+        return
+    state["browser"]["records"] = None
+    if not back:
+        state["browser"]["census"] = None
+        state["browser"]["chosen"] = None
+        state["browser"]["selected"] = 0
+    state["mode"] = "history"
+    state["help"] = False
+    state["select"] = None
+    set_interrupts(state)
+
+def history_open(state: dict) -> bool:
+    """Whether the History screen is shown."""
+    return state.get("mode") == "history"
+
+def browsing(state: dict) -> bool:
+    """Whether the History screen or a past run is shown."""
+    return history_open(state) or state.get("past") != None
+
+def set_interrupts(state: dict) -> None:
+    """Ctrl+C a key while browsing, a signal again on the live screen of a
+    build still running (not on the finished screen, `holding`, which reads
+    it as a key itself)."""
+    screen = state.get("screen")
+    if screen != None and not state.get("holding") and not state["browser"]["standalone"]:
+        screen.interrupts(not browsing(state))
+
+def ctrl_c_note(state: dict) -> str:
+    """While a first Ctrl+C on a browsing screen waits for a second, what
+    the keys row says; else ""."""
+    at = state.get("ctrl_c_ms")
+    if at == None or int(monotonic() * 1000) - at > _CTRL_C_MS:
+        return ""
+    if _live_of(state)["cancelling"]:
+        return "cancelling the live build · Ctrl+C again forces it"
+    return "Ctrl+C again cancels the live build · Esc back to it"
+
+def keys_labels(state: dict) -> list:
+    """The History screen's keys row's labels: the filter and workspace as
+    they are now; with no runs at all, only how to leave."""
+    b = state["browser"]
+    leave = "q/Esc quit" if b["standalone"] else "Esc live build"
+    if not b["records"] and not (b["census"] or {}).get("runs"):
+        return ["q quit"] if b["standalone"] else [leave]
+    parts = ["↑↓ choose", "Enter open", "f filter: " + b["filter"]]
+    if b["workspace"]:
+        parts.append("w: " + ("this workspace" if b["here"] else "all workspaces"))
+    return parts + [leave, "? keys"]
+
+def page_rows(rows: int) -> int:
+    """How many runs the History screen lists at once, `rows` tall."""
+    return max(1, rows - 4)
+
+def count_text(state: dict) -> str:
+    """The History screen's count: how many runs it lists of how many the
+    history keeps (`500 newest builds of 7,702 runs`)."""
+    b = state["browser"]
+    n = len(b["records"] or [])
+
+    # The runs the list could show: not the live one, which has a row of its
+    # own.
+    total = (b["census"] or {}).get("runs", n) - (1 if b.get("live_record") != None else 0)
+    total = max(total, n)
+    noun = {"builds": "build", "failed builds": "failed build", "all runs": "run"}[b["filter"]]
+    of = "of %s run%s" % (_thousands(total), "" if total == 1 else "s")
+    if b["here"] and b["workspace"]:
+        # The total is every workspace's, the list this one's.
+        of += " in all workspaces"
+    if n >= _LIMIT:
+        return "%s newest %ss %s" % (_thousands(n), noun, of)
+    if b["filter"] == "all runs" and n == total and not (b["here"] and b["workspace"]):
+        return "%s run%s" % (_thousands(n), "" if n == 1 else "s")
+    return "%s %s%s %s" % (_thousands(n), noun, "" if n == 1 else "s", of)
+
+def damaged_text(state: dict) -> str:
+    """The entries the history could not list, for under the list: folders
+    without a record, records a newer CLI wrote, records that do not read;
+    "" for none."""
+    census = state["browser"]["census"] or {}
+    parts = []
+    for key, noun, what in (("without_record", "folder", "without a record"), ("newer", "record", "from a newer CLI"), ("unreadable", "record", "unreadable")):
+        n = census.get(key, 0)
+        if n:
+            parts.append("%s %s%s %s" % (_thousands(n), noun, "" if n == 1 else "s", what))
+    return " · ".join(parts)
+
+def _live_state(state: dict) -> tuple:
+    """How the live build is doing: `(state, detail)`, `running` with its
+    `21/35` (or ""), `cancelling`, or `done` with its ✔ or ✗."""
+    live = _live_of(state)
+    if live["cancelling"] and not live["ended"]:
+        return ("cancelling", "")
+    if live["ended"]:
+        return ("done", "✔" if live.get("verdict", True) else "✗")
+    line = _bazel_line(live["progress"][0]) if live.get("progress") else ""
+    counts = _progress_counts(line) if line else None
+    return ("running", "%s/%s" % (_thousands(counts[0]), _thousands(counts[1])) if counts else "")
+
+def live_words(state: dict) -> str:
+    """The live build in a past run's header: `live: ⠋ 21/35`, `live: ✗
+    done`, `live: cancelling…`, words that read without colour."""
+    how, detail = _live_state(state)
+    if how == "cancelling":
+        return "live: cancelling…"
+    if how == "done":
+        return "live: %s done" % detail
+    return "live: %s %s" % (_SPINNER[state["frames"] % len(_SPINNER)], detail or "running")
+
+def live_header(state: dict) -> str:
+    """The live build on the History screen's header: `live build running
+    21/35`, `live build ✔ done`, `live build cancelling…`."""
+    how, detail = _live_state(state)
+    if how == "cancelling":
+        return "live build cancelling…"
+    if how == "done":
+        return "live build %s done" % detail
+    return "live build running" + (" " + detail if detail else "")
+
+def history_bar() -> str:
+    """The status bar's style over the history: the theme's `status_bar`,
+    in its `accent` colour, so a past run never passes for the live one,
+    though a theme restyles either."""
+    return _c("status_bar") + _c("accent")
+
+def _local_parts(ms: int) -> tuple:
+    """A UTC instant `ms` in local time: `(day, HH:MM)`, `day` counted from
+    1970-01-01."""
+    local = ms + local_offset_s(ms) * 1000
+    day = local // 86400000
+    minute = (local % 86400000) // 60000
+    hh, mm = minute // 60, minute % 60
+    return day, ("0" if hh < 10 else "") + str(hh) + ":" + ("0" if mm < 10 else "") + str(mm)
+
+_WEEKDAYS = ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"]
+
+_MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+
+def _civil(day: int) -> tuple:
+    """The `(year, month, day)` of a day counted from 1970-01-01 (Howard
+    Hinnant's civil_from_days)."""
+    z = day + 719468
+    era = z // 146097
+    doe = z - era * 146097
+    yoe = (doe - doe // 1460 + doe // 36524 - doe // 146096) // 365
+    doy = doe - (365 * yoe + yoe // 4 - yoe // 100)
+    mp = (5 * doy + 2) // 153
+    d = doy - (153 * mp + 2) // 5 + 1
+    m = mp + 3 if mp < 10 else mp - 9
+    return yoe + era * 400 + (1 if m <= 2 else 0), m, d
+
+def ago(stamp: str, now: int) -> str:
+    """When a run started, `stamp` (UTC), as the local clock tells it from
+    `now` (ms since 1970): `just now`, `8m ago`, `16:36` earlier today,
+    `yesterday 16:36`, `Mon 16:36` this week, `Nov 3 16:36` this year, else
+    `2025-11-03`."""
+    ms = stamp_ms(stamp)
+    if ms == None:
+        return stamp
+    since = now - ms
+    if since >= 0 and since < 60000:
+        return "just now"
+    if since >= 0 and since < 3600000:
+        return "%dm ago" % (since // 60000)
+    day, clock = _local_parts(ms)
+    today = _local_parts(now)[0]
+    if day == today:
+        return clock
+    if day == today - 1:
+        return "yesterday " + clock
+    if today - 7 < day and day < today:
+        return _WEEKDAYS[day % 7] + " " + clock
+    y, m, d = _civil(day)
+    if y == _civil(today)[0]:
+        return "%s %d %s" % (_MONTHS[m - 1], d, clock)
+    return "%d-%s%d-%s%d" % (y, "0" if m < 10 else "", m, "0" if d < 10 else "", d)
+
+def stamp_ms(stamp: str) -> int | None:
+    """A record's UTC timestamp (`2026-11-21T15:39:39.143Z`) as milliseconds
+    since 1970, or None for one it cannot read."""
+    date, _, time = stamp.rstrip("Z").partition("T")
+    parts = date.split("-")
+    clock, _, fraction = time.partition(".")
+    hms = clock.split(":")
+    if len(parts) != 3 or len(hms) != 3 or not all([p.isdigit() for p in parts + hms]):
+        return None
+    y, m, d = int(parts[0]), int(parts[1]), int(parts[2])
+
+    # Days from the civil date (Howard Hinnant's days_from_civil).
+    y -= 1 if m <= 2 else 0
+    era = y // 400
+    yoe = y - era * 400
+    doy = (153 * (m + (-3 if m > 2 else 9)) + 2) // 5 + d - 1
+    days = era * 146097 + yoe * 365 + yoe // 4 - yoe // 100 + doy - 719468
+    ms = int((fraction + "000")[:3]) if fraction.isdigit() else 0
+    return ((days * 24 + int(hms[0])) * 60 + int(hms[1])) * 60000 + int(hms[2]) * 1000 + ms
+
+def _span_ms(started, ended) -> int | None:
+    """The milliseconds from one record timestamp to another, or None
+    without both."""
+    a = stamp_ms(started or "")
+    b = stamp_ms(ended or "")
+    return b - a if a != None and b != None and b >= a else None
+
+def _status_text(record: dict) -> tuple:
+    """A run's status column and its role: `✔ ok`, `✗ exit 1`, `✗ error`,
+    `■ cancelled`, `◌ running`."""
+    ended = outcome(record)
+    if ended == "ok":
+        return "✔ ok", "success"
+    if ended in ("cancelled", "abandoned"):
+        return "■ " + ended, "warning"
+    if ended == "running":
+        return "◌ running", "accent"
+    return "✗ " + ended, "error"
+
+def _command_text(record: dict) -> str:
+    """A run's command line without the program, as typed after `aspect`."""
+    return command(record).removeprefix("aspect ").removeprefix("aspect")
+
+def run_row(record: dict, width: int, now: int, chosen: bool) -> str:
+    """A run's row as drawn, `width` wide: its status, when it started, how
+    long it took and its command, its ID dimmed at the right end, which
+    goes first when the row is narrow."""
+    status, role = _status_text(record)
+    started = ago(record.get("started", ""), now)
+    head = _fit(status, 11) + " " + _fit(started, 16) + " " + _fit(took(record), 7) + " "
+    id = record.get("task", {}).get("id", "")[:8]
+    room = width - _text_width(head)
+    keep_id = room >= 30
+    cmd = _fit(printable(_command_text(record), keep = "\t"), room - (10 if keep_id else 0))
+    plain = head + cmd + (_fit("  " + id, 10) if keep_id else "")
+    if chosen:
+        return _c("active") + plain + _RESET
+    return _c(role) + _fit(status, 11) + _RESET + head[len(_fit(status, 11)):] + cmd + (_c("muted") + _fit("  " + id, 10) + _RESET if keep_id else "")
+
+def live_row(state: dict, width: int, chosen: bool) -> str:
+    """The live build's row as drawn, `width` wide, first in the list: `●
+    now running <command> (live)`, or once it ended how it went; Enter goes
+    back to it."""
+    rec = state["browser"].get("live_record")
+    cmd = _command_text(rec) if rec != None else _live_of(state).get("task", "")
+    how, detail = _live_state(state)
+    if how == "done":
+        text = "● %s (live, %s done)" % (cmd, detail)
+    else:
+        text = "● now running %s (live)" % cmd
+    return (_c("active") if chosen else _c("accent")) + _fit(printable(text, keep = "\t"), width) + _RESET
+
+def workspace_of(std) -> str:
+    """The Bazel workspace the task runs in (`std.env.bazel_root_dir()`, as
+    its history record names it), or "" outside one."""
+    return std.env.bazel_root_dir() if std.env.in_bazel_workspace() else ""
+
+def _fresh_view(state: dict) -> None:
+    """The UI as a newly shown run starts: its console, following it,
+    nothing open, its folds drawn for the mouse as it is; the filter, zoom,
+    wrap, the mouse and what Ctrl+O shows kept."""
+    state.update(
+        scroll = 0,
+        view = None,
+        views = [],
+        parked = {},
+        tab = "console",
+        tab_scroll = 0,
+        focus = "console",
+        search = _new_search(),
+        selected = 0,
+        picked = 0,
+        picked_build = None,
+        panes = None,
+        unseen = 0,
+        unseen_errors = 0,
+        help = False,
+        list = "failures",
+        select = None,
+        stepped = None,
+        actions_scroll = 0,
+        tip_selected = 0,
+    )
+    _refold(state)
+
+def show_past(state: dict, record: dict) -> None:
+    """Read `record` back and show it, the live run (when it is the one
+    shown) kept aside in `live`; the list drawn first saying what is being
+    read (`state["draw"]`, where a screen is held), as a big build takes a
+    moment."""
+    b = state["browser"]
+    if state.get("draw") != None:
+        b["reading"] = record.get("task", {}).get("id", "")[:8]
+        state["draw"]()
+    run = past_run(state, record)
+    b["reading"] = ""
+    if state.get("live") == None and state.get("past") == None:
+        state["live"] = _run_of(state)
+    _show_run(state, run)
+    _fresh_view(state)
+    state["mode"] = "run"
+    set_interrupts(state)
+
+def show_live(state: dict) -> None:
+    """Show the live run again, if a past one is shown in its place."""
+    if state.get("live") != None:
+        _show_run(state, state["live"])
+        state["live"] = None
+        _fresh_view(state)
+    state["mode"] = "run"
+    state["ctrl_c_ms"] = None
+    set_interrupts(state)
+
+def ctrl_c(state: dict) -> bool:
+    """Ctrl+C while browsing: standalone, it leaves (whether it does).
+    During a live build, the first says what a second does (`ctrl_c_note`),
+    and a second within `_CTRL_C_MS` interrupts the live build as a Ctrl+C
+    on its own screen would (`screen.interrupt()`) and shows it; while it
+    is already cancelling, that second one is the repeat that forces it to
+    stop, and shows it too. Once the live task has ended (or its finished
+    screen is held), it goes back to the live screen, where Ctrl+C
+    leaves."""
+    if state["browser"]["standalone"]:
+        return True
+    live = _live_of(state)
+    if live["ended"] or state.get("holding"):
+        show_live(state)
+        return False
+    if not ctrl_c_note(state):
+        state["ctrl_c_ms"] = int(monotonic() * 1000)
+        return False
+    live["cancelling"] = True
+    show_live(state)
+    if state.get("screen") != None:
+        state["screen"].interrupt()
+    return False
+
+def _is_test_log(name: str) -> bool:
+    """Whether a kept file `name` is a `test.log`: as kept, or numbered
+    (`test.2.log`) where another test's took the name."""
+    if name == "test.log":
+        return True
+    middle = name.removeprefix("test.").removesuffix(".log")
+    return name.startswith("test.") and name.endswith(".log") and middle.isdigit()
+
+# The most of a build's `actions.json` read; a longer one is not used.
+_MAX_INDEX_BYTES = 8 << 20
+
+def _summary_failures(build: dict) -> list:
+    """The failures a build's record summed up, each a dict; none for a
+    summary that is not one."""
+    summary = build.get("summary")
+    failures = summary.get("failures") if type(summary) == "dict" else None
+    return [f for f in failures if type(f) == "dict"] if type(failures) == "list" else []
+
+def _summary_records(dir: str, build: dict) -> list:
+    """Failure records from a build's summary in its record, for a build
+    whose event stream was cut short before them: each a past run's, its
+    logs the history's copies under `dir` (`kept:<path>`)."""
+    out = []
+    for f in _summary_failures(build):
+        kind = "test" if f.get("kind") == "test" else "action"
+        logs = [log for log in (f.get("logs") or []) if type(log) == "string"]
+        if kind == "test":
+            logs = [log for log in logs if _is_test_log(log.rpartition("/")[2])]
+        attempt = f.get("attempt") if type(f.get("attempt")) == "list" and len(f["attempt"]) == 3 else [1, 1, 1]
+        record = {
+            "kind": kind,
+            "label": str(f.get("label", "")),
+            "detail": str(f.get("detail", "") or ("attempt %d" % attempt[2] if kind == "test" else "Action")),
+            "files": [(log.rpartition("/")[2], "kept:" + dir + "/" + log) for log in logs],
+            "output": "",
+            "config": "",
+            "success": False,
+            "past": True,
+            "indexed": True,
+        }
+        if kind == "test":
+            record.update(run = attempt[0], shard = attempt[1], attempt = attempt[2])
+        out.append(record)
+    return out
+
+def _attempt_of(entry: dict) -> int:
+    """An `actions.json` entry's `build_attempt`, 0 for one it has not or
+    gives as anything but a whole number."""
+    n = entry.get("build_attempt", 0)
+    if type(n) == "string" and n.isdigit():
+        return int(n)
+    return n if type(n) == "int" else 0
+
+def use_kept_logs(state: dict, dir: str, build: dict, actions: list = [], folder: str = "", attempts: int | None = None, indexed: dict = {}) -> None:
+    """Point each failure of a past run's `build` at the logs the history
+    kept for it (its summary's, under `dir`, as `kept:<path>`), matched by
+    label and the action's mnemonic or the test attempt, in order, a
+    failure that kept none holding its place; a test attempt's `test.log`
+    alone, as the live record has. Point each action that wrote output at
+    the logs its build's `actions.json` lists (`actions`, its entries;
+    `folder`, where it is), those that succeeded, matched by label and
+    mnemonic in order, among the build's last attempt's entries
+    (`build_attempt`, when Bazel restarted it; the last is `attempts`, the
+    index's `build_attempts`, when it says). Mark every record as the
+    past's (`past`), and whether the history kept an index of its kind's
+    logs (`indexed`, by kind)."""
+    kept = {}
+    for f in _summary_failures(build):
+        attempt = f.get("attempt")
+        key = (f.get("kind", ""), f.get("label", ""), tuple(attempt) if type(attempt) == "list" and attempt else f.get("detail", ""))
+        logs = [log for log in (f.get("logs") or []) if type(log) == "string"]
+        if f.get("kind") == "test":
+            logs = [log for log in logs if _is_test_log(log.rpartition("/")[2])]
+        kept.setdefault(key, []).append(logs)
+    for record in state["fails"]:
+        record["past"] = True
+        record["indexed"] = indexed.get(record["kind"], False)
+        what = (record["run"], record["shard"], record["attempt"]) if record["kind"] == "test" else record["detail"]
+        logs = kept.get((record["kind"], record["label"], what))
+        mine = logs.pop(0) if logs else []
+        if mine:
+            record["files"] = [(log.rpartition("/")[2], "kept:" + dir + "/" + log) for log in mine]
+
+    # The index lists every attempt of a build Bazel restarted in place,
+    # and the run shows its last.
+    actions = [a for a in actions if type(a) == "dict"]
+    last = attempts if attempts != None else max([_attempt_of(a) for a in actions] or [0])
+    listed = {}
+    for a in actions:
+        # Outputs are of actions that succeeded; a failure's log is its own.
+        if a.get("success") == False or _attempt_of(a) != last:
+            continue
+        key = (str(a.get("label", "")), str(a.get("mnemonic", "") or "Action"))
+        listed.setdefault(key, []).append(a)
+    for record in state["outputs"]:
+        record["past"] = True
+        entries = listed.get((record["label"], record["detail"]))
+        a = entries.pop(0) if entries else None
+        if a:
+            files = [(name, "kept:" + folder + "/" + a[name]) for name in ("stderr", "stdout") if type(a.get(name)) == "string" and a[name]]
+            if files:
+                record["files"] = files
+
+# What a past run's build whose kept event stream was cut short says.
+CUT_STREAM = "event stream ended early"
+
+def _replay_build(s: dict, record: dict, build: dict, events: str) -> None:
+    """One of a past run's Bazel invocations into `s`, as the live screen
+    took it: its kept `events` (`take_event`), its failures pointed at the
+    history's copies of their logs (`use_kept_logs`), Bazel's raw log the
+    history's copy beside them (`console.log`) and its exit code
+    (`bazel_exit`), then folded to a row (`end_build`), timed by its
+    record; one whose stream was cut short says so on its row, and one
+    still being written is in progress."""
+    _new_build(s, 0)
+    s["building"] = True
+    s["stream_cut"] = False
+    s["in_progress"] = False
+    s["build_command"] = build.get("command", "")
+    stream = bazel.build_events.read(events)
+    for event in stream:
+        _take_event(s, event)
+    folder = events.rpartition("/")[0]
+    got = s["read"](folder + "/actions.json", _MAX_INDEX_BYTES)
+    index = json.try_decode(got[0], None) if got != None and got[1] == 0 else None
+    index = index if type(index) == "dict" else {}
+    actions = index.get("actions") if type(index.get("actions")) == "list" else []
+    attempts = index.get("build_attempts") if type(index.get("build_attempts")) == "int" else None
+
+    # Which kinds the history was keeping logs of, so a failure without one
+    # does not name a flag that was already on.
+    indexed = {
+        "action": s["read"](folder + "/actions.json", 0) != None,
+        "test": s["read"](folder + "/testlogs.json", 0) != None,
+    }
+    use_kept_logs(s, record.get("dir", ""), build, actions = actions, folder = folder, attempts = attempts, indexed = indexed)
+    if not stream.complete and outcome(record) == "running" and build.get("ended") == None:
+        # Still being written: what it has so far.
+        s["in_progress"] = True
+    elif not stream.complete:
+        # Cut short before its failures came, the record's summary of them.
+        s["stream_cut"] = True
+        if not s["fails"]:
+            s["fails"] = _summary_records(record.get("dir", ""), build)
+    code = build.get("exit_code")
+    s["build_failed"] = code not in (None, 0)
+    s["bazel_exit"] = code if type(code) == "int" else None
+    console = folder + "/console.log"
+    s["log_path"] = console if s["read"](console, 0) != None else ""
+    s["pages"] = results_pages(s["bes_base"], s["bazel_uuid"], {})
+    span = _span_ms(build.get("started"), build.get("ended"))
+    _end_build(s, span if span != None else 0)
+    if s.get("stream_cut"):
+        s["builds"][-1]["outcome"] = CUT_STREAM
+    elif s.get("in_progress"):
+        s["builds"][-1]["outcome"] = "in progress"
+        s["builds"][-1]["running"] = True
+
+def _size_text(n: int) -> str:
+    """A size in bytes as `12.3 MiB`, `40 KiB` or `512 bytes`."""
+    if n >= 1 << 20:
+        tenths = n * 10 // (1 << 20)
+        return "%d.%d MiB" % (tenths // 10, tenths % 10)
+    if n >= 1 << 10:
+        return "%d KiB" % (n // (1 << 10))
+    return "%d bytes" % n
+
+# The most of a past run's output read back: what the console keeps without
+# trimming it (`add_lines`), with the line naming the older ones.
+_REPLAY_LINES = _MAX_LOG - _MAX_LOG // 10 - 1
+
+def past_run(state: dict, record: dict) -> dict:
+    """The run of a history `record` (`ctx.std.history`), read back as the
+    dashboard showed it: each Bazel invocation that kept its build events
+    (`bazel.build_events.read`) folded to a row as the live screen folds a
+    build that ended (`_replay_build`), its failures' logs the history's own
+    copies (a log it did not keep is not looked for in the output tree,
+    which may hold a later build's); and the Console the task's whole output
+    as it was shown (its `output.ansi`, through `ctx.std.history.read_output`,
+    the newest `_REPLAY_LINES`, a line first naming what older output was
+    left out). A run that started no build shows its record in words
+    (`show_lines`, as `aspect history show` does); one whose folder went
+    since the list was read says its files were removed. Ended, its time
+    from its start to its last build's end (else its duration), its results
+    pages those it linked as well as the ones its last build named."""
+    id = record.get("task", {}).get("id", "")
+    show = "aspect history show " + id[:8]
+    gone = record.get("dir") and state["read"](record["dir"] + "/task.json", 0) == None
+
+    def kept(path):
+        return path if path and state["read"](path, 0) != None else None
+
+    builds = [(b, kept(b.get("build_events"))) for b in record.get("bazel", [])]
+    builds = [(b, events) for b, events in builds if events]
+    output = state["browser"]["history"].read_output(record, limit = _REPLAY_LINES) if not gone and not record.get("evicted") else None
+
+    def read(s):
+        if not record.get("bazel"):
+            lines = show_lines(record)
+            _add_lines(s, ["This run started no Bazel build · " + show, ""] + lines, cli = True)
+            return
+        if record.get("evicted"):
+            _add_lines(s, ["This run's files were removed (pruned %s) · %s" % (ago(record["evicted"], now_ms()), show)], cli = True)
+            return
+        if gone:
+            _add_lines(s, ["This run's files were removed since the list was read · " + show], cli = True)
+            return
+        for build, events in builds:
+            _replay_build(s, record, build, events)
+        if output == None:
+            _add_lines(s, ["console not kept for this run · " + show], cli = True)
+            return
+        older = []
+        if output["dropped_bytes"]:
+            older.append(_size_text(output["dropped_bytes"]) + " of older output")
+        if output["dropped"]:
+            older.append("%s older lines" % _thousands(output["dropped"]))
+        if older:
+            _add_lines(s, [" and ".join(older) + ": " + show], cli = True)
+        lines = output["lines"]
+        _add_lines(s, [l["text"] for l in lines], [l["links"] for l in lines], [l["colour"] for l in lines])
+
+    run = _on_run(state, _new_run(task = task_name(record), phase = "History"), read)
+    pages = list(run["pages"])
+    for link in record.get("links", []):
+        page = (link.get("label", ""), link.get("url", ""))
+        if page[1] and page[1] not in [url for _, url in pages]:
+            pages.append(page)
+    recorded = record.get("bazel") or [{}]
+    span = _span_ms(record.get("started"), recorded[-1].get("ended"))
+    run.update(
+        ended = True,
+        progress = [],
+        start_ms = 0,
+        task_start_ms = 0,
+        now_ms = span if span != None else (record.get("duration_ms") or 0),
+        pages = pages,
+        past = record,
+        verdict = outcome(record) == "ok",
+    )
+    return run
+
+def past_header(state: dict, cols: int = 1 << 30) -> str:
+    """A past run's header, `cols` wide at most, the mode first so it never
+    passes for the live one: `■ History · build //pkg:t · 11:45 (8m ago) ·
+    exit 1 · 5.2s`, the command cut to fit, a run recorded while it ran
+    saying as of when the list was read."""
+    rec = state["past"]
+    b = state.get("browser") or {}
+    now = b.get("now_ms") or now_ms()
+    status, _ = _status_text(rec)
+    mark, _, ended = status.partition(" ")
+    started = rec.get("started", "")
+    ms = stamp_ms(started)
+    when_text = ago(started, now)
+    if ms != None and ("ago" in when_text or when_text == "just now"):
+        when_text = _local_parts(ms)[1] + " (" + when_text + ")"
+    rest = [when_text, "running, as of " + _local_parts(now)[1] if ended == "running" else ended]
+    if took(rec):
+        rest.append(took(rec))
+    if [b for b in state.get("builds", []) if b.get("outcome") == CUT_STREAM]:
+        rest.append(CUT_STREAM)
+    cmd = printable(_command_text(rec), keep = "\t")
+    fixed = _text_width(" %s History ·  · %s " % (mark, " · ".join(rest)))
+    if _text_width(cmd) > cols - fixed:
+        cmd = _fit(cmd, max(1, cols - fixed)).rstrip(" ")
+    return " %s %s " % (mark, " · ".join(["History", cmd] + rest))
+
+dashboard_history = namespace(
+    ago = ago,
+    browsing = browsing,
+    count_text = count_text,
+    ctrl_c = ctrl_c,
+    ctrl_c_note = ctrl_c_note,
+    CUT_STREAM = CUT_STREAM,
+    cycle_filter = cycle_filter,
+    damaged_text = damaged_text,
+    filter_note = filter_note,
+    history_bar = history_bar,
+    history_open = history_open,
+    history_records = history_records,
+    history_rows = history_rows,
+    keys_labels = keys_labels,
+    live_header = live_header,
+    live_row = live_row,
+    live_words = live_words,
+    new_browser = new_browser,
+    open_history = open_history,
+    page_rows = page_rows,
+    past_header = past_header,
+    past_run = past_run,
+    row_id = row_id,
+    run_row = run_row,
+    show_live = show_live,
+    show_past = show_past,
+    stamp_ms = stamp_ms,
+    toggle_workspace = toggle_workspace,
+    testonly_use_kept_logs = use_kept_logs,
+    workspace_note = workspace_note,
+    workspace_of = workspace_of,
+)

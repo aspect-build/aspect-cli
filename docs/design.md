@@ -113,6 +113,12 @@ Use `name = "explicit-name"` to override the derived command name. Command names
 | `friendly_kind` | Help section headings | Title Case. Auto-derived from the kind (`axl-add` → `Axl Add`). |
 | `show_task_options` | `--help` | Lists the `--task:*` flags under `Task Options`, plus the features footer. Set it on tasks that report to CI status surfaces; the flags are accepted either way. Default `False`. |
 
+#### Other task fields
+
+| Field | Effect |
+|---|---|
+| `keep_history` | Whether a run keeps an entry in the task history (`aspect history`): its record, its output and its builds' files. With `False` the run writes nothing there and its builds' logs go to the temp dir; the `aspect history` tasks set it, as they only read the history. Default `True`. |
+
 #### CLI arguments
 
 Argument types: `args.string()`, `args.int()`, `args.uint()`, `args.boolean()`, their `_list` variants, `args.positional()`, `args.trailing_var_args()`, `args.passthrough(position = ...)`, and `args.custom(type, default = ...)` for non-CLI/config-only values (lambdas, dicts of complex shape, etc.). Scalar/list types support `required`, `default`, `description`, `long` (kebab-flag override), `config_only`, and (for scalar types) `short` for a single-character alias.

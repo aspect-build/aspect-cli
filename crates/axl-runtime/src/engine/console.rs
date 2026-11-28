@@ -24,6 +24,15 @@ use crate::diag::Verbose;
 use super::arguments::Arguments;
 use super::template::json_to_minijinja;
 
+/// The built-in tasks with a preset of their own, by command path, as if
+/// `task_presets` named them: `aspect history browse` is its full screen
+/// alone, with no header or verdict around it. A `task_presets` entry for
+/// the task, by its command path or its kind, replaces one; a
+/// `task_templates` entry's slots beat it, as they beat any task's preset.
+/// Here rather than as the `Console` arg's default, which an `args.custom`
+/// dict cannot have.
+const BUILTIN_TASK_PRESETS: &[(&str, &str)] = &[("history browse", "silent")];
+
 /// Resolve the surface for `task` on `host` from the `Console` feature's
 /// merged `args`.
 ///
@@ -93,7 +102,14 @@ pub fn from_feature_args(
             string_value(template, || format!("templates[{slot:?}]"))?,
         )?;
     }
-    for (task_key, name) in string_dict(args, "task_presets")? {
+    let presets = string_dict(args, "task_presets")?;
+    for (path, name) in BUILTIN_TASK_PRESETS {
+        let kind = path.rsplit(' ').next().unwrap_or(path);
+        if !presets.iter().any(|(key, _)| *key == *path || *key == kind) {
+            overrides.set_preset_for_task(path, (*name).to_owned())?;
+        }
+    }
+    for (task_key, name) in presets {
         overrides.set_preset_for_task(
             task_key,
             string_value(name, || format!("task_presets[{task_key:?}]"))?,
@@ -343,6 +359,11 @@ mod tests {
     /// `task_templates` bindings (each `None` when unset), then render `slot`
     /// with `text = "x"`.
     fn render(code: &str, slot: Slot) -> Result<String, String> {
+        render_as(code, slot, &task())
+    }
+
+    /// [`render`] for the task `who`.
+    fn render_as(code: &str, slot: Slot, who: &TaskIdentity) -> Result<String, String> {
         let code = format!(
             r#"templates = None
 task_presets = None
@@ -355,9 +376,42 @@ args = {{"templates": templates, "task_presets": task_presets, "task_templates":
             for (name, value) in DictRef::from_value(bound).unwrap().iter() {
                 args.insert(name.unpack_str().unwrap().into(), value);
             }
-            let surface = from_feature_args(&args, task(), Host::default(), &[], None)?;
+            let surface = from_feature_args(&args, who.clone(), Host::default(), &[], None)?;
             Ok(surface.render(slot, minijinja::context! { text => "x" }))
         })
+    }
+
+    /// `aspect history browse` takes its built-in preset (`silent`: no
+    /// header or verdict), unless the user's own entry for it, by kind or
+    /// command path, says otherwise.
+    #[test]
+    fn browse_takes_its_builtin_preset_unless_the_user_names_it() {
+        let browse = TaskIdentity {
+            kind: "browse".into(),
+            group: vec!["history".into()],
+            name: "browse".into(),
+            path: "history browse".into(),
+        };
+        let at = |code: &str, slot| render_as(code, slot, &browse).unwrap();
+        assert_eq!(at("", Slot::Verdict), "");
+        assert_eq!(at("", Slot::Header), "");
+        assert_eq!(
+            at(
+                r#"task_templates = {"browse": {"verdict": "V {{ text }}"}}"#,
+                Slot::Verdict
+            ),
+            "V x"
+        );
+        assert_ne!(
+            at(r#"task_presets = {"history browse": "full"}"#, Slot::Header),
+            ""
+        );
+        assert_ne!(at(r#"task_presets = {"browse": "full"}"#, Slot::Header), "");
+        assert_ne!(
+            render(r#"task_presets = {"lint": "full"}"#, Slot::Header).unwrap(),
+            "",
+            "another task keeps its own"
+        );
     }
 
     #[test]

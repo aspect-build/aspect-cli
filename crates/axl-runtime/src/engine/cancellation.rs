@@ -477,6 +477,22 @@ fn cancellation_methods(registry: &mut MethodsBuilder) {
         ))
     }
 
+    /// The exit code a run whose root was cancelled ends with by default,
+    /// by the shell's convention and the first signal's kind: 143 when that
+    /// asked it to terminate (SIGTERM, a hangup), else 130 (Ctrl+C, SIGINT,
+    /// or `root.cancel()` with no signal); None while the root is not
+    /// cancelled.
+    #[starlark(attribute)]
+    fn exit_code<'v>(this: values::Value<'v>) -> anyhow::Result<NoneOr<i32>> {
+        let this = this
+            .downcast_ref_err::<Cancellation>()
+            .into_anyhow_result()?;
+        if !this.signals.root().is_cancelled() {
+            return Ok(NoneOr::None);
+        }
+        Ok(NoneOr::Other(this.signals.exit_for().code as i32))
+    }
+
     /// A token nothing cancels but you. Bind a process to it to keep it out
     /// of Ctrl+C and stop it yourself, with `cancel()` on the token or
     /// `interrupt()`, `terminate()` and `kill()` on the handle.

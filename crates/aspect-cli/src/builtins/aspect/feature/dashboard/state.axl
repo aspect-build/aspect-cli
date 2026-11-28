@@ -1,0 +1,378 @@
+"""The Dashboard's state: a Bazel attempt's (`attempt_state`), a build's
+start and end in the task's screen (`new_build`, `end_build`), each ended
+build folded to a row (`fold_build`), its build events (`take_event`, which
+starts a build's over when Bazel restarts it in place), and the whole
+state before the task starts (`new_state`).
+
+The state is the UI's keys (`new_ui`, `_UI_KEYS`: what is open, the focus,
+the scroll, the search, the mouse, what the task's context gives,
+`use_context`) and the shown run's (`new_run`, every other key: one task
+invocation's builds, console and failures). While a past run from the task
+history is shown (dashboard/history.axl), the live one waits in `live`,
+and every hook changes it there (`on_live`), out of sight.
+"""
+
+load("@aspect//feature/dashboard/actions.axl", "dashboard_actions")
+load("@aspect//feature/dashboard/log.axl", "dashboard_log")
+load("@aspect//feature/dashboard/view.axl", "dashboard_view")
+load("../../private/lib/bazel_results.axl", "bb_clientd_root", "bes_get")
+load("../../private/lib/failure_records.axl", "failure_records")
+load("../../private/lib/failures.axl", "failures")
+load("../../private/lib/results_pages.axl", "bes_results_url")
+load("../../private/lib/term_text.axl", "term_text")
+
+_ANSI = term_text.ANSI
+_CONTROLS = term_text.CONTROLS
+_build_outcome = failure_records.build_outcome
+_collect_event = failure_records.collect_event
+_build_succeeded = failure_records.build_succeeded
+_failure_counts = failures.failure_counts
+_action_split = dashboard_actions.action_split
+_actions_text = dashboard_actions.actions_text
+_new_search = dashboard_log.new_search
+_refresh_test_view = dashboard_view.refresh_test_view
+
+def attempt_state(now_ms: int) -> dict:
+    """What a Bazel attempt starts with: its own counts, console, failures
+    and actions, nothing open, timed from `now_ms`."""
+    return dict(
+        failure_records.new_state(),
+        fresh = False,
+        phase = "Starting Bazel…",
+        selected = 0,
+        picked = 0,
+        cache = None,
+        unseen = 0,
+        focus = "console",
+        view = None,
+        log = [],
+        log_size = 0,
+        views = [],
+        parked = {},
+        seeded = 0,
+        seed_trimmed = 0,
+        tab_scroll = 0,
+        hover = None,
+        select = None,
+        kinds = [],
+        own = [],
+        closing = [],
+        closing_tail = [],
+        closing_cut = 0,
+        early = [],
+        dropped = 0,
+        unseen_errors = 0,
+        slowest = {},
+        critical = "",
+        spawn_slowest = [],
+        folded = [],
+        fold_src = [],
+        fold_head = [],
+        fold_open = {},
+        log_base = 0,
+        fold_n = -1,
+        fold_seen = 0,
+        scroll = 0,
+        start_ms = now_ms,
+        bazel_uuid = "",
+        exec_log_read = False,
+        done_total = None,
+        settled = 0,
+    )
+
+def _clear_build(state: dict) -> None:
+    """What a build keeps beside `attempt_state`'s, which the next build and a
+    retried attempt alike start without: the root causes it noted, and what
+    was worked out from them."""
+    state["root_causes"] = {}
+    for key in ("blocked_cache", "entries_cache", "own_cache", "ties_cache"):
+        state[key] = None
+
+# What a build has of its own, which the next build (or a retried attempt)
+# starts afresh; the console and what is open in it are the task's.
+_PER_BUILD = ["fails", "outputs", "selected", "picked", "cache", "last_attempts", "spread", "test_counts", "counts", "inv", "closing", "closing_tail", "closing_cut", "slowest", "spawn_slowest", "critical", "bazel_uuid", "exec_log_read", "done_total", "bep_done_total", "settled", "excerpts"]
+
+def new_build(state: dict, now_ms: int) -> None:
+    """Start the next build (or a retried attempt) in the task's screen: its
+    own counts, failures and invocation, timed from `now_ms`. The console is
+    the task's, so it, the search over it (its current match, where the bar
+    opened, whether it is anchored there) and what is open in it are kept.
+    The Failures list, if focused, goes back to the console, as its rows are
+    the old build's. A `build_started` that came before this (`take_event`)
+    is the build's own."""
+    fresh = attempt_state(now_ms)
+    for key in _PER_BUILD:
+        state[key] = fresh[key]
+    _clear_build(state)
+    state["progress"] = []
+    state["fresh"] = False
+    state["build_failed"] = False
+    state["build_start_ms"] = now_ms
+    state["picked_build"] = None
+    state["started_seen"] = state.get("started_early", False)
+    state["started_early"] = False
+    if state.get("focus") == "failures":
+        state["focus"] = "console"
+
+def end_build(state: dict, now_ms: int) -> None:
+    """A build's end, inside `wait()`: its execution log was read to its end
+    before then, so the build folded to a row (`fold_build`; the task goes
+    on, and its finished screen shows its builds) keeps that it was."""
+    state["exec_log_read"] = True
+    fold_build(state, now_ms)
+    state["building"] = False
+
+def fold_build(state: dict, now_ms: int) -> None:
+    """Keep the build that just ended as a folded row (`build_row`) and what
+    its tabs show, for `<`/`>` to pick it again."""
+    failed, blocked = _failure_counts(state)
+    started = state.get("inv", {}).get("build_started")
+    state.setdefault("builds", []).append(dict(
+        command = str(bes_get(started, "command", "") or "") or state.get("build_command", "") or "bazel",
+        actions = _actions_text(_action_split(dict(state, building = False))),
+        failed = failed,
+        blocked = blocked,
+        ok = failed == 0 and not state["counts"]["tests_failed"] and not state.get("build_failed") and _build_succeeded(state.get("inv") or {}),
+        outcome = _build_outcome(state.get("inv") or {}),
+        ms = max(0, now_ms - state.get("build_start_ms", now_ms)),
+        snapshot = dict({k: state.get(k) for k in _BUILD_KEYS}, building = False, blocked_cache = None, entries_cache = None, own_cache = None, ties_cache = None, excerpts = {}),
+    ))
+
+# What a folded build keeps for its tabs.
+_BUILD_KEYS = ["counts", "inv", "slowest", "spawn_slowest", "critical", "pages", "fails", "outputs", "test_counts", "last_attempts", "spread", "root_causes", "bes_base", "bazel_uuid", "exec_log_read", "done_total", "bep_done_total", "log_path", "collected_errors"]
+
+# What of a build its events told, which Bazel restarting it in place
+# starts over; its console and what came of it (the closing block, the
+# slowest actions, the critical path) are the stream's, as Bazel wrote it.
+_PER_ATTEMPT = ["fails", "outputs", "selected", "picked", "last_attempts", "spread", "test_counts", "counts", "inv", "bazel_uuid", "bep_done_total", "excerpts"]
+
+def restart_attempt(state: dict) -> None:
+    """Bazel restarting the build in place (a second `build_started` in one
+    stream, as after a remote cache eviction): what its events told starts
+    over (`_PER_ATTEMPT`: counts, failures, outputs, the invocation), as
+    its summary does; its console, Bazel's errors, its start and what is
+    open go on. Focus on the list it empties goes back to the console."""
+    fresh = attempt_state(0)
+    for key in _PER_ATTEMPT:
+        state[key] = fresh[key]
+    _clear_build(state)
+    if state.get("focus") == "failures":
+        state["focus"] = "console"
+
+def take_event(state: dict, event) -> None:
+    """One build event, live or read back from the history: the
+    invocation's id and `--bes_results_url` for its results pages, then
+    what the failure summary and the Failures list read (`collect_event`)
+    and a test's open log shown anew (`refresh_test_view`). A second
+    `build_started` in the build, Bazel restarting it in place, starts its
+    events over (`restart_attempt`); one that comes before the build's
+    first frame counts for it (`new_build`)."""
+    kind = event.kind
+    if kind == "build_started":
+        if state.get("building") and not state["fresh"]:
+            if state.get("started_seen"):
+                restart_attempt(state)
+            state["started_seen"] = True
+        else:
+            state["started_early"] = True
+        state["bazel_uuid"] = str(bes_get(event.payload, "uuid", "") or "")
+    elif kind == "options_parsed":
+        state["bes_base"] = bes_results_url(event) or state["bes_base"]
+    _collect_event(state, event)
+    _refresh_test_view(state, event)
+
+def new_ui(**fields) -> dict:
+    """The UI's keys of a dashboard's state before its task starts: nothing
+    open, following the console, nothing of the task's context taken yet
+    (`use_context`), no History screen (`browser`) nor past run shown
+    (`live`, the live run aside); `fields` set over it."""
+    ui = dict(
+        screen = None,
+        frames = 0,
+        filter = "all",
+        search = _new_search(),
+        re = None,
+        read = None,
+        ansi = None,
+        bb_root = None,
+        controls = None,
+        process = None,
+        excerpt = None,
+        clock = None,
+        list = "failures",
+        selected = 0,
+        picked = 0,
+        focus = "console",
+        view = None,
+        views = [],
+        parked = {},
+        scroll = 0,
+        tab_scroll = 0,
+        unseen = 0,
+        unseen_errors = 0,
+        help = False,
+        zoom = False,
+        mouse = False,
+        hover = None,
+        select = None,
+        frame = [],
+        pane = (-1, -1),
+        cols = 80,
+        osc = "",
+        note = "",
+        countdown_ms = None,
+        mode = "run",
+        browser = None,
+        live = None,
+    )
+    ui.update(fields)
+    return ui
+
+# The UI's keys: `new_ui`'s, and those set as the screen is drawn, keys are
+# read and the task's context is taken. Every other key of the state is the
+# shown run's.
+_UI_KEYS = {k: True for k in list(new_ui().keys()) + [
+    "drawn",
+    "ticking",
+    "draw",
+    "env",
+    "io",
+    "fs",
+    "syntax",
+    "cancellation",
+    "cli_version",
+    "silencer",
+    "tips_from",
+    "stay",
+    "tab",
+    "tab_row",
+    "tab_spans",
+    "row_lines",
+    "continued",
+    "failed_at",
+    "actions_at",
+    "actions_scroll",
+    "folded_at",
+    "folded_rows",
+    "wrap",
+    "unfolded",
+    "expand_failures",
+    "panes",
+    "picked_build",
+    "tip_selected",
+    "stepped",
+    "page_h",
+    "last_size",
+    "last_press",
+    "editor_choice",
+    "help_top",
+    "note_until",
+    "holding",
+    "ctrl_c_ms",
+    "leave_on_return",
+]}
+
+def new_run(**fields) -> dict:
+    """The shown run's keys of a dashboard's state before its first build: a
+    first attempt's (`attempt_state`) but the UI's keys, its console empty,
+    nothing ended; `fields` set over it (its `task`, `<group> <kind>`, and
+    `phase`)."""
+    run = {k: v for k, v in attempt_state(0).items() if k not in _UI_KEYS}
+    run.update(
+        task = "",
+        start_ms = 0,
+        now_ms = 0,
+        progress = [],
+        line_links = {},
+        all_actions = True,
+        ended = False,
+        pages = [],
+        bes_base = "",
+        update = {},
+    )
+    run.update(fields)
+    return run
+
+def new_state(**fields) -> dict:
+    """A Dashboard's whole state before its task starts: the UI's
+    (`new_ui`) and a run's (`new_run`), nothing taken or read yet, with
+    `fields` set over it (the task's arguments and runtime, or a test's)."""
+    state = new_ui()
+    state.update(new_run())
+    state.update(fields)
+    return state
+
+def run_of(state: dict) -> dict:
+    """The shown run's keys of `state` (all but `_UI_KEYS`)."""
+    return {k: v for k, v in state.items() if k not in _UI_KEYS}
+
+def show_run(state: dict, run: dict) -> None:
+    """Show `run` in `state` in place of the run shown, its UI kept."""
+    for k in [k for k in state.keys() if k not in _UI_KEYS]:
+        state.pop(k)
+    state.update(run)
+
+def on_run(state: dict, run: dict, change: typing.Callable) -> dict:
+    """`run` once `change` (a function of a state) has been applied to it as
+    if it were shown, on a copy of `state`, so what the change does to the
+    UI (a new build moving focus, new lines counted unseen, the search's
+    current match, the console parked under a tab) stays off the screen
+    the user is looking at."""
+    scratch = dict(state)
+    scratch["search"] = dict(state["search"])
+    scratch["parked"] = dict(state.get("parked", {}))
+    show_run(scratch, run)
+    change(scratch)
+    return run_of(scratch)
+
+def live_of(state: dict) -> dict:
+    """The live run: aside while a past run is shown, else the state."""
+    return state["live"] if state.get("live") != None else state
+
+def on_live(state: dict, change: typing.Callable) -> None:
+    """Apply `change` (a function of a state) to the live run: the state
+    itself, or, while a past run is shown in its place, the live one kept
+    aside (`on_run`)."""
+    if state.get("live") != None:
+        state["live"] = on_run(state, state["live"], change)
+    else:
+        change(state)
+
+def use_context(state: dict, ctx) -> None:
+    """What reading a log, opening a link or a file and cancelling take,
+    from a task's `ctx`: its `std` modules (`re`, and `ANSI` and `CONTROLS`
+    compiled; `read`, `std.fs.try_read_tail`; `env`, `process`, `io`, `fs`,
+    `syntax`), the runner's bb_clientd mount (`bb_root`), the CLI's version
+    and the task's `cancellation`."""
+    std = ctx.std
+    state.update(
+        re = std.re,
+        cli_version = std.env.aspect_cli_version() or "",
+        read = std.fs.try_read_tail,
+        ansi = std.re.compile(_ANSI),
+        controls = std.re.compile(_CONTROLS),
+        env = std.env,
+        bb_root = bb_clientd_root(std.env),
+        process = std.process,
+        io = std.io,
+        fs = std.fs,
+        syntax = std.syntax,
+        cancellation = ctx.cancellation,
+    )
+
+dashboard_state = namespace(
+    attempt_state = attempt_state,
+    end_build = end_build,
+    fold_build = fold_build,
+    live_of = live_of,
+    new_build = new_build,
+    new_run = new_run,
+    new_state = new_state,
+    new_ui = new_ui,
+    on_live = on_live,
+    on_run = on_run,
+    run_of = run_of,
+    show_run = show_run,
+    take_event = take_event,
+    use_context = use_context,
+)
