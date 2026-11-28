@@ -141,21 +141,29 @@ def _stray_why(line: str) -> str | None:
             return "a file of mode %s (a symlink or submodule), not a regular file" % mode
     return None
 
+def _signature(lines: list, i: int) -> bool:
+    """Whether line `i` of a diff is git's `-- ` signature separator (CRLF
+    or not), the line after it no hunk line."""
+    after = lines[i + 1] if i + 1 < len(lines) else ""
+    return lines[i].removesuffix("\r") == "-- " and after[:1] not in ("+", "-", " ")
+
 def _scan(text: str) -> tuple:
     """`(files, why)`: each file section of the diff `text` as a `_File`, and
     why the patch is refused, or None (`_stray_why`, `_header_name`, the
-    walk stopping short, or a hunk line right after a section's last hunk,
-    where a count that falls short shows). Elsewhere a line starting with
-    `+`, `-` or a space is text around the diff: a `git format-patch`
-    message, a diffstat, or the `-- ` signature git puts right after the
-    last hunk."""
-    diff = scan(text.split("\n"))
+    walk stopping short, or a hunk line right after a section, where a
+    count that falls short shows, or after the header pair such extra lines
+    can make). Elsewhere a line starting with `+`, `-` or a space is text
+    around the diff: a `git format-patch` message, a diffstat, or the `-- `
+    signature git puts right after the last hunk, with its version, not a
+    hunk line, after it."""
+    lines = text.split("\n")
+    diff = scan(lines)
     if diff.problem:
         return [], diff.problem
     why = None
-    after_hunks = {s.end: True for s in diff.sections if s.hunks}
+    after_section = {s.end: True for s in diff.sections}
     for i, line in diff.stray:
-        if i in after_hunks and line[:1] in ("+", "-", " ") and line != "-- ":
+        if i in after_section and line[:1] in ("+", "-", " ") and not _signature(lines, i):
             why = why or "a hunk line past its hunk's line count"
         why = why or _stray_why(line)
     files = []

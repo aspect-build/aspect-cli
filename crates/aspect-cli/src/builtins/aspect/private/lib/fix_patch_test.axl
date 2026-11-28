@@ -67,6 +67,9 @@ def _test_scan():
     _eq("a prefix and padding", _sides("--- /dev/null\n+++ b/   \n@@ -0,0 +1 @@\n+x\n")[1], "a header with no name")
     _eq("a hunk line past its count", _sides("--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n+c\n")[1], "a hunk line past its hunk's line count")
     _eq("one past a first file's count", _sides("--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n c\n--- a/y\n+++ b/y\n@@ -1 +1 @@\n-a\n+b\n")[1], "a hunk line past its hunk's line count")
+    _eq("extra lines that make a header pair", _sides("--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n--- removed\n+++ added\n+more\n")[1], "a hunk line past its hunk's line count")
+    _eq("extra lines starting with a signature", _sides("--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n-- \n+c\n")[1], "a hunk line past its hunk's line count")
+    _eq("a CRLF signature", _sides("--- a/x\r\n+++ b/x\r\n@@ -1 +1 @@\r\n-a\r\n+b\r\n-- \r\n2.50.1\r\n"), ([("x", "x")], None))
     _eq("text around a diff that looks like hunk lines", _sides("- a note\n+ another\n a third\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n-- \n2.50.1\n"), ([("x", "x")], None))
     _eq("a name with spaces and no tab runs to the end of the line", _sides("--- a/src/my file.txt\n+++ b/src/my file.txt\n@@ -1 +1 @@\n-a\n+b\n"), ([("src/my file.txt", "src/my file.txt")], None))
 
