@@ -248,15 +248,30 @@ fn add_path_release(ws: &Workspace, check: impl Fn(&Output)) {
     assert_eq!(json(&released)["path"], dir, "{}", stdout(&released));
 }
 
+/// Every degraded command runs on a config that does not load. How the
+/// config fails changes only the warning's line for it, so one way of failing
+/// drives them all and [`every_way_a_config_fails_is_one_degraded_warning`]
+/// covers the others.
 #[test]
 fn the_degraded_worktree_commands_run_on_a_config_that_does_not_load() {
-    for (case, config, headline) in BROKEN_CONFIGS {
+    let (_, config, headline) = BROKEN_CONFIGS[0];
+    let ws = Workspace::new(&[(".aspect/config.axl", config)]);
+    let file = ".aspect/config.axl";
+    assert_degraded(&ws.aspect(&["worktree", "inspect"]), file, headline);
+    assert_degraded(&ws.aspect(&["worktree", "list"]), file, headline);
+    add_path_release(&ws, |out| assert_degraded(out, file, headline));
+}
+
+#[test]
+fn every_way_a_config_fails_is_one_degraded_warning() {
+    for (case, config, headline) in &BROKEN_CONFIGS[1..] {
         eprintln!("case: {case}");
         let ws = Workspace::new(&[(".aspect/config.axl", config)]);
-        let file = ".aspect/config.axl";
-        assert_degraded(&ws.aspect(&["worktree", "inspect"]), file, headline);
-        assert_degraded(&ws.aspect(&["worktree", "list"]), file, headline);
-        add_path_release(&ws, |out| assert_degraded(out, file, headline));
+        assert_degraded(
+            &ws.aspect(&["worktree", "inspect"]),
+            ".aspect/config.axl",
+            headline,
+        );
     }
 }
 
