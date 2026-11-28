@@ -1,0 +1,1 @@
+The recorder sends SIGINT once an action creates $FX_INTERRUPT_MARKER (record.sh).

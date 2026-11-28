@@ -14,8 +14,10 @@
 # timestamps (rerun with --show_timestamps),
 # console_only (no BEP; capped at CONSOLE_ONLY_CAP_S, then the server is killed - for the OOM
 # case). A case's optional `reset` script runs before each recording, to clear what its tests
-# keep between runs. A case's optional `interrupt` file names a marker path: once an action
-# creates it, and a second more has gone by, the Bazel client is sent SIGINT, as a Ctrl+C.
+# keep between runs. A case with an `interrupt` file is a Ctrl+C: its actions and tests get
+# `FX_INTERRUPT_MARKER`, a path in this recording's own scratch folder; once one creates it (an
+# unsandboxed one, as a sandbox's /tmp may be its own), and a second more has gone by, the Bazel
+# client is sent SIGINT.
 # The server is left running for the next case; `refresh_all.sh` shuts it down per version.
 set -u
 # The longest a recording's Bazel runs, and a console_only one's, before it is ended.
@@ -51,6 +53,12 @@ one() { # <prefix> <extra flags> <strip publish_all: 0|1> [merged]
     [ -n "$merged" ] && tostdout=
     args=$(cat "$FX/cmd")
     [ "$strip" = 1 ] && args=${args//--build_event_publish_all_actions/}
+    # An interrupted case's marker: this recording's own, so no other can
+    # make it; given to the warm-up too, which then keeps its analysis.
+    local marker="$RAW/interrupt.marker"
+    if [ -f "$FX/interrupt" ]; then
+        args="$args --action_env=FX_INTERRUPT_MARKER=$marker --test_env=FX_INTERRUPT_MARKER=$marker"
+    fi
     rm -rf "$RAW" "$FX/$prefix".{bep.json,console,stdout,exit,files}
     mkdir -p "$RAW"
     [ -f "$FX/reset" ] && sh "$FX/reset"
@@ -73,9 +81,6 @@ one() { # <prefix> <extra flags> <strip publish_all: 0|1> [merged]
     # once the case's action has made its marker.
     local watcher=
     if [ -f "$FX/interrupt" ] && [ $console_only = 0 ]; then
-        local marker
-        marker=$(cat "$FX/interrupt")
-        rm -f "$marker"
         (
             for _ in $(seq 1 "$((RUN_TIMEOUT_S * 10))"); do
                 [ -e "$marker" ] && break
@@ -93,10 +98,7 @@ one() { # <prefix> <extra flags> <strip publish_all: 0|1> [merged]
     # shellcheck disable=SC2086
     on_pty "$RAW/console" perl -e "alarm $cap; exec @ARGV" "${BAZEL_ENV[@]}" sh -c 'out=$1; shift; "$@" '"$tostdout"'; echo $? >"$out/exit"' \
         sh "$RAW" "$BAZELISK" $STARTUP $args --disk_cache= --lockfile_mode=off $flags $bep </dev/null >/dev/null 2>&1
-    if [ -n "$watcher" ]; then
-        wait "$watcher"
-        rm -f "$(cat "$FX/interrupt")"
-    fi
+    [ -n "$watcher" ] && wait "$watcher"
     if [ $console_only = 1 ]; then
         kill -9 "$(cat "$OB/server/server.pid.txt" 2>/dev/null)" 2>/dev/null
         [ -s "$RAW/exit" ] || echo "timeout" >"$RAW/exit"

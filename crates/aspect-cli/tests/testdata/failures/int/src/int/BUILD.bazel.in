@@ -1,3 +1,4 @@
-# Interrupted while it runs: the recorder sends the client SIGINT once `slow` made its marker.
+# Interrupted while it runs: `slow` makes the recorder's marker (unsandboxed, as a sandbox's /tmp may
+# be its own), and the recorder sends the client SIGINT.
 genrule(name = "ok", outs = ["ok.txt"], cmd = "echo ok > $@")
-genrule(name = "slow", outs = ["slow.txt"], cmd = "touch /tmp/aspect-fx-interrupt.marker; sleep 120; echo slow > $@")
+genrule(name = "slow", outs = ["slow.txt"], cmd = "touch \"$$FX_INTERRUPT_MARKER\"; sleep 120; echo slow > $@", tags = ["no-sandbox"])

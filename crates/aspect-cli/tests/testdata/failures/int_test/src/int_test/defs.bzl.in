@@ -1,0 +1,6 @@
+def _script_test(ctx):
+    script = ctx.actions.declare_file(ctx.label.name + ".sh")
+    ctx.actions.write(script, "#!/bin/sh\n" + ctx.attr.body + "\n", is_executable = True)
+    return [DefaultInfo(executable = script)]
+
+script_test = rule(implementation = _script_test, attrs = {"body": attr.string()}, test = True)

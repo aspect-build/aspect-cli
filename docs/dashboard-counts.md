@@ -347,7 +347,8 @@ label; `package contains errors: <pkg>: Traceback …` where a block listed or
 quoted already has that `Traceback`; and, for an interrupted build, the one
 line whose text is `BuildFinished`'s `failure_detail` message (`ERROR: build
 interrupted`), Bazel restating the outcome the mark says (`_claim_interrupted`;
-an interrupted `test` on Bazel 9.3.3 names no message, so its line stays).
+an interrupted `test`, whose `BuildFinished` carries no message on Bazel 7, 8
+and 9, ties by Bazel's own message for it, `build interrupted`).
 
 ### Other errors from Bazel
 
@@ -450,8 +451,8 @@ CI runs every `aspect dev test-*` suite through `tools/run-axl-suites.sh`, and
 
 ### The failure fixtures
 
-`crates/aspect-cli/tests/testdata/failures` holds 48 failure shapes recorded on
-Bazel 7.7.3, 8.9.0 and 9.3.3, 198 recordings with their variants (`noall`
+`crates/aspect-cli/tests/testdata/failures` holds 49 failure shapes recorded on
+Bazel 7.7.3, 8.9.0 and 9.3.3, 204 recordings with their variants (`noall`
 without `--build_event_publish_all_actions`, `nocolor`, `merged`, `timestamps`,
 `console_only`); its README gives the layout. For each recording the replay
 reads the events as the runtime reads a `--build_event_json_file`, runs each
@@ -482,9 +483,10 @@ aspect dev test-failure-replay --update
 
 `record.sh` runs Bazelisk under `env -i` with a throwaway HOME and
 `--nosystem_rc` (`env.sh`), its stderr on a 120-column pty. A case with an
-`interrupt` file (`int`) is a Ctrl+C: once its action has made the marker that
-file names, and a second more has gone by, the Bazel client is sent SIGINT,
-which makes the recording deterministic. `fxpost.py` replaces
+`interrupt` file (`int`, `int_test`) is a Ctrl+C: its actions and tests get
+`FX_INTERRUPT_MARKER`, a path in the recording's own scratch folder, and once an
+unsandboxed one has made it, and a second more has gone by, the Bazel client is
+sent SIGINT, which makes the recording deterministic. `fxpost.py` replaces
 machine paths with placeholders (`${OUTPUT_BASE}`, `${WORKSPACE}`, `${HOME}`, …)
 and drops the events the summary never reads. Its leak guard (`guard`) refuses a
 recording that still names this machine's host (short or full), user or home as

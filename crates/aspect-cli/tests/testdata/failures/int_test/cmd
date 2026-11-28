@@ -1,0 +1,1 @@
+test --keep_going --build_event_publish_all_actions //int_test:all

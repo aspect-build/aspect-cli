@@ -1,0 +1,5 @@
+//int_test:slow                                                       [0m[31m[1mNO STATUS[0m
+//int_test:ok                                                            [0m[32mPASSED[0m in 0.3s
+
+Executed 1 out of 2 tests: 1 test passes and [0m[35m1 was skipped[0m.
+There were tests whose specified size is too big. Use the --test_verbose_timeout_warnings command line option to see which ones these are.
