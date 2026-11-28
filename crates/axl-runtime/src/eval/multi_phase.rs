@@ -78,6 +78,13 @@ fn task_command_path(group: &[String], kind: &str) -> String {
 /// CLI prefix of the builtin feature whose args select the terminal surface.
 const CONSOLE_FEATURE: &str = "console";
 
+/// Whether the runtime reads `feature`'s args itself, before phase 3, so its
+/// flags take effect whether or not its implementation runs: the console's,
+/// which [`MultiPhaseEval::resolve_console`] builds the surface from.
+pub fn args_read_before_features(feature: &dyn FeatureLike<'_>) -> bool {
+    feature.name() == CONSOLE_FEATURE
+}
+
 /// Pure core of [`task_label`], env-injected for testing.
 ///
 /// The task is identified by its command path (`<group…> <kind>`, space-joined
@@ -238,6 +245,9 @@ pub struct MultiPhaseEval<'v, 'l> {
     /// The run's `TaskHooks`, shared by ConfigContext, FeatureContext, and
     /// TaskContext as `ctx.hooks`; phase 4 runs what was registered into it.
     hooks_value: Value<'v>,
+    /// Whether the task runs although a config did not load, set by
+    /// [`Self::mark_degraded`] and read by the task as `ctx.task.degraded`.
+    degraded: bool,
 }
 
 impl<'v, 'l> MultiPhaseEval<'v, 'l> {
@@ -251,7 +261,16 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
             trait_map_value: heap.alloc(TraitMap::new()),
             telemetry_value: Telemetry::alloc(heap, loader.env.telemetry.clone()),
             hooks_value: TaskHooks::alloc(heap),
+            degraded: false,
         }
+    }
+
+    /// Run the task as one that goes ahead although a config did not load:
+    /// `ctx.task.degraded` is then `True`, so the task can hold back from
+    /// what a default could make it do that a setting of that config was
+    /// there to prevent.
+    pub fn mark_degraded(&mut self) {
+        self.degraded = true;
     }
 
     /// Drain exporter specs collected from `ctx.telemetry.exporters.add(...)`
@@ -796,7 +815,8 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
     /// Must be called after [`Self::execute_configs`] so that config files have had
     /// the opportunity to enable or disable features. `args_builder` builds the
     /// fully-merged `Arguments` for each feature (callers handle CLI/override/default
-    /// precedence). Features whose resolved `enabled` is `False` are skipped.
+    /// precedence). Features whose resolved `enabled` is `False` are skipped,
+    /// and so are those `runs` turns down.
     ///
     /// A failing feature impl propagates as its own `starlark::Error` under a
     /// `Feature implementation failed` context, so a [`TaskExit`] raised inside it
@@ -804,6 +824,7 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
     #[tracing::instrument(name = "execute.features", skip_all)]
     pub fn execute_features_with_args(
         &mut self,
+        runs: impl Fn(&dyn FeatureLike<'v>) -> bool,
         args_builder: impl Fn(&dyn FeatureLike<'v>, Heap<'v>) -> Arguments<'v>,
     ) -> Result<(), EvalError> {
         let heap = self.heap();
@@ -811,6 +832,9 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
         let task_paths = Arc::new(self.task_paths());
 
         for feature in self.features() {
+            if !runs(feature) {
+                continue;
+            }
             let args = args_builder(feature, heap);
 
             let enabled = args
@@ -929,7 +953,7 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
         // the eval returns.
         let task_kind = task.kind();
         let task_group = task.group().clone();
-        let task_info = TaskInfo::new(
+        let mut task_info = TaskInfo::new(
             task.kind(),
             task.friendly_kind(),
             task.group().clone(),
@@ -937,6 +961,7 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
             task_friendly_name,
             task_id,
         );
+        task_info.degraded = self.degraded;
 
         // The header printed before the features ran; only the verdict is
         // rendered here, in colors matching the header's.

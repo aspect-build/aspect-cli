@@ -208,6 +208,9 @@ pub struct TaskInfo {
     pub name: String,
     pub friendly_name: String,
     pub task_id: String,
+    /// Whether the task runs although a config did not load
+    /// (`ctx.task.degraded`). False from [`TaskInfo::new`].
+    pub degraded: bool,
 
     #[allocative(skip)]
     pub started_at: Instant,
@@ -236,6 +239,7 @@ impl TaskInfo {
             name,
             friendly_name,
             task_id,
+            degraded: false,
             started_at: Instant::now(),
             phases: RefCell::new(Vec::new()),
             current_phase: RefCell::new(None),
@@ -319,6 +323,20 @@ fn task_info_methods(registry: &mut MethodsBuilder) {
             .downcast_ref::<TaskInfo>()
             .ok_or_else(|| anyhow::anyhow!("name: receiver is not a TaskInfo"))?;
         Ok(info.name.clone())
+    }
+
+    /// `True` when the task runs although a config of the workspace did not
+    /// load: one of the built-in tasks the CLI lets go ahead with a warning.
+    /// A setting that config would have applied may then be at its default,
+    /// so a task holds back from anything that default could make it do that
+    /// the setting was there to prevent. `False` when only task or feature
+    /// files failed, since the configs then ran in full.
+    #[starlark(attribute)]
+    fn degraded<'v>(this: Value<'v>) -> anyhow::Result<bool> {
+        let info = this
+            .downcast_ref::<TaskInfo>()
+            .ok_or_else(|| anyhow::anyhow!("degraded: receiver is not a TaskInfo"))?;
+        Ok(info.degraded)
     }
 
     /// The human-readable label for this invocation. Set via

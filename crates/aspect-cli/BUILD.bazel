@@ -225,6 +225,38 @@ rust_test(
     ],
 )
 
+# Spawns the CLI and git dozens of times, which a loaded CI runner cannot
+# always fit in the default 300 seconds.
+rust_test(
+    name = "worktree_broken_config_test",
+    timeout = "long",
+    srcs = ["tests/worktree_broken_config.rs"] + INTEGRATION_TEST_COMMON_SRCS,
+    crate_root = "tests/worktree_broken_config.rs",
+    data = [":aspect-cli"],
+    env = {
+        "ASPECT_CLI_BIN": "$(rootpath :aspect-cli)",
+    },
+    deps = [
+        "//crates/axl-runtime",
+        "@crates//:serde_json",
+        "@crates//:tempfile",
+    ],
+)
+
+rust_test(
+    name = "axl_add_test",
+    srcs = ["tests/axl_add.rs"] + INTEGRATION_TEST_COMMON_SRCS,
+    crate_root = "tests/axl_add.rs",
+    data = [":aspect-cli"],
+    env = {
+        "ASPECT_CLI_BIN": "$(rootpath :aspect-cli)",
+    },
+    deps = [
+        "//crates/axl-runtime",
+        "@crates//:tempfile",
+    ],
+)
+
 rust_test(
     name = "crash_handler_test",
     srcs = ["tests/crash_handler.rs"] + INTEGRATION_TEST_COMMON_SRCS,

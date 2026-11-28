@@ -387,7 +387,7 @@ impl EvalBuilder {
                     configs.push((&config_path, &root_mod));
                 }
                 raise_first(mpe.execute_configs(&configs))?;
-                mpe.execute_features_with_args(|_f, _h| Arguments::new())
+                mpe.execute_features_with_args(|_f| true, |_f, _h| Arguments::new())
                     .map_err(anyhow::Error::from)?;
             }
             let console = mpe

@@ -72,13 +72,7 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
         #[starlark(require = named, default = String::new())] strip_prefix: String,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<values::none::NoneType> {
-        if name == AXL_ROOT_MODULE_NAME {
-            anyhow::bail!(
-                "axl_archive_dep name {:?} not allowed.",
-                AXL_ROOT_MODULE_NAME
-            );
-        }
-        validate_module_name(&name)?;
+        reject_dep_name("axl_archive_dep", &name)?;
 
         if !dev {
             anyhow::bail!("axl_archive_dep does not support transitive dependencies yet.");
@@ -120,10 +114,7 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
         #[starlark(require = named, default = false)] auto_use_tasks: bool,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<values::none::NoneType> {
-        if name == AXL_ROOT_MODULE_NAME {
-            anyhow::bail!("axl_local_dep name {:?} not allowed.", AXL_ROOT_MODULE_NAME);
-        }
-        validate_module_name(&name)?;
+        reject_dep_name("axl_local_dep", &name)?;
 
         let store = Mod::from_eval(eval)?;
 
@@ -193,6 +184,34 @@ pub const AXL_MODULE_FILE: &str = "MODULE.aspect";
 pub const AXL_ROOT_MODULE_NAME: &str = "root";
 
 pub const AXL_USER_MODULE_NAME: &str = "user";
+
+/// The module the CLI's built-in tasks and features load as: `@aspect//build.axl`.
+pub const AXL_BUILTIN_MODULE_NAME: &str = "aspect";
+
+/// The names of the modules the CLI itself provides, the root module and the
+/// built-in one, which a dependency of the same name would replace.
+pub const AXL_RESERVED_MODULE_NAMES: &[&str] = &[AXL_ROOT_MODULE_NAME, AXL_BUILTIN_MODULE_NAME];
+
+/// Why `name` cannot name a dependency, or `None` when it can: it is one of
+/// [`AXL_RESERVED_MODULE_NAMES`], or not a module name at all. What
+/// `axl_local_dep` and `axl_archive_dep` check, and
+/// `ctx.aspect.module_name_error` gives AXL.
+pub fn dep_name_error(name: &str) -> Option<String> {
+    if AXL_RESERVED_MODULE_NAMES.contains(&name) {
+        return Some(format!(
+            "{name:?} is the name of a module the CLI provides itself"
+        ));
+    }
+    validate_module_name(name).err().map(|err| err.to_string())
+}
+
+/// Refuse a dependency [`dep_name_error`] turns down.
+fn reject_dep_name(function: &str, name: &str) -> anyhow::Result<()> {
+    match dep_name_error(name) {
+        Some(why) => anyhow::bail!("{function} name {name:?} not allowed: {why}."),
+        None => Ok(()),
+    }
+}
 
 pub const AXL_SCRIPT_EXTENSION: &str = "axl";
 
@@ -293,5 +312,67 @@ impl ModEvaluator {
         }
 
         Ok(r#mod)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `MODULE.aspect` holding `contents`, evaluated as the root module, with
+    /// a `tools/` directory beside it for a local dep to point at.
+    fn evaluate(contents: &str) -> Result<Mod, EvalError> {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("tools")).unwrap();
+        std::fs::write(dir.path().join(AXL_MODULE_FILE), contents).unwrap();
+        ModEvaluator::new(dir.path().to_path_buf())
+            .evaluate(AXL_ROOT_MODULE_NAME.to_owned(), dir.path().to_path_buf())
+    }
+
+    /// A dep named like the root or built-in module would stand in for it, so
+    /// both dep kinds refuse those names.
+    #[test]
+    fn a_dep_cannot_take_a_name_the_cli_provides() {
+        for &name in AXL_RESERVED_MODULE_NAMES {
+            for (function, call) in [
+                (
+                    "axl_local_dep",
+                    format!("axl_local_dep(name = {name:?}, path = \"tools\")"),
+                ),
+                (
+                    "axl_archive_dep",
+                    format!(
+                        "axl_archive_dep(name = {name:?}, urls = [\"https://x/y.tar.gz\"], dev = True)"
+                    ),
+                ),
+            ] {
+                let err = evaluate(&call).expect_err(&call).to_string();
+                assert!(
+                    err.contains(&format!("{function} name {name:?} not allowed")),
+                    "{call}: {err}"
+                );
+            }
+        }
+        evaluate("axl_local_dep(name = \"tools\", path = \"tools\")").expect("an ordinary name");
+    }
+
+    /// One check covers both: a reserved name and one that is no module name.
+    #[test]
+    fn dep_name_error_covers_reserved_and_malformed_names() {
+        for name in AXL_RESERVED_MODULE_NAMES {
+            let why = dep_name_error(name).expect("a reserved name");
+            assert!(why.contains("provides itself"), "{name}: {why}");
+        }
+        for (name, says) in [
+            ("1password_cli", "begin with a lowercase letter"),
+            ("x_", "end with a lowercase letter or digit"),
+            ("My.Dep", "begin with a lowercase letter"),
+            ("my dep", "invalid character"),
+        ] {
+            let why = dep_name_error(name).unwrap_or_else(|| panic!("{name} passed"));
+            assert!(why.contains(says), "{name}: {why}");
+        }
+        assert_eq!(dep_name_error("tools"), None);
+        assert_eq!(dep_name_error("my-dep.v2"), None);
     }
 }

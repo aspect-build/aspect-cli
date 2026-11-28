@@ -205,9 +205,8 @@ def compute_integrity(ctx: TaskContext, url: str, temp_file: str) -> str:
     return "sha512-" + base64.encode(h.digest())
 
 def sanitize_module_name(name: str) -> str:
-    """Convert a repository name to a valid module name."""
-
-    # Replace hyphens with underscores and ensure it's a valid identifier
+    """A repository name in a module name's form: lowercase, `-` as `_`. It
+    may still not be one (`1password-cli`), which `module_name_error` says."""
     return name.replace("-", "_").lower()
 
 def generate_axl_archive_dep(name: str, url: str, integrity: str, strip_prefix: str) -> str:
@@ -266,6 +265,11 @@ def _impl(ctx: TaskContext) -> int:
 
     # Determine the module name (can be overridden with --name flag)
     module_name = ctx.args.name if ctx.args.name else sanitize_module_name(repo)
+    problem = ctx.aspect.module_name_error(module_name)
+    if problem:
+        error(ctx.std, "Cannot name the dependency '" + module_name + "': " + problem +
+                       ". Name it with --name=<name>.")
+        return 1
 
     # Check if dependency already exists
     current_content = read_module_aspect(ctx)

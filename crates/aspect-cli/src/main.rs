@@ -67,7 +67,10 @@ use std::time::Duration;
 use aspect_telemetry::{
     cargo_pkg_display_version, cargo_pkg_short_version, do_not_track, send_telemetry,
 };
-use axl_runtime::eval::{AxlFileFailure, AxlFileRole, Loader, ModuleEnv, MultiPhaseEval};
+use axl_runtime::eval::{
+    AxlFileFailure, AxlFileRole, EvalError, Loader, ModuleEnv, MultiPhaseEval,
+    args_read_before_features,
+};
 use axl_runtime::module::{AXL_ROOT_MODULE_NAME, Mod};
 use axl_runtime::module::{DiskStore, ModEvaluator};
 use axl_runtime::{SignalKind, SignalOrigin, Signals};
@@ -261,7 +264,7 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
             let mut cmd_for_help = root_cmd.clone();
             let argv = cmd.route_unrecognized_flags(&root_cmd, std::env::args_os().collect());
 
-            let parsed = root_cmd.try_get_matches_from_mut(argv);
+            let parsed = root_cmd.try_get_matches_from_mut(argv.clone());
             cli_step.finish();
             let matches = match parsed {
                 Ok(m) => m,
@@ -271,6 +274,20 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
                     // needs a task definition, so they still run degraded.
                     if is_display_only(&err) {
                         unloadable.warn();
+                        err.print().ok();
+                        return Ok(ExitCode::from(err.exit_code() as u8));
+                    }
+                    // A usage error on a command that runs degraded is Clap's to
+                    // report when the task it names loaded and no feature file
+                    // failed: only a feature adds flags to the built-in tasks,
+                    // so a flag Clap rejects may be one a broken feature file
+                    // declares, and then the load failure is the cause.
+                    if !unloadable.is_empty()
+                        && unloadable.lost_feature_files().is_empty()
+                        && let Some(entry) = cmd.degraded_usage(&root_cmd, &argv)
+                    {
+                        let lines = DegradedLines::of(&unloadable, &cmd, entry, None);
+                        unloadable.warn_degraded(entry, &lines);
                         err.print().ok();
                         return Ok(ExitCode::from(err.exit_code() as u8));
                     }
@@ -288,9 +305,17 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
 
             // Everything past here either reports the CLI's own surface or
             // dispatches a task; see `Unloadable` for which may run degraded.
+            let mut features_off = None;
             if !unloadable.is_empty() {
                 if runs_without_tasks(matches.subcommand_name()) {
                     unloadable.warn();
+                } else if let Some(entry) = cmd.degraded_commands(&matches) {
+                    let lines = DegradedLines::of(&unloadable, &cmd, entry, Some(&matches));
+                    unloadable.warn_degraded(entry, &lines);
+                    if unloadable.config_lost() {
+                        mpe.mark_degraded();
+                        features_off = Some(entry);
+                    }
                 } else if let Some(err) = unloadable.into_error() {
                     return Err(err);
                 }
@@ -349,9 +374,14 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
             )
             .map_err(anyhow::Error::from)?;
 
-            // Phase 3: run enabled feature impls.
+            // Phase 3: run enabled feature impls; in a degraded run whose
+            // config failed, only the ones its task reads, since that config
+            // may have turned the others off.
             time("features", || {
-                mpe.execute_features_with_args(|f, h| dispatch.feature_args(f, h))
+                mpe.execute_features_with_args(
+                    |f| features_off.is_none_or(|entry| cmd.runs_degraded(entry, f)),
+                    |f, h| dispatch.feature_args(f, h),
+                )
             })
             .map_err(anyhow::Error::from)?;
 
@@ -490,24 +520,29 @@ impl std::fmt::Display for ConfigError {
 
 /// AXL that failed during startup, held rather than raised.
 ///
-/// The whole CLI surface — the task list, their flags, the features — is
-/// defined in AXL, so one `.aspect/*.axl` file that does not parse used to
-/// fail every command: the `aspect help` the user needs to find the typo and
-/// the `aspect version` they run to check their setup included. Phases 1 and 2
-/// carry on past an unloadable file ([`MultiPhaseEval::eval`],
+/// The whole CLI surface, the task list, their flags and the features, is
+/// defined in AXL, so failing every command on one `.aspect/*.axl` file that
+/// does not parse would take the `aspect help` the user needs to find the
+/// typo, and the `aspect version` they run to check their setup, with it.
+/// Phases 1 and 2 carry on past an unloadable file ([`MultiPhaseEval::eval`],
 /// [`MultiPhaseEval::execute_configs`]) and hand what failed to this type.
 ///
 /// `docs/design.md`, "When a file does not load", states the policy: which
-/// commands run degraded, what each failure is reported as, and the four
+/// commands run degraded (`version` and `help`, and the built-in tasks in
+/// [`cmd::DEGRADED_COMMANDS`]), what each failure is reported as, and the four
 /// things settled outside the tolerant phases that still fail everything.
 /// This type is the mechanism, and holds two invariants the policy depends on:
 ///
 /// * Nothing recorded is ever dropped silently. Both ways out of here report
-///   first — [`Self::reporting`] for an error of its own, [`Self::into_error`]
-///   for one of the recorded failures raised as the run's error — so a typo
-///   does not vanish behind whatever ended the run.
-/// * Scripts come before configs, and a config that failed alongside a script
-///   is summarised as derived from it rather than given a warning of its own.
+///   first: [`Self::reporting`] for an error of its own and
+///   [`Self::into_error`] for one of the recorded failures raised as the run's
+///   error, so a typo does not vanish behind whatever ended the run. A run that carries on
+///   names every failed file too: [`Self::warn`] in full, and
+///   [`Self::warn_degraded`] one line each.
+/// * Scripts come before configs. In the full report a config that failed
+///   alongside a script is summarised as derived from it rather than given a
+///   warning of its own; [`Self::warn_degraded`] gives each file the first
+///   line of its own error instead, so it blames nothing.
 #[derive(Default)]
 struct Unloadable {
     /// Phase 1: task and feature scripts.
@@ -519,6 +554,22 @@ struct Unloadable {
 impl Unloadable {
     fn is_empty(&self) -> bool {
         self.scripts.is_empty() && self.configs.is_empty()
+    }
+
+    /// Whether a config failed, which leaves out settings it would have
+    /// applied and features it would have turned off.
+    fn config_lost(&self) -> bool {
+        !self.configs.is_empty()
+    }
+
+    /// The feature files that failed, whose features go missing with the
+    /// hooks they would add. A task file adds none.
+    fn lost_feature_files(&self) -> Vec<String> {
+        self.scripts
+            .iter()
+            .filter(|failure| failure.role != AxlFileRole::Tasks)
+            .map(|failure| failure.path.display().to_string())
+            .collect()
     }
 
     /// `err`, after reporting everything recorded. The one way to raise an
@@ -536,8 +587,8 @@ impl Unloadable {
     /// separately. This is [`Self::warn_blaming`] with no raised failure, so
     /// the summary blames a script only when exactly one of them failed.
     ///
-    /// Silence here would be worse than the old hard failure — the point is
-    /// that the user still sees the typo.
+    /// Silence here would be worse than failing the command: the point is that
+    /// the user still sees the typo.
     fn warn(&self) {
         self.warn_blaming(None);
     }
@@ -599,6 +650,65 @@ impl Unloadable {
         }
     }
 
+    /// Report the failures for a built-in task of `entry` that runs without
+    /// them, or whose command line Clap rejected: a single `warning:` naming
+    /// the command, then a line per file with the first line of its own
+    /// error, scripts first. Each line is that file's own message, so no
+    /// config is blamed on a script here. Then the lines `lines` has (see
+    /// [`DegradedLines`]).
+    ///
+    /// The full diagnostics are left to `ASPECT_DEBUG`, which prints each one
+    /// below: pages of source excerpts would bury the answer the user ran the
+    /// command for.
+    fn warn_degraded(&self, entry: &cmd::DegradedCommands, lines: &DegradedLines) {
+        errln!(
+            "warning: `aspect {}` runs without the AXL that failed to load:",
+            entry.group
+        );
+        let failures = || self.scripts.iter().chain(&self.configs);
+        for failure in failures() {
+            errln!(
+                "  {}: {}",
+                failure.path.display(),
+                headline(&failure.error, &failure.path)
+            );
+        }
+        if let Some(settings) = &lines.settings {
+            errln!(
+                "  Settings these files would have applied to it may be at their defaults: \
+                 {settings}."
+            );
+        }
+        if let Some(features) = &lines.running {
+            let (noun, verb) = if entry.features.len() == 1 {
+                ("feature", "runs")
+            } else {
+                ("features", "run")
+            };
+            errln!("  Only the {features} {noun} {verb}, so any hook another feature adds is off.");
+        }
+        if !lines.missing.is_empty() {
+            errln!(
+                "  The features {} define do not run, so any hook they add is off.",
+                lines.missing.join(", ")
+            );
+        }
+        if !lines.ignored.is_empty() {
+            errln!(
+                "  This run ignores {}: the features they set do not run while those files \
+                 do not load.",
+                lines.ignored.join(", ")
+            );
+        }
+        errln!("  `ASPECT_DEBUG=1` prints each error in full.");
+        for failure in failures() {
+            TaskExit::debug_traceback(&format_args!(
+                "{}",
+                strip_error_prefix(&failure.error.to_string())
+            ));
+        }
+    }
+
     /// One `warning:` line naming the file and what its failure costs,
     /// followed by the file's own diagnostic.
     fn warn_one(failure: &AxlFileFailure) {
@@ -633,6 +743,54 @@ impl Unloadable {
         let failure = self.configs.remove(0);
         self.warn_blaming(None);
         Some(anyhow::Error::from(failure.error).context(ConfigError))
+    }
+}
+
+/// What a degraded run's warning says beyond the files that failed, which
+/// depends on what kind of file failed. A task file alone costs these tasks
+/// nothing, since the configs ran in full: no line.
+#[derive(Default)]
+struct DegradedLines {
+    /// The settings that may be at their defaults, when a config failed.
+    settings: Option<String>,
+    /// The features that still run, when a config failed: it may have turned
+    /// the others off, so every other feature is off.
+    running: Option<String>,
+    /// The feature files that failed, when every config loaded: the configs
+    /// decided which features run, so the others run as ever, and only these
+    /// files' features, and the hooks they add, are missing.
+    missing: Vec<String>,
+    /// The flags of the features that are off which the command line gave,
+    /// as typed. Not the console's, whose flags the runtime reads before the
+    /// features run ([`args_read_before_features`]).
+    ignored: Vec<String>,
+}
+
+impl DegradedLines {
+    /// The lines for `entry`'s tasks, given what `unloadable` holds and, when
+    /// the command line parsed, its `matches`.
+    fn of(
+        unloadable: &Unloadable,
+        cmd: &Cmd<'_, '_>,
+        entry: &cmd::DegradedCommands,
+        matches: Option<&clap::ArgMatches>,
+    ) -> Self {
+        if !unloadable.config_lost() {
+            return DegradedLines {
+                missing: unloadable.lost_feature_files(),
+                ..DegradedLines::default()
+            };
+        }
+        DegradedLines {
+            settings: Some(cmd.degraded_settings(entry)),
+            running: Some(entry.running_features()),
+            missing: vec![],
+            ignored: matches.map_or_else(Vec::new, |matches| {
+                cmd.typed_feature_flags(matches, |f| {
+                    !cmd.runs_degraded(entry, f) && !args_read_before_features(f)
+                })
+            }),
+        }
     }
 }
 
@@ -688,6 +846,23 @@ fn is_display_only(err: &clap::Error) -> bool {
 /// once would leave the doubled form this exists to fix.
 fn strip_error_prefix(message: &str) -> &str {
     message.trim_start_matches("error: ")
+}
+
+/// The first line of `error`'s message, without the `error: ` prefix, source
+/// excerpt or call stack its full rendering carries, nor a leading `path: `
+/// naming the file it is reported against (`path`) a second time.
+fn headline(error: &EvalError, path: &Path) -> String {
+    let message = match error {
+        EvalError::StarlarkError(e) => e.without_diagnostic().to_string(),
+        other => other.to_string(),
+    };
+    let first = message
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or_default();
+    let first = strip_error_prefix(first.trim());
+    let named = format!("{}: ", path.display());
+    first.strip_prefix(&named).unwrap_or(first).to_owned()
 }
 
 /// Whether `args` ask for `--output=json` (or `--output json`) ahead of any
@@ -1067,8 +1242,9 @@ mod config_error_tests {
 
 #[cfg(test)]
 mod degrade_policy_tests {
-    use super::{is_display_only, runs_without_tasks, strip_error_prefix};
+    use super::{EvalError, headline, is_display_only, runs_without_tasks, strip_error_prefix};
     use clap::error::ErrorKind;
+    use std::path::Path;
 
     /// Starlark's own `error: ` title is dropped so the caller supplies the
     /// only one; anything else is left exactly as it came.
@@ -1090,6 +1266,44 @@ mod degrade_policy_tests {
         assert_eq!(
             strip_error_prefix("Traceback:\n  error: inner"),
             "Traceback:\n  error: inner"
+        );
+    }
+
+    /// A degraded run's line per file carries the error's first line, with no
+    /// source excerpt and no `error: ` of its own.
+    #[test]
+    fn a_headline_is_the_first_line_of_the_message() {
+        let parse = starlark::syntax::AstModule::parse(
+            "config.axl",
+            "def config(ctx)\n    pass\n".to_owned(),
+            &starlark::syntax::Dialect::Standard,
+        )
+        .expect_err("a syntax error");
+        let rendered = parse.to_string();
+        assert!(rendered.contains("-->"), "{rendered}");
+        let path = Path::new("/ws/.aspect/config.axl");
+        let line = headline(&EvalError::from(parse), path);
+        assert!(line.starts_with("Parse error: "), "{line}");
+        assert!(!line.contains('\n'), "{line}");
+
+        let other = EvalError::UnknownError(anyhow::anyhow!("error: boom\n  at somewhere"));
+        assert_eq!(headline(&other, path), "boom");
+
+        // A file that could not be read names itself, which the line already
+        // does; another file it names stays.
+        let unread = EvalError::UnknownError(anyhow::anyhow!(
+            "/ws/.aspect/config.axl: No such file or directory (os error 2)"
+        ));
+        assert_eq!(
+            headline(&unread, path),
+            "No such file or directory (os error 2)"
+        );
+        let loaded = EvalError::UnknownError(anyhow::anyhow!(
+            "/ws/.aspect/lib.axl: No such file or directory (os error 2)"
+        ));
+        assert_eq!(
+            headline(&loaded, path),
+            "/ws/.aspect/lib.axl: No such file or directory (os error 2)"
         );
     }
 

@@ -10,7 +10,7 @@
 
 mod common;
 
-use common::{aspect_cli, base_env};
+use common::{aspect_cli, base_env, git, isolated};
 use std::path::Path;
 use std::process::{Command, Output};
 
@@ -19,20 +19,6 @@ const DIM_HEADER: &[u8] = b"\x1b[38;5;247m  slot";
 
 /// The `label.info` prefix of the `worktree ready:` line.
 const INFO_PREFIX: &[u8] = b"\x1b[1;38;5;247mINFO\x1b[0m: ";
-
-/// `cmd` run in `dir/repo` under the test's own git environment.
-fn isolated(mut cmd: Command, dir: &Path) -> Command {
-    for (k, _) in std::env::vars_os() {
-        if k.to_string_lossy().starts_with("GIT_") {
-            cmd.env_remove(k);
-        }
-    }
-    cmd.current_dir(dir.join("repo"))
-        .env("HOME", dir.join("home"))
-        .env("XDG_CONFIG_HOME", dir.join("home/.config"))
-        .env("GIT_CONFIG_NOSYSTEM", "1");
-    cmd
-}
 
 /// The CLI with `args`, under [`base_env`] minus any color variable but
 /// `vars`; asserts it succeeded.
@@ -52,16 +38,6 @@ fn aspect(dir: &Path, args: &[&str], vars: &[(&str, &str)]) -> Output {
         "aspect {args:?} failed: {output:?}"
     );
     output
-}
-
-fn git(dir: &Path, args: &[&str]) {
-    let status = isolated(Command::new("git"), dir)
-        .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
-        .args(["-c", "commit.gpgsign=false"])
-        .args(args)
-        .status()
-        .expect("running git");
-    assert!(status.success(), "git {args:?} failed");
 }
 
 fn has_escape(bytes: &[u8]) -> bool {

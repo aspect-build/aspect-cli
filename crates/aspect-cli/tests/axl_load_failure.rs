@@ -1,16 +1,18 @@
 //! A `.aspect/*.axl` file the user broke must not cost them the commands they
 //! need to find it.
 //!
-//! The CLI's whole surface is defined in AXL, so a single unparsable file used
-//! to fail every command — `aspect help`, the way out, included. The policy
-//! these tests pin (stated in `docs/design.md`, "When a file does not load",
-//! and carried out by `Unloadable` in `main.rs`): `version` and `help` run
-//! anyway and report the failure as a warning, while anything that dispatches
-//! a task still fails on it. Both halves matter. A silently swallowed syntax
-//! error would be worse than the hard failure it replaced, so every degraded
-//! run is checked for the diagnostic as well as the exit code — and a command
-//! that *does* fail is checked for the files it did not raise, since dropping
-//! those would make what the user hears about depend on `read_dir` order.
+//! The CLI's whole surface is defined in AXL, so failing every command on a
+//! single unparsable file would take `aspect help`, the way out, with it. The
+//! policy these tests pin (stated in `docs/design.md`, "When a file does not
+//! load", and carried out by `Unloadable` in `main.rs`): `version` and `help`
+//! run anyway and report the failure as a warning, while anything that
+//! dispatches a task still fails on it. The exception, five built-in
+//! `aspect worktree` tasks (not `prune`), is pinned in
+//! `worktree_broken_config.rs`. Both halves matter. A silently swallowed syntax
+//! error would be worse than failing the command, so every degraded run is
+//! checked for the diagnostic as well as the exit code, and a command that
+//! *does* fail is checked for the files it did not raise, since dropping those
+//! would make what the user hears about depend on `read_dir` order.
 //!
 //! Also pinned here: each warning names what that particular file's absence
 //! costs, a `use_feature` file defining no tasks; one file named twice is
