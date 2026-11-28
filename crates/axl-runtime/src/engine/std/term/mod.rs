@@ -118,7 +118,8 @@ struct Held {
     generation: u64,
     tty: File,
     saved_termios: Termios,
-    /// The modes the screen reads keys in, for a resume to set again.
+    /// The modes the screen reads keys in, `interrupts()`'s choice of ISIG
+    /// among them, for a resume to set again.
     cbreak: Termios,
     /// The process's stdout and stderr, captured; None while suspended.
     stdout: Option<Redirect>,
@@ -1001,12 +1002,19 @@ fn screen_methods(registry: &mut MethodsBuilder) {
     /// `key()` as `ctrl-c`: for a screen that stays up once its build is
     /// done, where an interrupt would cancel a task that has already ended.
     /// Off, Ctrl+Z and Ctrl+\ do not signal either: they arrive as `ctrl-z`
-    /// and `ctrl-\`.
+    /// and `ctrl-\`. The choice holds across a suspend: a resume sets the
+    /// screen's modes again, this among them.
     fn interrupts<'v>(
         this: values::Value<'v>,
         #[starlark(require = pos)] enabled: bool,
     ) -> anyhow::Result<NoneType> {
         with_held(this, |h| {
+            h.cbreak.local_flags.set(LocalFlags::ISIG, enabled);
+            // Given back, the terminal's modes are the prompt's or child's
+            // until the resume sets the screen's.
+            if h.suspended {
+                return Ok(NoneType);
+            }
             let set = termios::tcgetattr(&h.tty).and_then(|mut t| {
                 t.local_flags.set(LocalFlags::ISIG, enabled);
                 termios::tcsetattr(&h.tty, SetArg::TCSANOW, &t)

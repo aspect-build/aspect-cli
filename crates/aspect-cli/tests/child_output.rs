@@ -178,6 +178,22 @@ def _handoff(ctx):
 
 handoff = task(implementation = _handoff, summary = "An interactive child after an answer the screen asked for came late.")
 
+def _isigkept(ctx):
+    screen = ctx.std.term.take()
+    screen.interrupts(False)
+    screen.write("FRAME")
+    ctx.std.process.command("true").interactive(True).spawn().wait()
+    screen.write("RESUMED")
+    for _ in range(300):
+        if screen.key(timeout_ms = 100) == "ctrl-c":
+            screen.release()
+            print("CTRL-C-WAS-A-KEY")
+            return 0
+    screen.release()
+    return 3
+
+isigkept = task(implementation = _isigkept, summary = "Interrupts off, then an interactive child: Ctrl+C is still a key.")
+
 def _exitgrand(ctx):
     screen = ctx.std.term.take()
     screen.write("FRAME")
@@ -1545,6 +1561,39 @@ fn a_late_answer_to_the_screens_query_never_reaches_a_child() {
         .and_then(|r| r.split("]END").next())
         .unwrap_or("<none>");
     assert_eq!(read, "", "what the child read: {text:?}");
+}
+
+/// Interrupts turned off (a finished screen held up), then given back to an
+/// interactive child and taken again: Ctrl+C still arrives as a key, never
+/// a signal that would cancel the task, as the resume sets the screen's
+/// modes again with that choice in them.
+#[cfg(unix)]
+#[test]
+fn interrupts_stay_off_across_a_suspend() {
+    use std::io::Write as _;
+    use std::time::Duration;
+    let (mut child, chunks, _dir) = on_a_pty("isigkept", None);
+    let mut raw = Vec::new();
+    let start = std::time::Instant::now();
+    while !raw.windows(7).any(|w| w == b"RESUMED") && start.elapsed() < Duration::from_secs(30) {
+        if let Ok((_, bytes)) = chunks.recv_timeout(Duration::from_millis(20)) {
+            raw.extend(bytes);
+        }
+    }
+    assert!(
+        raw.windows(7).any(|w| w == b"RESUMED"),
+        "{}",
+        String::from_utf8_lossy(&raw)
+    );
+    pty_master(&child).write_all(b"\x03").unwrap();
+    let status = wait_bounded(&mut child, 60, &chunks);
+    std::thread::sleep(Duration::from_millis(200));
+    for (_, bytes) in chunks.try_iter() {
+        raw.extend(bytes);
+    }
+    let text = plain(&String::from_utf8_lossy(&raw));
+    assert!(status.success(), "{status:?}: {text:?}");
+    assert!(text.contains("CTRL-C-WAS-A-KEY"), "{text:?}");
 }
 
 /// Ctrl+Z, the terminal resized while stopped, then fg: the screen comes
