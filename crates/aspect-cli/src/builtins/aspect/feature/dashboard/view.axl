@@ -333,21 +333,24 @@ def crumbs(state: dict) -> list:
 _PICKED_TABS = ["metrics", "invocation"]
 
 def picked_build(state: dict) -> int:
-    """Which build the Metrics and Invocation tabs show, oldest 0: the one
-    `<`/`>` picked, else the newest (the running one, while one runs)."""
+    """Which build the Metrics and Invocation tabs, the bar and the Results
+    pane show, oldest 0: the one `<`/`>` picked, else the newest (the
+    running one, while one runs)."""
     newest = len(state.get("builds", [])) - (0 if state.get("building") else 1)
     picked = state.get("picked_build")
     return newest if picked == None else max(0, min(picked, newest))
 
 def build_view(state: dict) -> dict:
-    """`state` as the picked build's tabs read it: an older build's own
-    counts, invocation and timings over the newest's."""
+    """`state` as the picked build's tabs read it: `state` itself for the
+    newest, else an older build's own counts, invocation and timings over
+    the newest's, marked `older`."""
     i = picked_build(state)
     builds = state.get("builds", [])
     if i >= len(builds) or (i == len(builds) - 1 and not state.get("building")):
         return state
     view = dict(state)
     view.update(builds[i]["snapshot"])
+    view["older"] = True
     return view
 
 def back_to(state: dict, level: int) -> None:

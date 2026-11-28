@@ -365,9 +365,10 @@ def _top(state: dict, cols: int, rows: int) -> list:
     """The rows above the console: the header (`_header`), then, unless
     zoomed (`z`) or showing the keys (`?`), the builds that ended folded to
     a row each, and while the panes are open, the bar of the build's
-    actions (`bar_row`, the picked build's), the links, and the running
-    actions, oldest first and coloured by age, beside the Results pane, the
-    list (failures or actions) under its counts."""
+    actions (`bar_row`), the links, and the running actions, oldest first
+    and coloured by age, beside the Results pane. The bar and the Results
+    pane are the build `<`/`>` picked (`build_view`), the newest unless one
+    was."""
     out = [""]
     if state.get("zoom") or state.get("help"):
         out[0] = _header(state, cols, False)
@@ -415,8 +416,8 @@ def _top(state: dict, cols: int, rows: int) -> list:
         actions = _slowest_rows(state)
     right_w = _results_width(cols)
     left_w = cols - right_w
-    c = state["counts"]
-    built_n, targets_failed, targets_blocked = _target_counts(state)
+    c = view["counts"]
+    built_n, targets_failed, targets_blocked = _target_counts(view)
     failed = _c("error") if targets_failed else ""
     tests_failed = _c("error") if c["tests_failed"] else ""
     blocked_text_ = (_counts(", %d blocked", targets_blocked)) if targets_blocked else ""
@@ -444,7 +445,7 @@ def _top(state: dict, cols: int, rows: int) -> list:
     # Tests running and pending while a build runs, the actions' `─`
     # words: on the Tests row where it has room, else on a row under it.
     tests_rows = []
-    tests_now = _tests_text(_test_progress(state))
+    tests_now = _tests_text(_test_progress(view))
     if tests_now:
         indent = " " * (9 if wide else 8)
         if _text_width(_plain(summary[-1]) + " · " + _plain(tests_now)) <= right_w - 4:
@@ -458,9 +459,9 @@ def _top(state: dict, cols: int, rows: int) -> list:
     # The build's actions, one unit with the bar's, its glyphs their keys;
     # the critical path; the failures, whose row a click takes to them.
     lead = "Actions  " if wide else "Actions "
-    split = _action_split(state)
-    critical = (("Critical path %s" if wide else "Crit %s") % state["critical"]) if state.get("critical") else None
-    failed_n, blocked_n = _failure_counts(state)
+    split = _action_split(view)
+    critical = (("Critical path %s" if wide else "Crit %s") % view["critical"]) if view.get("critical") else None
+    failed_n, blocked_n = _failure_counts(view)
     failed_row = None
     if failed_n or blocked_n:
         failed_row = _counts("Failed   %s✗ %d%s%s", (_c("error"), failed_n, _RESET, (_counts("  ○ %d blocked", blocked_n)) if blocked_n else "")) if wide else _counts("%s✗%d%s ○%d", (_c("error"), failed_n, _RESET, blocked_n))
@@ -477,7 +478,7 @@ def _top(state: dict, cols: int, rows: int) -> list:
     for _ in range(most + 4):
         room_now = right_w - 5 if apart else right_w - 4 - len(lead)
         rows_now = max(1, most - 1) if apart else most
-        actions_rows = _action_results(split, room_now, rows_now, short = cols < _SHORT_UNDER_COLS, memory = None if split["final"] else _actions_memory(state, room_now, rows_now, pane))
+        actions_rows = _action_results(split, room_now, rows_now, short = cols < _SHORT_UNDER_COLS, memory = None if split["final"] or view.get("older") else _actions_memory(state, room_now, rows_now, pane))
         if apart and actions_rows:
             actions_rows = [""] + actions_rows
         wanted = len(summary) + len(actions_rows) + len(tests_rows) + len([r for r in (critical, failed_row) if r != None])

@@ -62,10 +62,10 @@ test's first in the output tree, at the path its summary gives
 
 ## The Actions row
 
-The Results pane shows the newest build's actions. The bar above the panes
-draws the same parts, and the Metrics tab lists them with what makes up each
-(`action_lines`), for the build `<` and `>` pick in the Metrics and Invocation
-tabs, the newest unless one was picked. Every part is in one unit, Bazel's
+The Results pane shows the actions of the build `<` and `>` pick in the
+Metrics and Invocation tabs, the newest unless one was picked (`build_view`).
+The bar above the panes draws the same parts, and the Metrics tab lists them
+with what makes up each (`action_lines`). Every part is in one unit, Bazel's
 actions.
 
 ```

@@ -27,6 +27,7 @@ cache_kinds = dashboard_actions.testonly_cache_kinds
 count_event = failure_records.testonly_count_event
 count_spawn = failure_records.count_spawn
 help_rows = dashboard_keys.help_rows
+on_key = dashboard_keys.on_key
 hit_count = dashboard_actions.testonly_hit_count
 hit_percent = dashboard_actions.testonly_hit_percent
 metrics_lines = dashboard_render.testonly_metrics_lines
@@ -840,6 +841,19 @@ def _actions_tests(ctx):
     two["picked_build"] = 0
     _eq("the picked build's", bar_of(two).endswith("2 actions · 0 cache hits (0%)"), True)
 
+    # So does the Results pane: two builds in one task, each with its own
+    # targets and actions; the newest's until `<` picks the first.
+    picks = _screen(ctx, ["x"], task = "lint", building = False, ended = True, counts = dict(new_counts(), configured = 3, built = 3), done_total = (2, 2, False), inv = {"build_finished": _SUCCESS, "build_metrics": _OK})
+    fold_build(picks, 0)
+    picks.update(counts = dict(new_counts(), configured = 5, built = 5), done_total = (8563, 8563, False), inv = {"build_finished": _SUCCESS, "build_metrics": _REUSED})
+    fold_build(picks, 0)
+    picks.update(panes = True, tab = "metrics")
+    results_of = lambda st: " ".join([r.rpartition("││")[2] for r in _visible(render(st, 140, 30)).split("\n") if "││" in r])
+    newest = results_of(picks)
+    _eq("Results: the newest build's", ("Targets  5 configured" in newest, "█ 105 ran" in newest, "Targets  3 configured" in newest), (True, True, False))
+    on_key(picks, "<", 10)
+    first = results_of(picks)
+    _eq("Results: the picked build's", ("Targets  3 configured" in first, "█ 1 ran" in first, "Targets  5 configured" in first), (True, True, False))
 
     # Every row of the screen as wide as it, from 40 to 200 columns, while
     # the build runs and at its end.
