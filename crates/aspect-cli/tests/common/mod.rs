@@ -84,6 +84,41 @@ pub fn base_env() -> std::collections::HashMap<String, String> {
     env
 }
 
+/// `cmd` run in `dir/repo` under a git environment of the test's own: `dir/home`
+/// as `HOME`, no system git config, and no ambient `GIT_*` variables, which a
+/// git hook's `GIT_DIR` would otherwise point at the outer repository.
+#[allow(dead_code)]
+pub fn isolated(mut cmd: std::process::Command, dir: &std::path::Path) -> std::process::Command {
+    for (k, _) in std::env::vars_os() {
+        if k.to_string_lossy().starts_with("GIT_") {
+            cmd.env_remove(k);
+        }
+    }
+    cmd.current_dir(dir.join("repo"))
+        .env("HOME", dir.join("home"))
+        .env("XDG_CONFIG_HOME", dir.join("home/.config"))
+        .env("GIT_CONFIG_NOSYSTEM", "1");
+    cmd
+}
+
+/// `git <args>` in `dir/repo` under [`isolated`], committing as a fixed,
+/// unsigned author; asserts it succeeded and returns its stdout.
+#[allow(dead_code)]
+pub fn git(dir: &std::path::Path, args: &[&str]) -> String {
+    let output = isolated(std::process::Command::new("git"), dir)
+        .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+        .args(["-c", "commit.gpgsign=false"])
+        .args(args)
+        .output()
+        .expect("running git");
+    assert!(
+        output.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
 /// `cmd` without a coding agent's variables, which would switch the console
 /// to its `agent` layout, for a test that otherwise keeps the developer's
 /// environment.

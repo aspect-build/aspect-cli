@@ -1,26 +1,35 @@
 //! `aspect worktree` is how you get a clean checkout to fix a broken workspace
-//! in, so the workspace's own AXL failing to load must not block it. Every
-//! subcommand runs anyway, with one warning on stderr naming each file that
-//! failed and the settings that may be at their defaults, and stdout stays the
-//! answer a caller parses. Any other task, a repository's own task in the
-//! `worktree` group included, still fails as before, and a workspace that
-//! loads warns about nothing.
+//! in, so the workspace's own AXL failing to load must not block it. `add`,
+//! `release`, `list`, `path` and `inspect` run anyway, with one warning on
+//! stderr naming each file that failed and the settings that may be at their
+//! defaults, and stdout stays the answer a caller parses. Such a run takes no
+//! stopped session's slot back and runs no feature but the ones those tasks
+//! read, since the config that did not load may protect the one and turn off
+//! the others. A usage error on one of them is Clap's to report. `prune`, any
+//! other task, and a repository's own task in the `worktree` group still fail
+//! as before, and a workspace that loads warns about nothing.
 //!
-//! Each case is a scratch git clone with its own `HOME`, no system git config
-//! and no ambient `GIT_*` variables, so the pool and any user-global
+//! Each case is a scratch git clone with its own `HOME` (see
+//! [`common::isolated`]), so the pool and any user-global
 //! `~/.aspect/config.axl` are the test's own.
 
 mod common;
 
-use common::{aspect_cli, base_env};
-use std::path::Path;
+use common::{aspect_cli, base_env, git, isolated};
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::time::{Duration, SystemTime};
 
 /// The head of the degraded run's warning.
-const WARNING: &str = "warning: `aspect worktree` is running without AXL that failed to load:";
+const WARNING: &str = "warning: `aspect worktree` runs without the AXL that failed to load:";
 
-/// A `config.axl` for each way of failing to load, with what the warning's
-/// line for it must say.
+/// The warning's line for the settings a config or feature file would apply.
+const SETTINGS: &str = "Settings these files would have applied to it may be at their defaults: \
+                        the `WorktreePool` options (`max_slots`, `abandoned_grace_hours`), the \
+                        `Worktrees` `score_slot` hooks";
+
+/// A `config.axl` for each way of failing, with what the warning's line for
+/// it must say.
 const BROKEN_CONFIGS: &[(&str, &str, &str)] = &[
     (
         "a missing symbol",
@@ -37,7 +46,15 @@ const BROKEN_CONFIGS: &[(&str, &str, &str)] = &[
         "load(\"./no_such_file.axl\", \"anything\")\n\ndef config(ctx):\n    pass\n",
         "no_such_file.axl",
     ),
+    (
+        "a fail() in config()",
+        "def config(ctx):\n    fail(\"boom at config time\\nsecond line\")\n",
+        "boom at config time",
+    ),
 ];
+
+/// A task file that cannot parse.
+const UNPARSABLE: &str = "this is not valid starlark(\n";
 
 /// A scratch clone, its `HOME` and the CLI's cache, removed on drop.
 struct Workspace {
@@ -53,18 +70,13 @@ impl Workspace {
         std::fs::create_dir_all(dir.path().join("repo")).unwrap();
         std::fs::create_dir_all(dir.path().join("home")).unwrap();
         std::fs::write(dir.path().join("repo/MODULE.aspect"), "").unwrap();
-        for (path, contents) in files {
-            let path = match path.strip_prefix("~/") {
-                Some(rest) => dir.path().join("home").join(rest),
-                None => dir.path().join("repo").join(path),
-            };
-            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            std::fs::write(path, contents).unwrap();
-        }
         let ws = Workspace { dir };
-        ws.git(&["init", "-q"]);
-        ws.git(&["add", "-A"]);
-        ws.git(&["commit", "-q", "-m", "init"]);
+        for (path, contents) in files {
+            ws.write(path, contents);
+        }
+        git(ws.path(), &["init", "-q"]);
+        git(ws.path(), &["add", "-A"]);
+        git(ws.path(), &["commit", "-q", "-m", "init"]);
         ws
     }
 
@@ -72,40 +84,30 @@ impl Workspace {
         self.dir.path()
     }
 
-    /// `cmd` run in the clone under the test's own git environment.
-    fn isolated(&self, mut cmd: Command) -> Command {
-        for (k, _) in std::env::vars_os() {
-            if k.to_string_lossy().starts_with("GIT_") {
-                cmd.env_remove(k);
-            }
-        }
-        cmd.current_dir(self.path().join("repo"))
-            .env("HOME", self.path().join("home"))
-            .env("XDG_CONFIG_HOME", self.path().join("home/.config"))
-            .env("GIT_CONFIG_NOSYSTEM", "1");
-        cmd
+    /// Write `contents` to `path`, as [`Workspace::new`] places it.
+    fn write(&self, path: &str, contents: &str) {
+        let path = match path.strip_prefix("~/") {
+            Some(rest) => self.path().join("home").join(rest),
+            None => self.path().join("repo").join(path),
+        };
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, contents).unwrap();
     }
 
-    fn git(&self, args: &[&str]) {
-        let status = self
-            .isolated(Command::new("git"))
-            .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
-            .args(["-c", "commit.gpgsign=false"])
-            .args(args)
-            .status()
-            .expect("running git");
-        assert!(status.success(), "git {args:?} failed");
-    }
-
-    /// `aspect <args>` in the clone, under [`base_env`].
-    fn aspect(&self, args: &[&str]) -> Output {
+    /// `aspect <args>` in the clone, under [`base_env`] plus `vars`.
+    fn run(&self, args: &[&str], vars: &[(&str, &str)]) -> Output {
         let mut cmd = Command::new(aspect_cli());
         cmd.env_clear().envs(base_env());
-        self.isolated(cmd)
+        isolated(cmd, self.path())
             .env("ASPECT_CLI_CACHE", self.path().join("cache"))
+            .envs(vars.iter().copied())
             .args(args)
             .output()
             .unwrap_or_else(|e| panic!("running `aspect {}`: {e}", args.join(" ")))
+    }
+
+    fn aspect(&self, args: &[&str]) -> Output {
+        self.run(args, &[])
     }
 }
 
@@ -117,12 +119,11 @@ fn stdout(out: &Output) -> String {
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
-/// `out` succeeded with the degraded run's warning: a line naming `file` with
-/// `headline`, and the settings that may be at their defaults. Nothing of it
-/// reached stdout.
-fn assert_degraded(out: &Output, file: &str, headline: &str) {
+/// `out` carries the degraded run's single warning, with a line naming `file`
+/// and `headline` and, when `settings`, the line for the settings. Nothing of
+/// it reached stdout.
+fn assert_warned(out: &Output, file: &str, headline: &str, settings: bool) {
     let stderr = stderr(out);
-    assert_eq!(out.status.code(), Some(0), "--- stderr ---\n{stderr}");
     assert_eq!(
         stderr.matches("warning:").count(),
         1,
@@ -138,15 +139,31 @@ fn assert_degraded(out: &Output, file: &str, headline: &str) {
             .any(|l| l.starts_with("  ") && l.contains(file) && l.contains(headline)),
         "expected a line naming {file} with {headline:?} in:\n{stderr}"
     );
+    assert_eq!(
+        stderr.contains(SETTINGS),
+        settings,
+        "the settings line, expected {settings}, in:\n{stderr}"
+    );
     assert!(
-        stderr.contains("`abandoned_grace_hours`") && stderr.contains("`score_slot`"),
-        "expected the settings at their defaults in:\n{stderr}"
+        stderr.contains("`ASPECT_DEBUG=1` prints each error in full."),
+        "{stderr}"
     );
     assert!(
         !stdout(out).contains("failed to load") && !stdout(out).contains(headline),
         "the warning reached stdout:\n{}",
         stdout(out)
     );
+}
+
+/// `out` succeeded with the degraded run's warning (see [`assert_warned`]).
+fn assert_degraded(out: &Output, file: &str, headline: &str) {
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "--- stderr ---\n{}",
+        stderr(out)
+    );
+    assert_warned(out, file, headline, true);
 }
 
 /// `out` succeeded and said nothing about a workspace that did not load.
@@ -159,53 +176,134 @@ fn assert_clean(out: &Output) {
     );
 }
 
-/// `aspect worktree add HEAD --detach --output=json`, then `release` of the
-/// slot it took, each checked by `check`.
-fn add_and_release(ws: &Workspace, check: impl Fn(&Output)) {
-    let added = ws.aspect(&["worktree", "add", "HEAD", "--detach", "--output=json"]);
-    check(&added);
-    let doc: serde_json::Value = serde_json::from_slice(&added.stdout)
-        .unwrap_or_else(|e| panic!("add's stdout is not JSON ({e}):\n{}", stdout(&added)));
-    let slot = doc["slot"].as_str().expect("a slot id").to_owned();
+/// `out` failed on the config's own error, as an ordinary task does.
+fn assert_fails_on(out: &Output, headline: &str) {
+    let stderr = stderr(out);
+    assert_eq!(out.status.code(), Some(1), "{stderr}");
     assert!(
-        Path::new(doc["path"].as_str().expect("a path")).is_dir(),
-        "{doc}"
+        stderr.contains(&format!("error: {headline}")),
+        "expected the config's error in:\n{stderr}"
+    );
+    assert!(!stderr.contains(WARNING), "ran degraded:\n{stderr}");
+}
+
+/// The JSON document on `out`'s stdout.
+fn json(out: &Output) -> serde_json::Value {
+    serde_json::from_slice(&out.stdout)
+        .unwrap_or_else(|e| panic!("stdout is not JSON ({e}):\n{}", stdout(out)))
+}
+
+/// `add HEAD --detach --output=path`, `path` and `release` of the slot it
+/// took, each checked by `check`. Stdout carries the slot's directory and
+/// nothing else.
+fn add_path_release(ws: &Workspace, check: impl Fn(&Output)) {
+    let added = ws.aspect(&["worktree", "add", "HEAD", "--detach", "--output=path"]);
+    check(&added);
+    let printed = stdout(&added);
+    let dir = printed
+        .strip_suffix('\n')
+        .unwrap_or_else(|| panic!("--output=path is one line: {printed:?}"));
+    assert!(
+        !dir.contains('\n') && Path::new(dir).is_dir(),
+        "--output=path printed {printed:?}"
     );
 
-    let released = ws.aspect(&["worktree", "release", &slot, "--output=json"]);
+    let path = ws.aspect(&["worktree", "path", dir]);
+    check(&path);
+    assert_eq!(stdout(&path), printed, "`path` prints the same directory");
+
+    let released = ws.aspect(&["worktree", "release", dir, "--output=json"]);
     check(&released);
-    let doc: serde_json::Value = serde_json::from_slice(&released.stdout)
-        .unwrap_or_else(|e| panic!("release's stdout is not JSON ({e}):\n{}", stdout(&released)));
-    assert_eq!(doc["slot"], slot.as_str(), "{doc}");
+    assert_eq!(json(&released)["path"], dir, "{}", stdout(&released));
 }
 
 #[test]
-fn every_worktree_command_runs_on_a_config_that_does_not_load() {
+fn the_degraded_worktree_commands_run_on_a_config_that_does_not_load() {
     for (case, config, headline) in BROKEN_CONFIGS {
         eprintln!("case: {case}");
         let ws = Workspace::new(&[(".aspect/config.axl", config)]);
         let file = ".aspect/config.axl";
         assert_degraded(&ws.aspect(&["worktree", "inspect"]), file, headline);
         assert_degraded(&ws.aspect(&["worktree", "list"]), file, headline);
-        add_and_release(&ws, |out| assert_degraded(out, file, headline));
+        add_path_release(&ws, |out| assert_degraded(out, file, headline));
     }
 }
 
-/// A task file and the user-global config are the workspace's AXL as much as
-/// the repository's `config.axl` is.
+/// A task file, a feature file and the user-global config are the workspace's
+/// AXL as much as the repository's `config.axl` is. A task file sets nothing,
+/// so its failure alone leaves out the settings line.
 #[test]
-fn a_broken_task_file_or_user_config_does_not_block_it_either() {
-    for (file, path) in [
-        ("broken.axl", ".aspect/broken.axl"),
-        (".aspect/config.axl", "~/.aspect/config.axl"),
+fn a_broken_task_feature_or_user_config_does_not_block_it_either() {
+    for (path, file, settings) in [
+        (".aspect/broken.axl", ".aspect/broken.axl", false),
+        ("~/.aspect/config.axl", ".aspect/config.axl", true),
+        ("tools/feature.axl", "tools/feature.axl", true),
     ] {
-        let ws = Workspace::new(&[(path, "this is not valid starlark(\n")]);
-        assert_degraded(&ws.aspect(&["worktree", "inspect"]), file, "Parse error");
+        let ws = Workspace::new(&[(path, UNPARSABLE)]);
+        if path.starts_with("tools/") {
+            ws.write(
+                "MODULE.aspect",
+                "use_feature(\"tools/feature.axl\", \"Mine\")\n",
+            );
+        }
+        let out = ws.aspect(&["worktree", "inspect"]);
+        assert_eq!(out.status.code(), Some(0), "{path}:\n{}", stderr(&out));
+        assert_warned(&out, file, "Parse error", settings);
     }
 }
 
-/// Only the built-in `aspect worktree` tasks run degraded: another built-in
-/// task, the surface `describe` reports, and a repository's own task in the
+/// Several broken files share the one warning, task and feature files ahead of
+/// configs, each with its own error; `ASPECT_DEBUG` prints each in full.
+#[test]
+fn every_failure_is_one_line_of_one_warning_and_aspect_debug_prints_it_in_full() {
+    let config = BROKEN_CONFIGS[0].1;
+    let ws = Workspace::new(&[
+        (".aspect/broken.axl", UNPARSABLE),
+        (".aspect/broken2.axl", "load(\"./nope.axl\", \"x\")\n"),
+        (".aspect/config.axl", config),
+    ]);
+    let out = ws.aspect(&["worktree", "inspect"]);
+    assert_degraded(&out, ".aspect/config.axl", BROKEN_CONFIGS[0].2);
+    let stderr = stderr(&out);
+    let line_of = |file: &str| {
+        stderr
+            .lines()
+            .position(|l| l.starts_with("  ") && l.contains(file))
+            .unwrap_or_else(|| panic!("no line for {file} in:\n{stderr}"))
+    };
+    let config_line = line_of(".aspect/config.axl:");
+    for script in [".aspect/broken.axl:", ".aspect/broken2.axl:"] {
+        assert!(
+            line_of(script) < config_line,
+            "{script} after the config:\n{stderr}"
+        );
+    }
+    let excerpts = [
+        "this is not valid starlark(",
+        "load(\"@aspect//traits.axl\", \"NoSuchTrait\")",
+    ];
+    for excerpt in excerpts {
+        assert!(
+            !stderr.contains(excerpt),
+            "a full error without ASPECT_DEBUG:\n{stderr}"
+        );
+    }
+
+    let debug = ws.run(&["worktree", "inspect"], &[("ASPECT_DEBUG", "1")]);
+    assert_eq!(debug.status.code(), Some(0), "{}", self::stderr(&debug));
+    let full = self::stderr(&debug);
+    for excerpt in excerpts {
+        assert!(
+            full.contains(excerpt),
+            "ASPECT_DEBUG=1 left out {excerpt:?}:\n{full}"
+        );
+    }
+    assert!(full.contains("nope.axl"), "{full}");
+}
+
+/// Only the listed built-in tasks run degraded: `prune`, whose default
+/// `max_idle_days` may delete slots a config keeps, another built-in task,
+/// the surface `describe` reports, and a repository's own task in the
 /// `worktree` group, which may need what failed, still fail on it.
 #[test]
 fn every_other_command_still_fails_on_a_config_that_does_not_load() {
@@ -214,32 +312,159 @@ fn every_other_command_still_fails_on_a_config_that_does_not_load() {
                 mine = task(group = [\"worktree\"], summary = \"Mine.\", implementation = _impl)\n";
     let ws = Workspace::new(&[(".aspect/config.axl", config), (".aspect/mine.axl", mine)]);
     for args in [
+        &["worktree", "prune", "--dry-run"][..],
         &["history", "list"][..],
         &["describe"][..],
         &["worktree", "mine"][..],
     ] {
-        let out = ws.aspect(args);
-        let stderr = stderr(&out);
-        assert_eq!(out.status.code(), Some(1), "aspect {args:?}:\n{stderr}");
-        assert!(
-            stderr.contains(&format!("error: {headline}")),
-            "aspect {args:?} must fail on the config's error:\n{stderr}"
-        );
-        assert!(
-            !stderr.contains(WARNING),
-            "aspect {args:?} ran degraded:\n{stderr}"
-        );
+        eprintln!("aspect {args:?}");
+        assert_fails_on(&ws.aspect(args), headline);
     }
 }
 
-/// A workspace that loads, its config setting a worktree option, runs as it
-/// always has: no warning, and the subcommands succeed.
+/// A command line Clap rejects for a degraded command gets Clap's error and
+/// exit code, after the warning, rather than the config's error. One for a
+/// task that cannot run degraded still gets the config's.
 #[test]
-fn a_config_that_loads_runs_as_before() {
-    let config = "load(\"@aspect//feature/worktree_pool.axl\", \"WorktreePool\")\n\n\
-                  def config(ctx):\n    ctx.features[WorktreePool].args.abandoned_grace_hours = 48\n";
+fn a_usage_error_on_a_degraded_command_is_reported_as_one() {
+    let (_, config, headline) = BROKEN_CONFIGS[0];
     let ws = Workspace::new(&[(".aspect/config.axl", config)]);
-    assert_clean(&ws.aspect(&["worktree", "inspect"]));
-    assert_clean(&ws.aspect(&["worktree", "list"]));
-    add_and_release(&ws, assert_clean);
+    for (args, clap_says) in [
+        (&["worktree", "add", "x", "--detatch"][..], "--detatch"),
+        (&["worktree", "path"][..], "required"),
+        (&["worktree", "bogus"][..], "bogus"),
+    ] {
+        let out = ws.aspect(args);
+        let stderr = stderr(&out);
+        assert_eq!(out.status.code(), Some(2), "aspect {args:?}:\n{stderr}");
+        assert_warned(&out, ".aspect/config.axl", headline, true);
+        assert!(
+            stderr
+                .lines()
+                .any(|l| l.starts_with("error: ") && l.contains(clap_says)),
+            "aspect {args:?}: expected Clap's error naming {clap_says:?} in:\n{stderr}"
+        );
+        assert!(
+            !stderr.contains(&format!("error: {headline}")),
+            "aspect {args:?} failed on the config:\n{stderr}"
+        );
+    }
+    assert_fails_on(&ws.aspect(&["worktree", "prune", "--bogus"]), headline);
+}
+
+/// A config that turns a feature off and then fails to load leaves it on, so a
+/// degraded run must not run it: here no span reaches the console exporter the
+/// environment asks for, as one does when the same config loads and leaves
+/// `Telemetry` on.
+#[test]
+fn a_degraded_run_runs_no_feature_its_tasks_do_not_read() {
+    let exporter = [("OTEL_TRACES_EXPORTER", "console")];
+    let spans = |out: &Output| {
+        stderr(out)
+            .lines()
+            .filter(|l| l.starts_with("span "))
+            .count()
+    };
+
+    let ws = Workspace::new(&[(
+        ".aspect/config.axl",
+        "load(\"@aspect//feature/telemetry.axl\", \"Telemetry\", \"FromTheFuture\")\n\n\
+         def config(ctx):\n    ctx.features[Telemetry].enabled = False\n",
+    )]);
+    let out = ws.run(&["worktree", "inspect"], &exporter);
+    assert_degraded(&out, ".aspect/config.axl", "FromTheFuture");
+    assert_eq!(
+        spans(&out),
+        0,
+        "a degraded run exported spans:\n{}",
+        stderr(&out)
+    );
+
+    ws.write(".aspect/config.axl", "def config(ctx):\n    pass\n");
+    let out = ws.run(&["worktree", "inspect"], &exporter);
+    assert_clean(&out);
+    assert!(spans(&out) > 0, "the exporter is not on:\n{}", stderr(&out));
+}
+
+/// The `WorktreePool` grace period a config sets is not known while that
+/// config does not load, so a degraded `add` takes no stopped session's slot
+/// back: a clean lease idle for 30 hours, past the 24-hour default and inside
+/// the config's 72, is kept and a new slot made. Once a config loads, the
+/// same lease is taken back, which shows the lease was one `add` would take.
+#[test]
+fn a_degraded_add_takes_no_stopped_sessions_slot_back() {
+    let broken = "load(\"@aspect//feature/worktree_pool.axl\", \"WorktreePool\", \"FromTheFuture\")\n\n\
+                  def config(ctx):\n    ctx.features[WorktreePool].args.abandoned_grace_hours = 72\n";
+    let ws = Workspace::new(&[(".aspect/config.axl", "def config(ctx):\n    pass\n")]);
+    let taken = ws.aspect(&["worktree", "add", "feat", "--create", "--output=json"]);
+    assert_clean(&taken);
+    let stopped = json(&taken)["slot"].as_str().expect("a slot").to_owned();
+    let slot_dir = PathBuf::from(json(&taken)["path"].as_str().expect("a path"));
+    stop_and_age(&ws, &slot_dir, &stopped, Duration::from_secs(30 * 3600));
+
+    ws.write(".aspect/config.axl", broken);
+    let added = ws.aspect(&["worktree", "add", "other", "--create", "--output=json"]);
+    assert_degraded(&added, ".aspect/config.axl", "FromTheFuture");
+    let doc = json(&added);
+    assert_ne!(
+        doc["slot"],
+        stopped.as_str(),
+        "took the stopped lease: {doc}"
+    );
+    assert!(!stdout(&added).contains("lease_reclaimed"), "{doc}");
+    assert!(slot_dir.is_dir(), "the stopped session's checkout went");
+
+    ws.write(".aspect/config.axl", "def config(ctx):\n    pass\n");
+    let control = ws.aspect(&["worktree", "add", "third", "--create", "--output=json"]);
+    assert_clean(&control);
+    let doc = json(&control);
+    assert_eq!(
+        doc["slot"],
+        stopped.as_str(),
+        "the control did not reclaim: {doc}"
+    );
+    assert!(stdout(&control).contains("lease_reclaimed"), "{doc}");
+}
+
+/// Make slot `slot`'s lease look like a session that stopped `idle` ago: a
+/// holder whose process has exited, and nothing in the slot newer than that.
+fn stop_and_age(ws: &Workspace, slot_dir: &Path, slot: &str, idle: Duration) {
+    let mut exited = Command::new("true").spawn().expect("spawning `true`");
+    let pid = exited.id();
+    exited.wait().expect("waiting for `true`");
+    let then = SystemTime::now() - idle;
+    let then_ms = then
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+
+    let registry = slot_dir.parent().expect("a pool").join("registry.json");
+    let mut doc: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&registry).expect("the registry")).unwrap();
+    let lease = &mut doc["slots"][slot]["lease"];
+    assert!(lease.is_object(), "no lease on {slot}: {doc}");
+    lease["agent"] = serde_json::json!({
+        "kind": "claude-code",
+        "id": "a-stopped-session",
+        "pid": pid,
+        "pid_start": "Thu Jan  1 00:00:00 2026",
+    });
+    lease["since"] = serde_json::json!(then_ms);
+    std::fs::write(&registry, serde_json::to_string_pretty(&doc).unwrap()).unwrap();
+
+    let git_dir = git(
+        ws.path(),
+        &[
+            "-C",
+            &slot_dir.to_string_lossy(),
+            "rev-parse",
+            "--absolute-git-dir",
+        ],
+    );
+    for marker in ["index", "HEAD", "logs/HEAD"] {
+        let path = Path::new(git_dir.trim()).join(marker);
+        if let Ok(file) = std::fs::File::options().write(true).open(&path) {
+            file.set_modified(then).expect("setting a marker's mtime");
+        }
+    }
 }

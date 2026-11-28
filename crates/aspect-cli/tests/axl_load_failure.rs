@@ -10,7 +10,7 @@
 //! tasks, is pinned in `worktree_broken_config.rs`. Both halves matter. A
 //! silently swallowed syntax error would be worse than the hard failure it
 //! replaced, so every degraded run is checked for the diagnostic as well as
-//! the exit code — and a command that *does* fail is checked for the files it
+//! the exit code, and a command that *does* fail is checked for the files it
 //! did not raise, since dropping those would make what the user hears about
 //! depend on `read_dir` order.
 //!

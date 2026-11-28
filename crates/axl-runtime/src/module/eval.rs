@@ -72,12 +72,7 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
         #[starlark(require = named, default = String::new())] strip_prefix: String,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<values::none::NoneType> {
-        if name == AXL_ROOT_MODULE_NAME {
-            anyhow::bail!(
-                "axl_archive_dep name {:?} not allowed.",
-                AXL_ROOT_MODULE_NAME
-            );
-        }
+        reject_reserved_dep_name("axl_archive_dep", &name)?;
         validate_module_name(&name)?;
 
         if !dev {
@@ -120,9 +115,7 @@ pub fn register_globals(globals: &mut GlobalsBuilder) {
         #[starlark(require = named, default = false)] auto_use_tasks: bool,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<values::none::NoneType> {
-        if name == AXL_ROOT_MODULE_NAME {
-            anyhow::bail!("axl_local_dep name {:?} not allowed.", AXL_ROOT_MODULE_NAME);
-        }
+        reject_reserved_dep_name("axl_local_dep", &name)?;
         validate_module_name(&name)?;
 
         let store = Mod::from_eval(eval)?;
@@ -193,6 +186,18 @@ pub const AXL_MODULE_FILE: &str = "MODULE.aspect";
 pub const AXL_ROOT_MODULE_NAME: &str = "root";
 
 pub const AXL_USER_MODULE_NAME: &str = "user";
+
+/// The module the CLI's built-in tasks and features load as: `@aspect//build.axl`.
+pub const AXL_BUILTIN_MODULE_NAME: &str = "aspect";
+
+/// Refuse a dependency named like a module the CLI itself provides: the root
+/// module, or the built-in one, which a dependency of that name would replace.
+fn reject_reserved_dep_name(function: &str, name: &str) -> anyhow::Result<()> {
+    if name == AXL_ROOT_MODULE_NAME || name == AXL_BUILTIN_MODULE_NAME {
+        anyhow::bail!("{function} name {name:?} not allowed.");
+    }
+    Ok(())
+}
 
 pub const AXL_SCRIPT_EXTENSION: &str = "axl";
 
@@ -293,5 +298,47 @@ impl ModEvaluator {
         }
 
         Ok(r#mod)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `MODULE.aspect` holding `contents`, evaluated as the root module, with
+    /// a `tools/` directory beside it for a local dep to point at.
+    fn evaluate(contents: &str) -> Result<Mod, EvalError> {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("tools")).unwrap();
+        std::fs::write(dir.path().join(AXL_MODULE_FILE), contents).unwrap();
+        ModEvaluator::new(dir.path().to_path_buf())
+            .evaluate(AXL_ROOT_MODULE_NAME.to_owned(), dir.path().to_path_buf())
+    }
+
+    /// A dep named like the root or built-in module would stand in for it, so
+    /// both dep kinds refuse those names.
+    #[test]
+    fn a_dep_cannot_take_a_name_the_cli_provides() {
+        for name in [AXL_ROOT_MODULE_NAME, AXL_BUILTIN_MODULE_NAME] {
+            for (function, call) in [
+                (
+                    "axl_local_dep",
+                    format!("axl_local_dep(name = {name:?}, path = \"tools\")"),
+                ),
+                (
+                    "axl_archive_dep",
+                    format!(
+                        "axl_archive_dep(name = {name:?}, urls = [\"https://x/y.tar.gz\"], dev = True)"
+                    ),
+                ),
+            ] {
+                let err = evaluate(&call).expect_err(&call).to_string();
+                assert!(
+                    err.contains(&format!("{function} name {name:?} not allowed")),
+                    "{call}: {err}"
+                );
+            }
+        }
+        evaluate("axl_local_dep(name = \"tools\", path = \"tools\")").expect("an ordinary name");
     }
 }

@@ -263,7 +263,7 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
             let mut cmd_for_help = root_cmd.clone();
             let argv = cmd.route_unrecognized_flags(&root_cmd, std::env::args_os().collect());
 
-            let parsed = root_cmd.try_get_matches_from_mut(argv);
+            let parsed = root_cmd.try_get_matches_from_mut(argv.clone());
             cli_step.finish();
             let matches = match parsed {
                 Ok(m) => m,
@@ -273,6 +273,16 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
                     // needs a task definition, so they still run degraded.
                     if is_display_only(&err) {
                         unloadable.warn();
+                        err.print().ok();
+                        return Ok(ExitCode::from(err.exit_code() as u8));
+                    }
+                    // A usage error on a command that runs degraded is Clap's to
+                    // report: that command was there, so the load failure did
+                    // not cause it.
+                    if !unloadable.is_empty()
+                        && let Some(entry) = cmd.degraded_usage(&root_cmd, &argv)
+                    {
+                        unloadable.warn_degraded(entry, &cmd.degraded_settings(entry));
                         err.print().ok();
                         return Ok(ExitCode::from(err.exit_code() as u8));
                     }
@@ -290,11 +300,14 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
 
             // Everything past here either reports the CLI's own surface or
             // dispatches a task; see `Unloadable` for which may run degraded.
+            let mut degraded = None;
             if !unloadable.is_empty() {
                 if runs_without_tasks(matches.subcommand_name()) {
                     unloadable.warn();
-                } else if let Some(group) = cmd.degraded_group(&matches) {
-                    unloadable.warn_degraded(group);
+                } else if let Some(entry) = cmd.degraded_commands(&matches) {
+                    unloadable.warn_degraded(entry, &cmd.degraded_settings(entry));
+                    mpe.mark_degraded();
+                    degraded = Some(entry);
                 } else if let Some(err) = unloadable.into_error() {
                     return Err(err);
                 }
@@ -353,9 +366,14 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
             )
             .map_err(anyhow::Error::from)?;
 
-            // Phase 3: run enabled feature impls.
+            // Phase 3: run enabled feature impls; in a degraded run only the
+            // ones its task reads, since a config that did not load may have
+            // turned the others off.
             time("features", || {
-                mpe.execute_features_with_args(|f, h| dispatch.feature_args(f, h))
+                mpe.execute_features_with_args(
+                    |f| degraded.is_none_or(|entry| cmd.runs_degraded(entry, f)),
+                    |f, h| dispatch.feature_args(f, h),
+                )
             })
             .map_err(anyhow::Error::from)?;
 
@@ -494,17 +512,17 @@ impl std::fmt::Display for ConfigError {
 
 /// AXL that failed during startup, held rather than raised.
 ///
-/// The whole CLI surface — the task list, their flags, the features — is
-/// defined in AXL, so one `.aspect/*.axl` file that does not parse used to
-/// fail every command: the `aspect help` the user needs to find the typo and
-/// the `aspect version` they run to check their setup included. Phases 1 and 2
-/// carry on past an unloadable file ([`MultiPhaseEval::eval`],
+/// The whole CLI surface, the task list, their flags and the features, is
+/// defined in AXL, so failing every command on one `.aspect/*.axl` file that
+/// does not parse would take the `aspect help` the user needs to find the
+/// typo, and the `aspect version` they run to check their setup, with it.
+/// Phases 1 and 2 carry on past an unloadable file ([`MultiPhaseEval::eval`],
 /// [`MultiPhaseEval::execute_configs`]) and hand what failed to this type.
 ///
 /// `docs/design.md`, "When a file does not load", states the policy: which
-/// commands run degraded (`version` and `help`, and the built-in task groups
-/// in [`cmd::DEGRADED_GROUPS`]), what each failure is reported as, and the
-/// four things settled outside the tolerant phases that still fail everything.
+/// commands run degraded (`version` and `help`, and the built-in tasks in
+/// [`cmd::DEGRADED_COMMANDS`]), what each failure is reported as, and the four
+/// things settled outside the tolerant phases that still fail everything.
 /// This type is the mechanism, and holds two invariants the policy depends on:
 ///
 /// * Nothing recorded is ever dropped silently. Both ways out of here report
@@ -513,8 +531,10 @@ impl std::fmt::Display for ConfigError {
 ///   does not vanish behind whatever ended the run. A run that carries on
 ///   names every failed file too: [`Self::warn`] in full, and
 ///   [`Self::warn_degraded`] one line each.
-/// * Scripts come before configs, and a config that failed alongside a script
-///   is summarised as derived from it rather than given a warning of its own.
+/// * Scripts come before configs. In the full report a config that failed
+///   alongside a script is summarised as derived from it rather than given a
+///   warning of its own; [`Self::warn_degraded`] gives each file the first
+///   line of its own error instead, so it blames nothing.
 #[derive(Default)]
 struct Unloadable {
     /// Phase 1: task and feature scripts.
@@ -543,8 +563,8 @@ impl Unloadable {
     /// separately. This is [`Self::warn_blaming`] with no raised failure, so
     /// the summary blames a script only when exactly one of them failed.
     ///
-    /// Silence here would be worse than the old hard failure — the point is
-    /// that the user still sees the typo.
+    /// Silence here would be worse than failing the command: the point is that
+    /// the user still sees the typo.
     fn warn(&self) {
         self.warn_blaming(None);
     }
@@ -606,29 +626,38 @@ impl Unloadable {
         }
     }
 
-    /// Report the failures for a built-in task of `group` that runs without
-    /// them: a single `warning:` naming the command, then a line per file with
-    /// the first line of its own error, scripts first, then the settings the
-    /// run may be missing. Each line is that file's own message, so no config
-    /// is blamed on a script here.
+    /// Report the failures for a built-in task of `entry` that runs without
+    /// them, or whose command line Clap rejected: a single `warning:` naming
+    /// the command, then a line per file with
+    /// the first line of its own error, scripts first. When a config or a
+    /// feature file failed, a line naming `settings`, which the run may have at
+    /// their defaults; a task file sets none. Each line is that file's own
+    /// message, so no config is blamed on a script here.
     ///
-    /// The full diagnostics are left to `aspect version`, which prints them
-    /// all, and to `ASPECT_DEBUG`: pages of source excerpts would bury the
-    /// answer the user ran the command for.
-    fn warn_degraded(&self, group: &cmd::DegradedGroup) {
+    /// The full diagnostics are left to `ASPECT_DEBUG`, which prints each
+    /// one below: pages of source excerpts would bury the answer the user ran
+    /// the command for.
+    fn warn_degraded(&self, entry: &cmd::DegradedCommands, settings: &str) {
         errln!(
-            "warning: `aspect {}` is running without AXL that failed to load:",
-            group.group
+            "warning: `aspect {}` runs without the AXL that failed to load:",
+            entry.group
         );
-        for failure in self.scripts.iter().chain(&self.configs) {
-            errln!("  {}: {}", failure.path.display(), headline(&failure.error));
+        let failures = || self.scripts.iter().chain(&self.configs);
+        for failure in failures() {
+            errln!(
+                "  {}: {}",
+                failure.path.display(),
+                headline(&failure.error, &failure.path)
+            );
         }
-        errln!(
-            "  Settings these files would have applied to it may be at their defaults: {}. \
-             `aspect version` prints each error in full.",
-            group.config_settings
-        );
-        for failure in self.scripts.iter().chain(&self.configs) {
+        if failures().any(|failure| failure.role != AxlFileRole::Tasks) {
+            errln!(
+                "  Settings these files would have applied to it may be at their defaults: \
+                 {settings}."
+            );
+        }
+        errln!("  `ASPECT_DEBUG=1` prints each error in full.");
+        for failure in failures() {
             TaskExit::debug_traceback(&format_args!(
                 "{}",
                 strip_error_prefix(&failure.error.to_string())
@@ -728,8 +757,9 @@ fn strip_error_prefix(message: &str) -> &str {
 }
 
 /// The first line of `error`'s message, without the `error: ` prefix, source
-/// excerpt or call stack its full rendering carries.
-fn headline(error: &EvalError) -> String {
+/// excerpt or call stack its full rendering carries, nor a leading `path: `
+/// naming the file it is reported against (`path`) a second time.
+fn headline(error: &EvalError, path: &Path) -> String {
     let message = match error {
         EvalError::StarlarkError(e) => e.without_diagnostic().to_string(),
         other => other.to_string(),
@@ -738,7 +768,9 @@ fn headline(error: &EvalError) -> String {
         .lines()
         .find(|line| !line.trim().is_empty())
         .unwrap_or_default();
-    strip_error_prefix(first.trim()).to_owned()
+    let first = strip_error_prefix(first.trim());
+    let named = format!("{}: ", path.display());
+    first.strip_prefix(&named).unwrap_or(first).to_owned()
 }
 
 /// Whether `args` ask for `--output=json` (or `--output json`) ahead of any
@@ -1120,6 +1152,7 @@ mod config_error_tests {
 mod degrade_policy_tests {
     use super::{EvalError, headline, is_display_only, runs_without_tasks, strip_error_prefix};
     use clap::error::ErrorKind;
+    use std::path::Path;
 
     /// Starlark's own `error: ` title is dropped so the caller supplies the
     /// only one; anything else is left exactly as it came.
@@ -1156,12 +1189,30 @@ mod degrade_policy_tests {
         .expect_err("a syntax error");
         let rendered = parse.to_string();
         assert!(rendered.contains("-->"), "{rendered}");
-        let line = headline(&EvalError::from(parse));
+        let path = Path::new("/ws/.aspect/config.axl");
+        let line = headline(&EvalError::from(parse), path);
         assert!(line.starts_with("Parse error: "), "{line}");
         assert!(!line.contains('\n'), "{line}");
 
         let other = EvalError::UnknownError(anyhow::anyhow!("error: boom\n  at somewhere"));
-        assert_eq!(headline(&other), "boom");
+        assert_eq!(headline(&other, path), "boom");
+
+        // A file that could not be read names itself, which the line already
+        // does; another file it names stays.
+        let unread = EvalError::UnknownError(anyhow::anyhow!(
+            "/ws/.aspect/config.axl: No such file or directory (os error 2)"
+        ));
+        assert_eq!(
+            headline(&unread, path),
+            "No such file or directory (os error 2)"
+        );
+        let loaded = EvalError::UnknownError(anyhow::anyhow!(
+            "/ws/.aspect/lib.axl: No such file or directory (os error 2)"
+        ));
+        assert_eq!(
+            headline(&loaded, path),
+            "/ws/.aspect/lib.axl: No such file or directory (os error 2)"
+        );
     }
 
     /// The commands that report the CLI's own identity, and nothing else.

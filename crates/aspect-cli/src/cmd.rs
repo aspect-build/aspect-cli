@@ -8,9 +8,11 @@
 //!   does not declare reach its `args.passthrough()` buckets instead of failing
 //!   the parse. `feature_flag_conflict()`, which `main` calls before
 //!   dispatching, fails a command line whose `--<name>` and `--<name>:enabled`
-//!   disagree with a clap usage error (exit 2). `degraded_group()` tells
-//!   `main` whether the selected task is one of the built-ins that run
-//!   against a workspace that did not fully load ([`DEGRADED_GROUPS`]).
+//!   disagree with a clap usage error (exit 2). `degraded_commands()` and
+//!   `degraded_usage()` tell `main` whether the selected task is one of the
+//!   built-ins that run against a workspace that did not fully load
+//!   ([`DEGRADED_COMMANDS`]), `runs_degraded()` which features still run for
+//!   it, and `degraded_settings()` what its warning lists.
 //!   `dispatch()` turns parsed [`ArgMatches`] into a [`Dispatch`].
 //!   `print_feature_help()` renders `aspect feature [<name>]`, the discovery
 //!   surface for feature flags (which are hidden from each task's `--help`)
@@ -42,7 +44,7 @@ use axl_runtime::engine::names::to_display_name;
 use axl_runtime::engine::task::{MAX_TASK_GROUPS, TaskLike};
 use axl_runtime::engine::task_map::task_key;
 use axl_runtime::eval::TimingMode;
-use axl_runtime::module::Mod;
+use axl_runtime::module::{AXL_BUILTIN_MODULE_NAME, Mod};
 use axl_runtime::suggest;
 use clap::builder::{PossibleValuesParser, Resettable, StyledStr};
 use clap::parser::ValueSource;
@@ -69,34 +71,40 @@ pub const HELP_COMMAND: &str = "help";
 /// the three cannot drift apart.
 pub const IDENTITY_COMMANDS: &[&str] = &[VERSION_COMMAND, HELP_COMMAND];
 
-/// A group of built-in tasks that run against a workspace that did not fully
-/// load, as the [`IDENTITY_COMMANDS`] do, and the config-driven settings such
-/// a run may be missing. See [`DEGRADED_GROUPS`].
-pub struct DegradedGroup {
-    /// The top-level group: `worktree` for `aspect worktree <task>`.
+/// Built-in tasks of one group that run against a workspace that did not
+/// fully load, as the [`IDENTITY_COMMANDS`] do. See [`DEGRADED_COMMANDS`].
+pub struct DegradedCommands {
+    /// The group: `worktree` for `aspect worktree <task>`.
     pub group: &'static str,
-    /// The settings a config applies to these tasks, as the degraded run's
-    /// warning lists them.
-    pub config_settings: &'static str,
+    /// The group's tasks that run, by kind.
+    pub tasks: &'static [&'static str],
+    /// The built-in features that still run for them, by exported name: the
+    /// ones whose settings the tasks read. Every other feature stays off,
+    /// since the config that did not load may have turned it off.
+    pub features: &'static [&'static str],
+    /// The settings a config applies to these tasks besides those features'
+    /// options, as the degraded run's warning names them.
+    pub other_settings: &'static str,
 }
 
-/// The built-in task groups that still run when the workspace's own AXL
-/// failed to load, warning instead of failing (see `Unloadable` in
-/// `main.rs`).
+/// The built-in tasks that still run when the workspace's own AXL failed to
+/// load, warning instead of failing (see `Unloadable` in `main.rs`).
 ///
-/// A group belongs here when it is a way out of a broken workspace and config
-/// only tunes it, so running without the config cannot lose work or do what a
-/// repository's config is there to prevent. `aspect worktree` hands out the
-/// clean checkout to fix the config in. What config sets for it picks which
-/// slot is reused, how many slots the pool keeps and how long a stopped
-/// session's slot is held, and none of its tasks removes a checkout holding
-/// work unless `--force` says to. Only tasks the built-in module defines
-/// qualify: a repository's own task in one of these groups may depend on what
-/// failed.
-pub const DEGRADED_GROUPS: &[DegradedGroup] = &[DegradedGroup {
+/// A task belongs here when it is a way out of a broken workspace and running
+/// on defaults cannot do what a config's setting is there to prevent.
+/// `aspect worktree` hands out the clean checkout to fix the config in. Most
+/// of what config sets for it picks which slot is reused and how many the pool
+/// keeps. The one setting that protects anything, how long a stopped
+/// session's slot is kept for it, is not trusted in such a run: the tasks read
+/// `ctx.task.degraded` and keep every such slot. `prune` is left out, since a
+/// config may raise its `max_idle_days` and the default would delete slots the
+/// config keeps. Only tasks the built-in module defines qualify: a
+/// repository's own task in one of these groups may depend on what failed.
+pub const DEGRADED_COMMANDS: &[DegradedCommands] = &[DegradedCommands {
     group: "worktree",
-    config_settings: "the `WorktreePool` options (`max_slots`, `abandoned_grace_hours`), the \
-                      `Worktrees` `score_slot` hooks, and any of its flags a config sets",
+    tasks: &["add", "release", "list", "path", "inspect"],
+    features: &["WorktreePool"],
+    other_settings: "the `Worktrees` `score_slot` hooks, and any of its flags a config sets",
 }];
 
 /// Top-level command names `main` intercepts before task parsing; a top-level
@@ -389,23 +397,88 @@ impl<'a, 'v> Cmd<'a, 'v> {
         Ok(())
     }
 
-    /// The [`DEGRADED_GROUPS`] entry the task `matches` selected belongs to,
-    /// if it is a built-in task of one of those groups. `None` for every other
-    /// command, a repository's own task in such a group included.
-    pub fn degraded_group(&self, matches: &ArgMatches) -> Option<&'static DegradedGroup> {
+    /// The [`DEGRADED_COMMANDS`] entry the task `matches` selected is one of.
+    /// `None` for every other command, a repository's own task in such a group
+    /// included.
+    pub fn degraded_commands(&self, matches: &ArgMatches) -> Option<&'static DegradedCommands> {
         let leaf = deepest_subcommand(matches)?;
-        let task = self
-            .tasks
-            .get(*leaf.try_get_one::<usize>(TASK_ID_KEY).ok()??)?;
-        let builtin = self.modules.iter().any(|r#mod| {
-            r#mod.name == crate::builtins::MODULE_NAME && task.path().starts_with(&r#mod.root)
-        });
-        if !builtin {
+        self.degraded_task(*leaf.try_get_one::<usize>(TASK_ID_KEY).ok()??)
+    }
+
+    /// [`Self::degraded_commands`] for a command line Clap rejected: the
+    /// entry whose task `argv` names, walking `root` as Clap would, or whose
+    /// group it names with a subcommand the group does not have
+    /// (`aspect worktree bogus`).
+    pub fn degraded_usage(
+        &self,
+        root: &Command,
+        argv: &[OsString],
+    ) -> Option<&'static DegradedCommands> {
+        let tokens: Vec<Option<&str>> = argv.iter().map(|token| token.to_str()).collect();
+        if let Some(selection) = select_command(root, &tokens) {
+            return self.degraded_task(selection.task_index);
+        }
+        let group = tokens.get(1).copied().flatten()?;
+        DEGRADED_COMMANDS
+            .iter()
+            .find(|entry| entry.group == group && root.find_subcommand(group).is_some())
+    }
+
+    /// Whether `feature` runs for the tasks of `entry` in a degraded run: a
+    /// built-in feature `entry` names.
+    pub fn runs_degraded(&self, entry: &DegradedCommands, feature: &dyn FeatureLike<'v>) -> bool {
+        self.is_builtin(feature.path())
+            && feature
+                .export_name()
+                .is_some_and(|name| entry.features.contains(&name.as_str()))
+    }
+
+    /// The settings a degraded run of `entry`'s tasks may have at their
+    /// defaults, as its warning lists them: the options of the features that
+    /// still run, then [`DegradedCommands::other_settings`].
+    pub fn degraded_settings(&self, entry: &DegradedCommands) -> String {
+        let mut parts: Vec<String> = self
+            .features
+            .iter()
+            .filter(|feature| self.runs_degraded(entry, **feature))
+            .filter_map(|feature| {
+                let options: Vec<String> = feature
+                    .args()
+                    .keys()
+                    .filter(|name| name.as_str() != "enabled")
+                    .map(|name| format!("`{name}`"))
+                    .collect();
+                (!options.is_empty()).then(|| {
+                    format!(
+                        "the `{}` options ({})",
+                        feature.export_name().unwrap_or_default(),
+                        options.join(", ")
+                    )
+                })
+            })
+            .collect();
+        parts.push(entry.other_settings.to_owned());
+        parts.join(", ")
+    }
+
+    /// The [`DEGRADED_COMMANDS`] entry task `index` is one of, if any.
+    fn degraded_task(&self, index: usize) -> Option<&'static DegradedCommands> {
+        let task = self.tasks.get(index)?;
+        if !self.is_builtin(task.path()) {
             return None;
         }
-        DEGRADED_GROUPS
+        let kind = task.kind();
+        DEGRADED_COMMANDS.iter().find(|entry| {
+            task.group().iter().map(String::as_str).eq([entry.group])
+                && entry.tasks.contains(&kind.as_str())
+        })
+    }
+
+    /// Whether `path` is in the built-in module's tree.
+    fn is_builtin(&self, path: &Path) -> bool {
+        self.modules
             .iter()
-            .find(|entry| task.group().iter().map(String::as_str).eq([entry.group]))
+            .any(|r#mod| r#mod.name == AXL_BUILTIN_MODULE_NAME && path.starts_with(&r#mod.root))
     }
 
     pub fn dispatch(&self, matches: ArgMatches) -> Result<Dispatch, CmdError> {
@@ -3817,39 +3890,107 @@ mod tests {
         assert_eq!(dispatch.task_name, "renamed");
     }
 
-    /// Only a built-in task of a listed group runs degraded: a repository's
-    /// own task in that group, a built-in in another group and a command that
-    /// is not a task do not.
+    /// Only a listed built-in task runs degraded: not a repository's own task
+    /// in its group, an unlisted built-in of that group (`prune`), a built-in
+    /// in another group, or a command that is not a task. A usage error finds
+    /// the same entry from the command line, and from the group alone when it
+    /// names no task of it.
     #[test]
-    fn degraded_group_takes_only_built_in_tasks_of_a_listed_group() {
+    fn only_listed_built_in_tasks_run_degraded() {
         let builtins = Mod::new(
             PathBuf::from("/cache"),
-            crate::builtins::MODULE_NAME.to_owned(),
+            AXL_BUILTIN_MODULE_NAME.to_owned(),
             PathBuf::from("/cache/aspect"),
         );
         let in_builtins = |mut t: StubTask| {
             t.path = PathBuf::from("/cache/aspect/tasks.axl");
             t
         };
-        let builtin_inspect = in_builtins(stub_task("inspect", &["worktree"], SmallMap::new()));
-        let builtin_list = in_builtins(stub_task("list", &["history"], SmallMap::new()));
+        let inspect = in_builtins(stub_task("inspect", &["worktree"], SmallMap::new()));
+        let prune = in_builtins(stub_task("prune", &["worktree"], SmallMap::new()));
+        let history = in_builtins(stub_task("list", &["history"], SmallMap::new()));
         let own = stub_task("mine", &["worktree"], SmallMap::new());
         let cmd = Cmd {
-            tasks: vec![&builtin_inspect, &builtin_list, &own],
+            tasks: vec![&inspect, &prune, &history, &own],
             features: vec![],
             aspect_root: Path::new("/repo"),
             modules: std::slice::from_ref(&builtins),
         };
-        let root = cmd.build("0.0.0").expect("build ok");
+        let mut root = cmd.build("0.0.0").expect("build ok");
+        root.build();
         let group = |argv: &[&str]| {
             let matches = root.clone().try_get_matches_from(argv).expect("parse ok");
-            cmd.degraded_group(&matches).map(|g| g.group)
+            cmd.degraded_commands(&matches).map(|g| g.group)
         };
         assert_eq!(group(&["aspect", "worktree", "inspect"]), Some("worktree"));
+        assert_eq!(group(&["aspect", "worktree", "prune"]), None);
         assert_eq!(group(&["aspect", "worktree", "mine"]), None);
         assert_eq!(group(&["aspect", "history", "list"]), None);
         assert_eq!(group(&["aspect", DESCRIBE_COMMAND]), None);
         assert_eq!(group(&["aspect", VERSION_COMMAND]), None);
+
+        let usage = |argv: &[&str]| {
+            let argv: Vec<OsString> = argv.iter().map(OsString::from).collect();
+            cmd.degraded_usage(&root, &argv).map(|g| g.group)
+        };
+        assert_eq!(
+            usage(&["aspect", "worktree", "inspect", "--bogus"]),
+            Some("worktree")
+        );
+        assert_eq!(usage(&["aspect", "worktree", "bogus"]), Some("worktree"));
+        assert_eq!(usage(&["aspect", "worktree", "prune", "--bogus"]), None);
+        assert_eq!(usage(&["aspect", "history", "list", "--bogus"]), None);
+        assert_eq!(usage(&["aspect", "bogus"]), None);
+    }
+
+    /// In a degraded run only the built-in features an entry names run, and
+    /// the warning lists their options, not `enabled`.
+    #[test]
+    fn a_degraded_run_keeps_only_the_features_it_reads() {
+        let builtins = Mod::new(
+            PathBuf::from("/cache"),
+            AXL_BUILTIN_MODULE_NAME.to_owned(),
+            PathBuf::from("/cache/aspect"),
+        );
+        let feature = |export: &str, path: &str, args: &[&str]| {
+            let mut map = SmallMap::new();
+            map.insert("enabled".to_owned(), arg_string("true"));
+            for name in args {
+                map.insert(name.to_string(), arg_string(""));
+            }
+            StubFeature {
+                name: export.to_lowercase(),
+                export_name: export.to_owned(),
+                display_name: export.to_owned(),
+                summary: String::new(),
+                args: map,
+                path: PathBuf::from(path),
+            }
+        };
+        let pool = feature(
+            "WorktreePool",
+            "/cache/aspect/feature/worktree_pool.axl",
+            &["max_slots", "abandoned_grace_hours"],
+        );
+        let telemetry = feature("Telemetry", "/cache/aspect/feature/telemetry.axl", &[]);
+        let impostor = feature("WorktreePool", "/repo/.aspect/pool.axl", &["x"]);
+        let cmd = Cmd {
+            tasks: vec![],
+            features: vec![&pool, &telemetry, &impostor],
+            aspect_root: Path::new("/repo"),
+            modules: std::slice::from_ref(&builtins),
+        };
+        let entry = &DEGRADED_COMMANDS[0];
+        assert!(cmd.runs_degraded(entry, &pool));
+        assert!(!cmd.runs_degraded(entry, &telemetry));
+        assert!(!cmd.runs_degraded(entry, &impostor));
+        assert_eq!(
+            cmd.degraded_settings(entry),
+            format!(
+                "the `WorktreePool` options (`max_slots`, `abandoned_grace_hours`), {}",
+                entry.other_settings
+            )
+        );
     }
 
     #[test]

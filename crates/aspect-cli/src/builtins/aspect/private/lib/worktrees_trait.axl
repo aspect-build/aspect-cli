@@ -28,9 +28,12 @@ onto the private `_WorktreePoolSettings` trait the worktree tasks read through
 to set them. The range checks run in `add`, which refuses with structured
 output; the feature only carries the options to the tasks.
 
-When the workspace's own AXL does not load, `aspect worktree` still runs and
-these may be at their defaults. Its warning names them from `DEGRADED_GROUPS`
-in `crates/aspect-cli/src/cmd.rs`, so a setting added here belongs there too.
+When the workspace's own AXL does not load, most `aspect worktree` tasks still
+run (`DEGRADED_COMMANDS` in `crates/aspect-cli/src/cmd.rs`) and these may be at
+their defaults. Their warning lists `WorktreePool`'s options from the feature
+itself, and the `Worktrees` hooks from that table, so a hook added here belongs
+there too. Such a run takes no stopped session's slot back, whatever
+`abandoned_grace_hours` says.
 """
 
 # The `score_slot` hook's limits: how long its calls for one `add` may take in
