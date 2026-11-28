@@ -13,6 +13,7 @@ load("./failure_records.axl", "failure_records")
 load("./failure_ties.axl", "failure_ties")
 load("./failures.axl", "failures")
 load("./term_text.axl", "term_text")
+load("./test_theme.axl", "test_theme")
 
 def _eq(label, got, want):
     if got != want:
@@ -358,6 +359,10 @@ def _test_interrupted(ctx):
         _eq("%s: a failure" % name, ("── Failures (1) ──" in got, "✗ Bazel exited 8" in got, failures.failure_counts(state)), (True, True, (1, 0)))
 
 def _impl(ctx: TaskContext) -> int:
+    # The glyphs these compare are the default theme's, whatever the caller's.
+    rerun = test_theme.rerun_in_default_theme(ctx, ["dev", "test-failures"])
+    if rerun != None:
+        return rerun
     _test_shard_tie(ctx)
     _test_output_not_created(ctx)
     _test_declared_output(ctx)

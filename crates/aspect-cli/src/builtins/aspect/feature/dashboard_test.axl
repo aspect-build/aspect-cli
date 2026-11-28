@@ -21,6 +21,7 @@ load("../private/lib/failure_records.axl", "failure_records")
 load("../private/lib/failures.axl", "failures")
 load("../private/lib/results_pages.axl", "ASPECT_PAGE", "BES_PAGE")
 load("../private/lib/term_text.axl", "term_text")
+load("../private/lib/test_theme.axl", "test_theme")
 
 _NO_ENV = dashboard_testing.NO_ENV
 _visible = dashboard_testing.visible
@@ -348,6 +349,10 @@ def _goldens(ctx, view_state, act, update):
         fail("%d golden frame(s) differ: %s" % (len(stale), ", ".join([s[0] for s in stale])))
 
 def _impl(ctx: TaskContext) -> int:
+    # The glyphs these compare are the default theme's, whatever the caller's.
+    rerun = test_theme.rerun_in_default_theme(ctx, ["dev", "test-dashboard"] + (["--update"] if ctx.args.update else []))
+    if rerun != None:
+        return rerun
     _eq("rows under the status", running_actions(["[1 / 9] 2 actions running", "    a.cc; 1s", "    b.cc; 2s"]), ["a.cc; 1s", "b.cc; 2s"])
     _eq("one action in the status", running_actions(["[18,401 / 18,434] Compiling Rust rlib axl-proto (2 files); 11s darwin-sandbox"]), ["Compiling Rust rlib axl-proto (2 files); 11s darwin-sandbox"])
     _eq("a count, no rows", running_actions(["[5 / 9] 3 actions, 1 running"]), [])

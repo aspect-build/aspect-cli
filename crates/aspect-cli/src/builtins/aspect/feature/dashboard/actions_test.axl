@@ -13,6 +13,7 @@ load("@aspect//feature/dashboard.axl", "fold_build")
 load("@std//theme.axl", "theme")
 load("../../private/lib/failure_records.axl", "failure_records")
 load("../../private/lib/term_text.axl", "term_text")
+load("../../private/lib/test_theme.axl", "test_theme")
 
 action_bar = dashboard_actions.testonly_action_bar
 action_counts = dashboard_actions.action_counts
@@ -867,6 +868,10 @@ def _actions_tests(ctx):
                 fail("%s at %d columns: rows not as wide as the frame: %r\n%s" % (name, cols, bad, "\n".join(drawn)))
 
 def _impl(ctx: TaskContext) -> int:
+    # The glyphs these compare are the default theme's, whatever the caller's.
+    rerun = test_theme.rerun_in_default_theme(ctx, ["dev", "test-dashboard-actions"])
+    if rerun != None:
+        return rerun
     _actions_tests(ctx)
     print("actions_test.axl: OK")
     return 0
