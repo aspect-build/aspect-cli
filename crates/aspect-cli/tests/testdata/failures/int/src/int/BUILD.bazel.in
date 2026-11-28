@@ -1,0 +1,3 @@
+# Interrupted while it runs: the recorder sends the client SIGINT once `slow` made its marker.
+genrule(name = "ok", outs = ["ok.txt"], cmd = "echo ok > $@")
+genrule(name = "slow", outs = ["slow.txt"], cmd = "touch /tmp/aspect-fx-interrupt.marker; sleep 120; echo slow > $@")

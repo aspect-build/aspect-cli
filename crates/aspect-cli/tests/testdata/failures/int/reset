@@ -1,0 +1,2 @@
+# The marker `slow` makes for the recorder's SIGINT: each recording starts without.
+rm -f /tmp/aspect-fx-interrupt.marker

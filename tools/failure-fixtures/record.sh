@@ -14,7 +14,8 @@
 # timestamps (rerun with --show_timestamps),
 # console_only (no BEP; capped at CONSOLE_ONLY_CAP_S, then the server is killed - for the OOM
 # case). A case's optional `reset` script runs before each recording, to clear what its tests
-# keep between runs.
+# keep between runs. A case's optional `interrupt` file names a marker path: once an action
+# creates it, and a second more has gone by, the Bazel client is sent SIGINT, as a Ctrl+C.
 # The server is left running for the next case; `refresh_all.sh` shuts it down per version.
 set -u
 # The longest a recording's Bazel runs, and a console_only one's, before it is ended.
@@ -67,11 +68,35 @@ one() { # <prefix> <extra flags> <strip publish_all: 0|1> [merged]
         # shellcheck disable=SC2086
         perl -e "alarm $RUN_TIMEOUT_S; exec @ARGV" "${BAZEL_ENV[@]}" "$BAZELISK" $STARTUP $args --disk_cache= --lockfile_mode=off --nobuild >/dev/null 2>&1 </dev/null
     fi
+    # An interrupted case: SIGINT to the Bazel client (the one of this run's
+    # processes Bazelisk started from its cache, not Bazelisk nor the shell)
+    # once the case's action has made its marker.
+    local watcher=
+    if [ -f "$FX/interrupt" ] && [ $console_only = 0 ]; then
+        local marker
+        marker=$(cat "$FX/interrupt")
+        rm -f "$marker"
+        (
+            for _ in $(seq 1 "$((RUN_TIMEOUT_S * 10))"); do
+                [ -e "$marker" ] && break
+                sleep 0.1
+            done
+            sleep 1
+            for pid in $(pgrep -f -- "$RAW/bep.json"); do
+                case "$(ps -o command= -p "$pid")" in "$BAZELISK_HOME"/*) kill -INT "$pid" ;; esac
+            done
+        ) &
+        watcher=$!
+    fi
     # Bazel's stdout and exit code to their own files (merged: its stdout on
     # the pty with its stderr), its stderr on the pty.
     # shellcheck disable=SC2086
     on_pty "$RAW/console" perl -e "alarm $cap; exec @ARGV" "${BAZEL_ENV[@]}" sh -c 'out=$1; shift; "$@" '"$tostdout"'; echo $? >"$out/exit"' \
         sh "$RAW" "$BAZELISK" $STARTUP $args --disk_cache= --lockfile_mode=off $flags $bep </dev/null >/dev/null 2>&1
+    if [ -n "$watcher" ]; then
+        wait "$watcher"
+        rm -f "$(cat "$FX/interrupt")"
+    fi
     if [ $console_only = 1 ]; then
         kill -9 "$(cat "$OB/server/server.pid.txt" 2>/dev/null)" 2>/dev/null
         [ -s "$RAW/exit" ] || echo "timeout" >"$RAW/exit"

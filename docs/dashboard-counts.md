@@ -450,8 +450,8 @@ CI runs every `aspect dev test-*` suite through `tools/run-axl-suites.sh`, and
 
 ### The failure fixtures
 
-`crates/aspect-cli/tests/testdata/failures` holds 47 failure shapes recorded on
-Bazel 7.7.3, 8.9.0 and 9.3.3, 192 recordings with their variants (`noall`
+`crates/aspect-cli/tests/testdata/failures` holds 48 failure shapes recorded on
+Bazel 7.7.3, 8.9.0 and 9.3.3, 198 recordings with their variants (`noall`
 without `--build_event_publish_all_actions`, `nocolor`, `merged`, `timestamps`,
 `console_only`); its README gives the layout. For each recording the replay
 reads the events as the runtime reads a `--build_event_json_file`, runs each
@@ -481,7 +481,10 @@ aspect dev test-failure-replay --update
 ```
 
 `record.sh` runs Bazelisk under `env -i` with a throwaway HOME and
-`--nosystem_rc` (`env.sh`), its stderr on a 120-column pty. `fxpost.py` replaces
+`--nosystem_rc` (`env.sh`), its stderr on a 120-column pty. A case with an
+`interrupt` file (`int`) is a Ctrl+C: once its action has made the marker that
+file names, and a second more has gone by, the Bazel client is sent SIGINT,
+which makes the recording deterministic. `fxpost.py` replaces
 machine paths with placeholders (`${OUTPUT_BASE}`, `${WORKSPACE}`, `${HOME}`, …)
 and drops the events the summary never reads. Its leak guard (`guard`) refuses a
 recording that still names this machine's host (short or full), user or home as

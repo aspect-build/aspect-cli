@@ -40,6 +40,9 @@ folder with `src/` (Bazel files suffixed `.in`), `cmd` and `variants`; record it
   variants                  extra recordings: noall, nocolor, merged, timestamps, console_only
   reset                     optional: a shell script record.sh runs before each recording, to
                             clear what the case's tests keep between runs
+  interrupt                 optional: a marker path; once one of the case's actions creates it
+                            and a second more has gone by, record.sh sends the Bazel client
+                            SIGINT, as a Ctrl+C (`int`)
   <ver>.bep.json            --build_event_json_file output (cmd includes --build_event_publish_all_actions)
   <ver>.console             Bazel's stderr, written to a pty, --color=yes --curses=yes
   <ver>.stdout              Bazel's stdout, a file of its own, only when non-empty: Bazel relays an
