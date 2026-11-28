@@ -545,6 +545,16 @@ def _tie_targets(state: dict, headers: list, by: dict, claimed: dict) -> dict:
         targets[label] = out
     return targets
 
+def _package_of(label: str) -> str:
+    """The package of `label` as Bazel's `package contains errors: <pkg>: `
+    names it: `p` for `//p:x` (or `@@//p:x`), `@@ext+//p` for one in
+    another repository."""
+    pkg = label.rpartition(":")[0]
+    for main in ("@@//", "//"):
+        if pkg.startswith(main):
+            return pkg[len(main):]
+    return pkg
+
 def _claim_restated(state: dict, targets: dict, headers: list, claimed: dict) -> None:
     """Claim Bazel's `package contains errors: <pkg>: <text>` where an entry
     of that package quotes `<text>` (`targets`, the targets' ties), or, with
@@ -555,7 +565,7 @@ def _claim_restated(state: dict, targets: dict, headers: list, claimed: dict) ->
     for rec in fails:
         if rec["kind"] != "target":
             continue
-        pkg = rec["label"].partition("//")[2].partition(":")[0]
+        pkg = _package_of(rec["label"])
         lines = quoted.setdefault(pkg, {})
         for line in (targets.get(rec["label"]) or {}).get("lines", []):
             lines[line] = True
@@ -605,7 +615,7 @@ def _claim_restated_tracebacks(state: dict, headers: list, claimed: dict, spans:
     quoted = {}
     for rec in state["fails"]:
         if rec["kind"] == "target" and rec.get("description"):
-            pkg = rec["label"].partition("//")[2].partition(":")[0]
+            pkg = _package_of(rec["label"])
             quoted.setdefault(pkg, []).append(rec["description"].split("\n"))
     for k, h in enumerate(headers):
         if k in claimed or not h["message"].startswith(_BAZEL.package_errors):
