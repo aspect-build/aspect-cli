@@ -287,9 +287,9 @@ The session can then run `aspect worktree release` itself. Without the `SessionS
 
 ## history
 
-[`history.axl`](history.axl) · `aspect history list` and `aspect history show <id>`: the tasks run on this machine, from the record each run keeps in the task history (`task.json`), read through `ctx.std.history`. Every task gets a record when it starts: its command line, where it ran (directory, git branch and commit), how it ended, and each Bazel invocation with the counts and failures from its build event stream, each failure pointing at the logs `History` kept for it. Command lines are shown redacted: the header and env-passthrough rules of the build event stream, and any flag declared `args.string(secret = True)`. Every run also keeps its whole output, its secret flag values redacted: `output.log` as plain text and `output.ansi` with its colour. A build without a console processor (a task's `ctx.bazel.build` without `output =`) writes to the terminal directly and is not kept, nor is what `bazel run`'s program writes. A run's output and its builds' files are its files, under the history's size budget. When the budget removes a run's files, its record stays, its command line redacted on disk; records alone are kept for 90 days, 5,000 at most. A run that kept no files keeps its command line as typed (readable by its user alone) until its record goes.
+[`history.axl`](history.axl) · `aspect history list`, `aspect history show <id>` and `aspect history browse`: the tasks run on this machine, from the record each run keeps in the task history (`task.json`), read through `ctx.std.history`. Every task gets a record when it starts: its command line, where it ran (directory, git branch and commit), how it ended, and each Bazel invocation with the counts and failures from its build event stream, each failure pointing at the logs `History` kept for it. Command lines are shown redacted: the header and env-passthrough rules of the build event stream, and any flag declared `args.string(secret = True)`. Every run also keeps its whole output, its secret flag values redacted: `output.log` as plain text and `output.ansi` with its colour. A build without a console processor (a task's `ctx.bazel.build` without `output =`) writes to the terminal directly and is not kept, nor is what `bazel run`'s program writes. A run's output and its builds' files are its files, under the history's size budget. When the budget removes a run's files, its record stays, its command line redacted on disk; records alone are kept for 90 days, 5,000 at most. A run that kept no files keeps its command line as typed (readable by its user alone) until its record goes.
 
-`list` filters by task kind, outcome (`ok`, `failed`, `error`, `cancelled`, `running`, `abandoned`) and git branch. Each record from `ctx.std.history` names its builds' kept event streams (`build_events`), which `bazel.build_events.read(path)` replays as the same `BuildEvent` values a live build yields, so code written for a build's events reads an earlier build's.
+`list` filters by task kind, outcome (`ok`, `failed`, `error`, `cancelled`, `running`, `abandoned`) and git branch. Each record from `ctx.std.history` names its builds' kept event streams (`build_events`), which `bazel.build_events.read(path)` replays as the same `BuildEvent` values a live build yields, so code written for a build's events reads an earlier build's. `ctx.std.history.read_output(record)` reads a run's output back as it was shown (its `output.ansi`), each line as a live build's `output_feed()` gives it, and `census()` counts the runs kept. `browse` is the `Dashboard`'s History screen on its own (`h` on the dashboard opens it too): the runs that started Bazel, in the current workspace, `f` and `w` widening it; Enter opens a run as the dashboard showed it, read back from those files. `aspect history`'s own runs are not kept: a task declared with `keep_history = False` writes nothing to the history.
 
 ---
 
@@ -359,6 +359,16 @@ path peeks at the file, `o` opens it in your editor (`editor` in
 `~/.aspect/config.json`, or `--console:file-hyperlink-format`) and `O` picks
 another; a drag selects and copies; `m` gives the mouse back to the terminal
 (`--dashboard:mouse=false`). `q` or Ctrl+C cancels the build.
+
+`h` opens the History screen: the live build first, then the runs the task
+history keeps that started Bazel in this workspace, newest first (`f` cycles
+builds, failed builds and all runs; `w` this workspace or every one). Enter
+opens a run as the dashboard showed it, read back from the build events and
+output the history kept, its failures' logs the history's own copies; `q`
+goes back to the list, and the list's Esc back to the live build, which goes
+on meanwhile. While browsing, a second Ctrl+C cancels the live build, and a
+task that ends keeps the screen up until you are back on it, whatever
+`stay` says. `aspect history browse` is the same screen on its own.
 
 When the task ends the screen stays up until `q`, Enter or Esc
 (`--dashboard:stay=always`, the default); `failure` counts down ten seconds

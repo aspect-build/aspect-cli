@@ -212,8 +212,15 @@ def log_paths(state: dict, record: dict, uri) -> list:
     `file://` one's path (`bazel.build_events.local_path`: decoded, in the
     spelling on disk); a remote cache's (`bytestream://`) a test's own in
     the output tree, then under the runner's bb_clientd mount
-    (`state["bb_root"]`) where there is one."""
+    (`state["bb_root"]`) where there is one. A copy the task history kept
+    (`kept:<path>`) is read where it was kept; for a past run's record
+    (`past`), only such a copy, as the output tree may hold a later
+    build's."""
     if type(uri) != "string" or not uri:
+        return []
+    if uri.startswith("kept:"):
+        return [uri[len("kept:"):]]
+    if record.get("past"):
         return []
     if uri.startswith("file://"):
         local = bazel.build_events.local_path(uri)

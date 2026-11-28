@@ -39,7 +39,10 @@ def log_view(state: dict, record: dict) -> dict:
     (`fit_logs`). An action's log is read from the history's copy
     (`kept_action_log()`, kept as it failed) before Bazel's own file, which
     Bazel replaces as the build goes on: a log gone from both says so, and
-    how to keep one when the history keeps no action logs."""
+    how to keep one when the history keeps no action logs. A past run's
+    record (`past`, dashboard/history.axl) reads only the history's copies,
+    and one it did not keep says so, naming the flag that keeps a failure's
+    when the history kept no index of its kind (`indexed`)."""
     blocks = []
     cut = False
     build = state.get("build")
@@ -63,7 +66,12 @@ def log_view(state: dict, record: dict) -> dict:
         if text == None:
             pending = record["kind"] == "test" and (record["label"], record["config"]) not in state["test_counts"]
             remote = type(value) == "string" and value.startswith("bytestream://")
-            if pending and remote:
+            if record.get("past") and not record.get("success") and not record.get("indexed"):
+                flag = "--history:test-logs=failed" if record["kind"] == "test" else "--history:action-logs=failed"
+                blocks.append((name, ["(%s was not kept in the history; %s keeps a failure's)" % (name, flag)]))
+            elif record.get("past"):
+                blocks.append((name, ["(%s was not kept in the history)" % name]))
+            elif pending and remote:
                 blocks.append((name, ["(%s is found once the test has finished: a remote cache names it)" % name]))
             elif remote:
                 blocks.append((name, ["(%s is not on this machine: only in the remote cache)" % name]))

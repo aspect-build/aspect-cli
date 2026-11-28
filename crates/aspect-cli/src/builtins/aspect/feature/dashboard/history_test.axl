@@ -1,0 +1,464 @@
+"""Tests for the Dashboard's History screen (`dashboard/history.axl`): the
+runs it lists and their keys, a past run read back from the history and
+shown in the live one's place (`past_run`), its logs the history's copies
+alone, and a build Bazel restarted in place (`take_event`).
+
+Run with:
+  aspect dev test-dashboard-history
+"""
+
+load("@aspect//feature/dashboard/history.axl", "dashboard_history")
+load("@aspect//feature/dashboard/keys.axl", "dashboard_keys")
+load("@aspect//feature/dashboard/log.axl", "dashboard_log")
+load("@aspect//feature/dashboard/pointer.axl", "dashboard_pointer")
+load("@aspect//feature/dashboard/render.axl", "dashboard_render")
+load("@aspect//feature/dashboard/state.axl", "dashboard_state")
+load("@aspect//feature/dashboard/testing.axl", "dashboard_testing")
+load("@aspect//feature/dashboard/view.axl", "dashboard_view")
+load("../../private/lib/failure_records.axl", "failure_records")
+load("../../private/lib/history_records.axl", "show_lines")
+load("../../private/lib/term_text.axl", "term_text")
+
+_eq = dashboard_testing.eq
+_role = dashboard_testing.role
+_visible = dashboard_testing.visible
+ANSI = term_text.ANSI
+CONTROLS = term_text.CONTROLS
+text_width = term_text.text_width
+log_paths = failure_records.log_paths
+ago = dashboard_history.ago
+history_records = dashboard_history.history_records
+history_rows = dashboard_history.history_rows
+new_browser = dashboard_history.new_browser
+open_history = dashboard_history.open_history
+past_header = dashboard_history.past_header
+past_run = dashboard_history.past_run
+row_id = dashboard_history.row_id
+stamp_ms = dashboard_history.stamp_ms
+use_kept_logs = dashboard_history.testonly_use_kept_logs
+help_rows = dashboard_keys.help_rows
+on_key = dashboard_keys.on_key
+add_lines = dashboard_log.add_lines
+new_search = dashboard_log.new_search
+say_note = dashboard_log.say_note
+view_file = dashboard_pointer.view_file
+build_row = dashboard_render.testonly_build_row
+page_of = dashboard_render.page_of
+render = dashboard_render.render
+end_build = dashboard_state.end_build
+new_build = dashboard_state.new_build
+new_run = dashboard_state.new_run
+new_state = dashboard_state.new_state
+new_ui = dashboard_state.new_ui
+on_live = dashboard_state.on_live
+on_run = dashboard_state.on_run
+show_run = dashboard_state.show_run
+take_event = dashboard_state.take_event
+log_view = dashboard_view.testonly_log_view
+
+def _history(records, runs = None, unreadable = 0, without_record = 0, newer = 0):
+    """A `ctx.std.history` over `records`, noting each listing's filters and
+    each census; its census `runs` (all of `records` by default),
+    `without_record`, `unreadable` and `newer`."""
+    asked = []
+    censuses = []
+
+    def list(limit = 50, outcome = None, builds = False, workspace = None):
+        asked.append((outcome, builds, workspace))
+        return [
+            r
+            for r in records
+            if (outcome == None or r["outcome"] == outcome) and (not builds or r["bazel"]) and (workspace == None or r.get("workspace") == workspace)
+        ][:limit]
+
+    def census():
+        censuses.append(True)
+        return {"runs": len(records) if runs == None else runs, "unreadable": unreadable, "without_record": without_record, "newer": newer}
+
+    def get(id):
+        found = [r for r in records if r["task"]["id"] == id]
+        return found[0] if found else None
+
+    return struct(
+        list = list,
+        get = get,
+        root = lambda: "/h",
+        census = census,
+        asked = asked,
+        censuses = censuses,
+        read_output = lambda record, limit = 5000: None,
+    )
+
+def _record(id, ended = "ok", **kw):
+    record = {
+        "status": "running" if ended == "running" else "ended",
+        "outcome": ended,
+        "task": {"id": id, "name": "build-x", "kind": "build", "group": []},
+        "argv": ["/bin/aspect", "build", "//..."],
+        "started": "2026-11-21T15:39:39.143Z",
+        "duration_ms": 6300,
+        "exit_code": 0 if ended == "ok" else 1,
+        "dir": "/h/" + id,
+        "workspace": "/ws",
+        "bazel": [{"command": "build"}],
+    }
+    record.update(kw)
+    return record
+
+def _history_state(ctx, records, standalone = False, **kw):
+    """A dashboard's state as the feature starts it, with a History screen
+    over `records` in workspace `/ws`, reading no file but each run's
+    record."""
+    state = new_state(task = "build", re = ctx.std.re, ansi = ctx.std.re.compile(ANSI), controls = ctx.std.re.compile(CONTROLS), env = ctx.std.env, read = lambda p, c: ("{}", 0) if p.endswith("/task.json") else None)
+    state["browser"] = new_browser(_history(records, **kw), exclude = "live", standalone = standalone, workspace = "/ws")
+    return state
+
+def _fake_screen():
+    """A screen that notes whether Ctrl+C is a signal, and each
+    `interrupt()`."""
+    seen = {"interrupts": True, "interrupted": 0}
+    return struct(
+        interrupts = lambda on: seen.update(interrupts = on),
+        interrupt = lambda: seen.update(interrupted = seen["interrupted"] + 1),
+        size = lambda: (120, 30),
+        write = lambda text: None,
+        mouse = lambda on: None,
+        seen = seen,
+    )
+
+def _test_screen(ctx):
+    """The History screen (`h`): the live build pinned first, then this
+    workspace's builds; its filters, its count, its keys and a past run
+    shown in the live one's place."""
+    _eq("the UI's keys and the run's apart", [k for k in new_run().keys() if k in new_ui()], [])
+    live_record = _record("live", "running", argv = ["/bin/aspect", "build", "//examples:demo"])
+    records = [
+        live_record,
+        _record("aaaa1111", "failed"),
+        _record("bbbb2222"),
+        _record("hhhh0000", task = {"id": "hhhh0000", "name": "h", "kind": "list", "group": ["worktree"]}, bazel = []),
+        _record("oooo0000", workspace = "/other"),
+    ]
+    state = _history_state(ctx, records, runs = 7702)
+    add_lines(state, ["INFO: live line"])
+    state["start_ms"] = 5
+    state["building"] = True
+    state["progress"] = ["[21 / 35] 3 actions running"]
+
+    # From the live run, `h` opens the list: the live build pinned first,
+    # then this workspace's builds; the count against the whole history.
+    _eq("h opens the list", (on_key(state, "h", 10), state["mode"]), (False, "history"))
+    screen = _visible(render(state, 120, 20))
+    _eq("the live build pinned first, its progress in the header", ("● now running build //examples:demo (live)" in screen, "live build running 21/35" in screen), (True, True))
+    _eq("builds in this workspace, by default", ("aaaa1111" in screen, "bbbb2222" in screen, "hhhh0000" in screen, "oooo0000" in screen), (True, True, False, False))
+    _eq("the count, of the whole history", "aspect history · 2 builds of 7,701 runs in all workspaces" in screen, True)
+    _eq("the filter and workspace keys say what is shown", ("f filter: builds" in screen, "w: this workspace" in screen, "Esc live build" in screen, "? keys" in screen), (True, True, True, True))
+    _eq("asked for builds here", state["browser"]["history"].asked[-1], (None, True, "/ws"))
+    _eq("a row: status, when, time, command, id last", [l for l in screen.split("\n") if "aaaa1111" in l][0].strip("│ ").startswith("✗ exit 1"), True)
+    _eq("no aspect before the command", " aspect build" in [l for l in screen.split("\n") if "bbbb2222" in l][0], False)
+    _eq("the list pages by its height", page_of(state, 120, 20), 16)
+    _eq("e is not the hidden run's", (on_key(state, "e", 10), state["filter"]), (False, "all"))
+    on_key(state, "?", 10)
+    helped = _visible(render(state, 120, 20))
+    _eq("? shows the History keys alone", ("History" in helped, "filter: builds, failed builds, all runs" in helped, "Scroll" in helped, "Actions" in help_rows(state)), (True, True, False, False))
+    on_key(state, "x", 10)
+    on_key(state, "esc", 10)
+    _eq("Esc goes back to the live run", (state["mode"], state["log"], state["start_ms"]), ("run", ["INFO: live line"], 5))
+    _eq("the keys row offers h", "h history" in _visible(render(state, 160, 30)), True)
+    _eq("and the ? overlay", "the History list of earlier runs" in "\n".join(help_rows(state)), True)
+
+    # Enter on the live row goes back to it.
+    on_key(state, "h", 10)
+    on_key(state, "enter", 10)
+    _eq("Enter on the live row is the live build", (state["mode"], state.get("past")), ("run", None))
+
+    # `f` cycles builds, failed builds and all runs; `w` all workspaces.
+    # Each says what it did, as the dashboard's toggles do.
+    on_key(state, "h", 10)
+    on_key(state, "f", 10)
+    _eq("f says what it now lists, and what it lists next", "listing failed builds · f lists all runs" in _visible(render(state, 120, 20)), True)
+    say_note(state, "")
+    failed = _visible(render(state, 120, 20))
+    _eq("f: failed builds", ("f filter: failed builds" in failed, "aaaa1111" in failed, "bbbb2222" in failed, state["browser"]["history"].asked[-1]), (True, True, False, ("failed", True, "/ws")))
+    _eq("its count", "1 failed build of 7,701 runs in all workspaces" in failed, True)
+    on_key(state, "f", 10)
+    on_key(state, "w", 10)
+    _eq("w says whose runs, and how to go back", "every workspace's runs · w lists this one's" in _visible(render(state, 120, 20)), True)
+    say_note(state, "")
+    every = _visible(render(state, 120, 20))
+    _eq("f: all runs, w: every workspace", ("hhhh0000" in every, "oooo0000" in every, "w: all workspaces" in every, state["browser"]["history"].asked[-1]), (True, True, True, (None, False, None)))
+    on_key(state, "f", 10)
+    on_key(state, "w", 10)
+
+    # Enter shows the chosen run in the live one's place, which goes on
+    # aside, out of sight; the header says it is the past's.
+    on_key(state, "j", 10)
+    on_key(state, "j", 10)
+    _eq("↓ chooses the next", state["browser"]["selected"], 2)
+    on_key(state, "enter", 10)
+    _eq("Enter shows it", (state["mode"], state["past"]["task"]["id"]), ("run", "bbbb2222"))
+    shown = _visible(render(state, 120, 20))
+    head = shown.split("\n")[0]
+    _eq("the header leads with History, the live build on the right", (head.strip().startswith("✔ History · build //... ·"), "live: " in head and "21/35" in head), (True, True))
+    _eq("its status bar in the accent's colour too", (_role("status_bar") + _role("accent")) in render(state, 120, 20).split("\n")[0], True)
+    _eq("the console a replay", ("replay" in shown, "following" in shown), (True, False))
+    _eq("its keys: back to the list", ("q history · ? keys" in shown, "Done" in shown, "open in" in shown), (True, False, False))
+    on_key(state, "?", 10)
+    _eq("? on a past run: q goes back to the list", ("on a past run: back to the History list" in "\n".join(help_rows(state)), "cancel the build" in "\n".join(help_rows(state))), (True, False))
+    on_key(state, "x", 10)
+    folded = dict(state, search = new_search())
+    new_build(folded, 0)
+    folded["building"] = True
+    end_build(folded, 1000)
+    folded["panes"] = True
+    panes = _visible(render(folded, 160, 40))
+    _eq("no action timings for a past run", ("Action timings aren't kept for past runs" in panes, "Running (0)" in panes), (True, False))
+    _eq("no console kept says so", state["log"][-1], "console not kept for this run · aspect history show bbbb2222")
+    stopped = past_run(state, _record("ssss0000", "cancelled", cancelled = True))
+    _eq("a cancelled run, ■", past_header(dict(state, past = stopped["past"])).startswith(" ■ History"), True)
+    long = past_header(dict(state, past = _record("llll0000", "failed", argv = ["/bin/aspect", "build"] + ["//very/long:target%d" % i for i in range(20)])), 80)
+    _eq("a long command is cut, the outcome and time kept", (long.rstrip().endswith("exit 1 · 6.3s"), text_width(long) <= 80, "//very/long:target0" in long), (True, True, True))
+    elsewhere = past_run(state, _record("rrrr0000", "running"))
+    _eq("one still running elsewhere, as of when", "running, as of" in past_header(dict(state, past = elsewhere["past"])), True)
+    nobuild = past_run(state, _record("nnnn0000", bazel = []))
+    _eq("a run with no build shows its record", (nobuild["log"][0], nobuild["log"][2:] == show_lines(nobuild["past"])), ("This run started no Bazel build · aspect history show nnnn0000", True))
+    timed = past_run(state, _record("tttt0000", started = "2026-12-31T23:59:58.500Z", bazel = [{"ended": "2027-01-01T00:00:04.000Z"}], duration_ms = 99000))
+    _eq("a past run's time, from its start to its last build's end", timed["now_ms"], 5500)
+    _eq("the live run waits aside", state["live"]["log"], ["INFO: live line"])
+    state["scroll"] = 3
+    on_live(state, lambda s: add_lines(s, ["INFO: more"]))
+    _eq("the live run goes on unseen", (state["live"]["log"], state["scroll"]), (["INFO: live line", "INFO: more"], 3))
+    state["live"]["cancelling"] = True
+    _eq("a live build being cancelled says so over a past run", "live: cancelling…" in _visible(render(state, 140, 30)), True)
+    state["live"]["cancelling"] = False
+
+    # What would leave a finished screen goes back to the list, `q` never
+    # cancelling the live build.
+    _eq("q goes back to the list", (on_key(state, "q", 10), state["mode"], state["cancelling"], state["live"]["cancelling"]), (False, "history", False, False))
+    history_records(state)
+    _eq("the run it showed still chosen", row_id(history_rows(state)[state["browser"]["selected"]]), "bbbb2222")
+    on_key(state, "esc", 10)
+    _eq("and the list's Esc to the live run", (state["mode"], state.get("past"), state["live"]), ("run", None, None))
+
+    # Ctrl+C while browsing: a key, the first saying what a second does,
+    # which interrupts the live build as its own Ctrl+C would and shows it;
+    # while it is cancelling, a second pair forces it.
+    state["screen"] = _fake_screen()
+    seen = state["screen"].seen
+    on_key(state, "h", 10)
+    _eq("browsing, Ctrl+C is a key", seen["interrupts"], False)
+    on_key(state, "ctrl-c", 10)
+    _eq("a first Ctrl+C only warns", (seen["interrupted"], state["mode"], "Ctrl+C again cancels the live build · Esc back to it" in _visible(render(state, 120, 20))), (0, "history", True))
+    on_key(state, "ctrl-c", 10)
+    _eq("a second interrupts the live build, shown", (seen["interrupted"], state["mode"], state["cancelling"], seen["interrupts"]), (1, "run", True, True))
+    on_key(state, "h", 10)
+    on_key(state, "ctrl-c", 10)
+    _eq("while it cancels, Ctrl+C says a second forces it", "cancelling the live build · Ctrl+C again forces it" in _visible(render(state, 120, 20)), True)
+    on_key(state, "ctrl-c", 10)
+    _eq("and the second reaches the runtime's force stop", seen["interrupted"], 2)
+    state["cancelling"] = False
+    on_key(state, "h", 10)
+    on_key(state, "j", 10)
+    on_key(state, "enter", 10)
+    state["holding"] = True
+    state["live"]["ended"] = True
+    on_key(state, "ctrl-c", 10)
+    _eq("once the live task ended, Ctrl+C on a past run goes back to it", (state["mode"], state.get("past"), seen["interrupted"]), ("run", None, 2))
+    on_key(state, "h", 10)
+    on_key(state, "m", 10)
+    _eq("m says where the mouse is", "mouse on: the wheel scrolls, a click picks · m gives it to the terminal" in _visible(render(state, 120, 20)), True)
+    state["screen"] = None
+    state["holding"] = False
+
+    # "all runs" lists as many as it can, though the live run, which has a
+    # row of its own, is among the newest.
+    many = [_record("live", "running")] + [_record("run" + str(10000 + i)) for i in range(600)]
+    full = _history_state(ctx, many)
+    open_history(full)
+    full["browser"]["filter"] = "all runs"
+    full["browser"]["records"] = None
+    _eq("500 listed, not the live one", (len(history_records(full)), [r for r in full["browser"]["records"] if r["task"]["id"] == "live"]), (500, []))
+    _eq("and says they are the newest, of the runs it could list", "500 newest runs of 600 runs in all workspaces" in _visible(render(full, 120, 20)), True)
+    one = _history_state(ctx, [_record("live", "running"), _record("only0000")])
+    open_history(one)
+    _eq("one build of one run", "1 build of 1 run in all workspaces" in _visible(render(one, 120, 20)), True)
+
+    # The chosen run stays chosen as newer runs come above it.
+    runs = [_record("aaaa1111"), _record("bbbb2222"), _record("cccc3333")]
+    moved = _history_state(ctx, runs, standalone = True)
+    open_history(moved)
+    history_records(moved)
+    on_key(moved, "down", 10)
+    history_records(moved)
+    runs.insert(0, _record("dddd4444"))
+    moved["browser"]["records"] = None
+    picked = history_records(moved)[moved["browser"]["selected"]]["task"]["id"]
+    _eq("a run recorded meanwhile leaves the selection on the run chosen", picked, "bbbb2222")
+
+    # Standalone (`aspect history browse`): q or Esc quits; Ctrl+C too.
+    alone = _history_state(ctx, records, standalone = True, unreadable = 3, without_record = 749, newer = 2)
+    open_history(alone)
+    listed = _visible(render(alone, 120, 20))
+    _eq("q/Esc quit, standalone, no live row", ("q/Esc quit" in listed, "(live)" in listed), (True, False))
+    _eq("damaged entries counted under the list, for what they are", "749 folders without a record · 2 records from a newer CLI · 3 records unreadable" in listed, True)
+    on_key(alone, "enter", 10)
+    _eq("a past run's Esc goes back to the list", (on_key(alone, "esc", 10), alone["mode"]), (False, "history"))
+    _eq("whose q leaves", on_key(alone, "q", 10), True)
+    _eq("Ctrl+C leaves too", on_key(alone, "ctrl-c", 10), True)
+    empty = _history_state(ctx, [], standalone = True)
+    open_history(empty)
+    nothing = _visible(render(empty, 120, 20))
+    _eq("an empty history says so, the path apart, only q", ("No runs yet. Builds and tests you run appear here." in nothing, "/h" in nothing, nothing.strip().endswith("q quit")), (True, True, True))
+    _eq("Enter on nothing does nothing", (on_key(empty, "enter", 10), empty["mode"]), (False, "history"))
+
+    # When a run started, as the local clock tells it.
+    now = stamp_ms("2026-11-21T15:47:39.000Z")
+    _eq("minutes ago", ago("2026-11-21T15:39:39.143Z", now), "7m ago")
+    _eq("just now", ago("2026-11-21T15:47:00.000Z", now), "just now")
+    _eq("long ago, a date", ago("2024-03-02T10:00:00.000Z", now).startswith("2024-03-0"), True)
+
+def _test_kept_logs(ctx):
+    """A past run's failures read only the logs the history kept, each its
+    own in order, a test attempt's by run, shard and attempt; an action that
+    wrote output its last attempt's."""
+    state = _history_state(ctx, [])
+    kept = {"fails": [
+        {"kind": "test", "label": "//t:t", "detail": "attempt 2", "run": 1, "shard": 1, "attempt": 2, "config": "c", "files": [("test.log", "bytestream://x")]},
+        {"kind": "test", "label": "//u:u", "detail": "attempt 1", "run": 1, "shard": 1, "attempt": 1, "config": "c", "files": [("test.log", "bytestream://y")]},
+        {"kind": "action", "label": "//a:a", "detail": "Genrule", "success": False, "files": [("stderr", "file:///out/a")]},
+        {"kind": "action", "label": "//a:a", "detail": "Genrule", "success": False, "files": [("stderr", "file:///out/b")]},
+    ], "outputs": [
+        {"kind": "action", "label": "//o:o", "detail": "Genrule", "success": True, "files": [("stderr", "file:///out/o")]},
+        {"kind": "action", "label": "//p:p", "detail": "Genrule", "success": True, "files": [("stderr", "file:///out/p")]},
+    ]}
+    use_kept_logs(kept, "/h/e", {"summary": {"failures": [
+        {"kind": "test", "label": "//t:t", "detail": "attempt 2", "attempt": [1, 1, 2], "logs": ["bazel/1/testlogs/t/t/test.log", "bazel/1/testlogs/t/t/test.xml"]},
+        {"kind": "test", "label": "//u:u", "detail": "attempt 1", "attempt": [1, 1, 1], "logs": ["bazel/1/testlogs/t/t/test.2.log", "bazel/1/testlogs/t/t/test.2.xml"]},
+        {"kind": "action", "label": "//a:a", "detail": "Genrule", "logs": []},
+        {"kind": "action", "label": "//a:a", "detail": "Genrule", "logs": ["bazel/1/actions/2/stderr"]},
+    ]}}, actions = [{"label": "//o:o", "mnemonic": "Genrule", "success": True, "stderr": "actions/7/stderr", "build_attempt": 1}, {"label": "//o:o", "mnemonic": "Genrule", "success": False, "stderr": "actions/8/stderr", "build_attempt": 2}, {"label": "//o:o", "mnemonic": "Genrule", "success": True, "stderr": "actions/9/stderr", "build_attempt": 2}], folder = "/h/e/bazel/1", attempts = 2)
+    _eq("a test attempt's test.log, by run, shard and attempt", kept["fails"][0]["files"], [("test.log", "kept:/h/e/bazel/1/testlogs/t/t/test.log")])
+    _eq("a numbered test.log too", kept["fails"][1]["files"], [("test.2.log", "kept:/h/e/bazel/1/testlogs/t/t/test.2.log")])
+    kept["fails"] = kept["fails"][:1] + kept["fails"][2:]
+    _eq("an action's, in order, one that kept none holding its place", (kept["fails"][1]["files"], kept["fails"][2]["files"]), ([("stderr", "file:///out/a")], [("stderr", "kept:/h/e/bazel/1/actions/2/stderr")]))
+    _eq("a kept log is read where it was kept", log_paths(state, kept["fails"][2], "kept:/h/e/x"), ["/h/e/x"])
+    _eq("another, not looked for", log_paths(state, kept["fails"][1], "file:///out/a"), [])
+    _eq("a live record's file URI is still its path", log_paths(state, {"kind": "action"}, "file:///out/a"), ["/out/a"])
+    _eq("and says so", log_view(state, kept["fails"][1])["lines"], ["(stderr was not kept in the history; --history:action-logs=failed keeps a failure's)"])
+    kept["fails"][1]["indexed"] = True
+    _eq("not naming the flag when it was on", log_view(state, kept["fails"][1])["lines"], ["(stderr was not kept in the history)"])
+    kept["fails"][1]["indexed"] = False
+    _eq("an action that wrote output, its log as actions.json lists it, the last attempt's", kept["outputs"][0]["files"], [("stderr", "kept:/h/e/bazel/1/actions/9/stderr")])
+    old = {"fails": [], "outputs": [{"kind": "action", "label": "//o:o", "detail": "Genrule", "success": True, "files": []}]}
+    use_kept_logs(old, "/h/e", {"summary": {"failures": []}}, actions = [{"label": "//o:o", "mnemonic": "Genrule", "success": True, "stderr": "actions/7/stderr"}, {"label": "//o:o", "mnemonic": "Genrule", "success": True, "stderr": "actions/9/stderr"}], folder = "/h/e/bazel/1")
+    _eq("an index without attempts matches in order", old["outputs"][0]["files"], [("stderr", "kept:/h/e/bazel/1/actions/7/stderr")])
+    _eq("one it does not list names no flag", log_view(state, kept["outputs"][1])["lines"], ["(stderr was not kept in the history)"])
+
+def _test_files(ctx):
+    """A past run read back from a history entry's files: its Console the
+    output as it was shown, `o` its output; a cut event stream, a run still
+    going, a pruned one."""
+    tmp = ctx.std.fs.mkdtemp(prefix = "aspect-dashboard-history")
+    ctx.std.fs.write(tmp + "/task.json", "{}")
+    ctx.std.fs.write(tmp + "/output.ansi", "▸ Build\n\x1b[31m\x1b[1mERROR: \x1b[0mtwo\n")
+    ctx.std.fs.write(tmp + "/output.log", "▸ Build\nERROR: two\n")
+    files = _history_state(ctx, [])
+    files["read"] = ctx.std.fs.try_read_tail
+    files["browser"]["history"] = struct(read_output = ctx.std.history.read_output)
+    built_run = past_run(files, _record("ffff0000", "failed", dir = tmp))
+    _eq("its output as shown", built_run["log"], ["▸ Build", "ERROR: two"])
+    _eq("in its colours", "\x1b[" in built_run.get("colour_of", {}).get("ERROR: two", ""), True)
+    shown = dict(files, search = new_search())
+    show_run(shown, built_run)
+    _eq("ended, its output the file o opens", (built_run["ended"], view_file(shown)), (True, (tmp + "/output.log", 1)))
+    ctx.std.fs.write(tmp + "/output.ansi", "".join(["line %d\n" % i for i in range(20000 + 5)]))
+    long_run = past_run(files, _record("ffff0000", "failed", dir = tmp))
+    _eq("older lines left out, said first", long_run["log"][0], "2,006 older lines: aspect history show ffff0000")
+
+    # An event stream cut short says so, its failures the record's summary
+    # of them; a mistyped actions.json is passed over, not fatal.
+    ctx.std.fs.create_dir_all(tmp + "/bazel/1")
+    ctx.std.fs.write(tmp + "/bazel/1/build_events.binpb", "\x05ab")
+    ctx.std.fs.write(tmp + "/bazel/1/actions.json", json.encode({"actions": [{"label": 3, "build_attempt": "2", "stderr": 7}, "x", {"build_attempt": [1]}], "build_attempts": "2"}))
+    ctx.std.fs.write(tmp + "/bazel/1/console.log", "ERROR: no such package 'x'\n")
+    cut = past_run(files, _record("cccc0001", "failed", dir = tmp, bazel = [{
+        "command": "build",
+        "exit_code": 1,
+        "build_events": tmp + "/bazel/1/build_events.binpb",
+        "summary": {"failures": [{"kind": "action", "label": "//a:b", "detail": "Genrule", "logs": ["bazel/1/actions/a/Genrule-1.stderr"]}, "junk"]},
+    }]))
+    _eq("its failures from the record's summary", [(r["label"], r["files"]) for r in cut["fails"]], [("//a:b", [("Genrule-1.stderr", "kept:" + tmp + "/bazel/1/actions/a/Genrule-1.stderr")])])
+    _eq("Bazel's raw log the history's copy, its exit Bazel's", (cut["log_path"], cut["bazel_exit"]), (tmp + "/bazel/1/console.log", 1))
+    cut_state = dict(files, search = new_search())
+    show_run(cut_state, cut)
+    cut_state["panes"] = True
+    cut_screen = _visible(render(cut_state, 160, 40))
+    _eq("said in the header and the Results pane", (cut_screen.split("\n")[0].count("event stream ended early"), cut_screen.count("event stream ended early") >= 2), (1, True))
+    on_key(cut_state, "2", 10)
+    _eq("a summary's failure is the Failures list's", "//a:b" in _visible(render(cut_state, 160, 40)), True)
+    evicted = past_run(files, _record("eeee0001", dir = tmp, evicted = "2026-11-20T10:00:00.000Z"))
+    running = past_run(files, _record("rrrr0001", "running", dir = tmp, bazel = [{"command": "build", "build_events": tmp + "/bazel/1/build_events.binpb"}]))
+    _eq("a run still going is in progress, not cut short", ([b["outcome"] for b in running["builds"]], running.get("stream_cut")), (["in progress"], False))
+    _eq("its build marked neither passed nor failed", "◌" in build_row(running["builds"][0], 80) and "✗" not in build_row(running["builds"][0], 80), True)
+    earlier = past_run(files, _record("rrrr0002", "running", dir = tmp, bazel = [
+        {"command": "build", "ended": "2026-11-21T15:40:00.000Z", "build_events": tmp + "/bazel/1/build_events.binpb", "summary": {"failures": [{"kind": "action", "label": "//a:b", "detail": "Genrule", "logs": []}]}},
+        {"command": "test", "build_events": tmp + "/bazel/1/build_events.binpb"},
+    ]))
+    _eq("an earlier build that ended cut short says so in a run still going", [b["outcome"] for b in earlier["builds"]], ["event stream ended early", "in progress"])
+    _eq("a run pruned before the list says when", evicted["log"][0].startswith("This run's files were removed (pruned "), True)
+    ctx.std.fs.remove_dir_all(tmp)
+    pruned = past_run(files, _record("gggg0000", dir = tmp))
+    _eq("a run whose files went since the list says so", pruned["log"], ["This run's files were removed since the list was read · aspect history show gggg0000"])
+
+def _test_restart(ctx):
+    """Bazel restarting a build in place starts its events over, live and
+    read back alike; its console, errors and what is open go on."""
+    attempt = lambda uuid: [
+        struct(kind = "build_started", id = struct(), payload = struct(uuid = uuid)),
+        struct(kind = "target_completed", id = struct(label = "//" + uuid + ":t"), payload = struct(success = False)),
+    ]
+    replayed = _history_state(ctx, [])
+    new_build(replayed, 0)
+    replayed["building"] = True
+    for event in attempt("u1") + attempt("u2"):
+        take_event(replayed, event)
+    _eq("a stream Bazel restarted shows its last attempt", (replayed["bazel_uuid"], replayed["counts"]["failures"]), ("u2", ["//u2:t"]))
+    live = _history_state(ctx, [])
+    for event in attempt("u1"):
+        take_event(live, event)
+    new_build(live, 7)
+    live["building"] = True
+    add_lines(live, ["ERROR: lost inputs, restarting"])
+    for event in attempt("u2"):
+        take_event(live, event)
+    _eq("watched live, a start before the first frame counts, and the restart starts over", (live["bazel_uuid"], live["counts"]["failures"], live["build_start_ms"]), ("u2", ["//u2:t"], 7))
+    _eq("its console going on", live["log"], ["ERROR: lost inputs, restarting"])
+    live["fresh"] = True
+    for event in attempt("u3"):
+        take_event(live, event)
+    _eq("a retried attempt's start is its own, not a restart", live["started_early"], True)
+
+    # While a past run is shown, the live one's events change it where it
+    # waits, and nothing of the screen the user is looking at.
+    shown = _history_state(ctx, [])
+    shown["live"] = on_run(shown, new_run(task = "build", building = True), lambda s: None)
+    shown["past"] = {}
+    shown["selected"] = 4
+    for event in attempt("u4"):
+        on_live(shown, lambda s: take_event(s, event))
+    _eq("the live run took the events, the shown one none", (shown["live"]["counts"]["failures"], shown["counts"]["failures"], shown["selected"]), (["//u4:t"], [], 4))
+
+def _impl(ctx: TaskContext) -> int:
+    _test_screen(ctx)
+    _test_kept_logs(ctx)
+    _test_files(ctx)
+    _test_restart(ctx)
+    print("history_test.axl: OK")
+    return 0
+
+dashboard_history_tests = task(
+    summary = "Run the Dashboard's History screen tests.",
+    kind = "test-dashboard-history",
+    group = ["dev"],
+    implementation = _impl,
+)

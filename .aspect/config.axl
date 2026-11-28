@@ -11,6 +11,7 @@ load("@aspect//feature/artifacts.axl", "ArtifactUpload")
 load("@aspect//feature/buildkite_annotations.axl", "BuildkiteAnnotations")
 load("@aspect//feature/circleci_test_results.axl", "CircleCITestResults")
 load("@aspect//feature/dashboard/actions_test.axl", "dashboard_actions_tests")
+load("@aspect//feature/dashboard/history_test.axl", "dashboard_history_tests")
 load("@aspect//feature/dashboard_test.axl", "dashboard_tests")
 load("@aspect//feature/deployment.axl", "Deployment")
 load("@aspect//feature/failure_replay_test.axl", "failure_replay_tests")
@@ -640,6 +641,10 @@ def config(ctx: ConfigContext):
     # The Dashboard's actions: the bar, the Actions rows and Metrics.
     # Run with: aspect dev test-dashboard-actions
     ctx.tasks.add(dashboard_actions_tests)
+
+    # The Dashboard's History screen and a past run read back from the history.
+    # Run with: aspect dev test-dashboard-history
+    ctx.tasks.add(dashboard_history_tests)
 
     # Recorded Bazel failures through the failure summary and the Failures tab.
     # Run with: aspect dev test-failure-replay
