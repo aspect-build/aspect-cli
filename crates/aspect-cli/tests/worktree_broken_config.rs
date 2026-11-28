@@ -478,9 +478,8 @@ fn a_broken_task_file_alone_leaves_settings_and_features_alone() {
 /// config sets is known: its 2 hours let `release` end a stopped session's
 /// lease idle for 3, which the 24-hour default would keep. The configs decide
 /// which features run, so a healthy repository feature still runs, its
-/// `score_slot` hook included. The warning
-/// lists no setting, and names the broken file as a feature file whose hooks
-/// are off.
+/// `score_slot` hook included. The warning lists no setting, and names the
+/// broken file as a feature file whose hooks are off.
 #[test]
 fn a_broken_feature_file_alone_keeps_the_configured_grace() {
     let config = "load(\"@aspect//feature/worktree_pool.axl\", \"WorktreePool\")\n\n\
