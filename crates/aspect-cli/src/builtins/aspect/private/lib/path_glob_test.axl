@@ -29,8 +29,7 @@ def _test_literals(_ctx):
     ])
 
 def _test_wildcards(_ctx):
-    # `*<suffix>` is a suffix check; the rest backtrack, including names long
-    # enough to need more iterations than len(pat) + len(name).
+    # `*<suffix>` is a suffix check; the rest backtrack, long names included.
     _check([
         ("*", "foo", True),
         ("*", "", True),
@@ -58,6 +57,11 @@ def _test_wildcards(_ctx):
         ("*a*", "bab", True),
         ("a**b", "aXYb", True),
         ("a**b", "a/b", False),
+        ("***", "abc", True),
+        ("***", "a/b", False),
+        ("*?", "*", True),
+        ("?", "*", True),
+        ("*", "**", True),
         ("vendor/*", "vendor/foo", True),
         ("vendor/*", "vendor/foo/bar", False),
     ])
@@ -106,6 +110,25 @@ def _test_double_star(_ctx):
         ("**/x/**", "q/x/r", True),
         ("**/x/**", "q/x", False),
         ("**/testdata/**/*.golden", "crates/c/tests/testdata/failures/uni/9.3.3.golden", True),
+        ("**/a**b", "x/aYb", True),
+    ])
+
+def _test_many_double_stars(_ctx):
+    # Backtracking only to the last `**` keeps these linear; trying every
+    # split of every `**` takes seconds to minutes on them. The ones ending
+    # in `**/c` match their tail, so their head has to backtrack.
+    thirty = "/".join(["a"] * 30)
+    _check([
+        ("**/a/**/a/**/a/**/a/**/b", thirty, False),
+        ("**/a/**/a/**/a/**/a/**/a/**/b", thirty, False),
+        ("**/**/**/**/**/**/**/**/b", thirty, False),
+        ("**/a/**/a/**/a/**/a/**/b", thirty + "/b", True),
+        ("**/a/**/a/**/a/**/a/**/b/**/c", thirty + "/c", False),
+        ("**/a/**/a/**/a/**/a/**/a/**/b/**/c", thirty + "/c", False),
+        ("**/**/**/**/**/**/**/**/b/**/c", thirty + "/c", False),
+        ("**/a/**/a/**/a/**/a/**/b/**", thirty + "/c", False),
+        ("**/a/**/a/**/a/**/a/**/a/**/b/**/c", thirty + "/b/c", True),
+        ("**/**/**/**/**/**/**/**/b/**/c", thirty + "/b/a/c", True),
     ])
 
 def _test_empty_segments(_ctx):
@@ -144,67 +167,29 @@ def _test_match_any(_ctx):
     _eq("no patterns", match_any([], "anything"), False)
     _eq("any of them", match_any(["**/BUILD", "**/*.axl"], "a/b/c.axl"), True)
 
-def _reference_chars(pat: str, name: str, literal_empty: bool) -> bool:
-    """Backtracking segment match with none of `_match_chars`' shortcuts.
-
-    With `literal_empty`, an empty pattern segment matches an empty name, as
-    match_path's does; without it, an empty segment matches nothing.
-    """
-    if literal_empty and not pat:
+def _reference_chars(pat: str, name: str) -> bool:
+    """Segment match written from the definitions of `*` and `?`."""
+    if not pat:
         return not name
-    pi = 0
-    ni = 0
-    star_pi = -1
-    star_ni = 0
-    for _ in range(len(pat) * len(name) + len(pat) + len(name) + 8):
-        if ni < len(name) and pi < len(pat) and (pat[pi] == "?" or pat[pi] == name[ni]):
-            pi += 1
-            ni += 1
-        elif pi < len(pat) and pat[pi] == "*":
-            star_pi = pi
-            star_ni = ni
-            pi += 1
-        elif star_pi >= 0:
-            star_ni += 1
-            pi = star_pi + 1
-            ni = star_ni
-        else:
-            return False
-        if pi == len(pat) and ni == len(name):
-            return True
-    return pi == len(pat) and ni == len(name)
+    if pat[0] == "*":
+        return _reference_chars(pat[1:], name) or (name != "" and _reference_chars(pat, name[1:]))
+    return name != "" and (pat[0] == "?" or pat[0] == name[0]) and _reference_chars(pat[1:], name[1:])
 
-def _reference_segments(pat_segs: list[str], name_segs: list[str], literal_empty: bool) -> bool:
-    """Segment match where every `**` tries every split."""
-    pi = 0
-    ni = 0
-    pn = len(pat_segs)
-    nn = len(name_segs)
-    for _ in range(pn + nn + 8):
-        if pi == pn:
-            return ni == nn
-        if pat_segs[pi] == "**":
-            tail = pat_segs[pi + 1:]
-            if not tail:
-                return ni < nn
-            for k in range(nn - ni + 1):
-                if _reference_segments(tail, name_segs[ni + k:], literal_empty):
-                    return True
-            return False
-        if ni == nn:
-            return False
-        if not _reference_chars(pat_segs[pi], name_segs[ni], literal_empty):
-            return False
-        pi += 1
-        ni += 1
-    return pi == pn and ni == nn
+def _reference_segments(pat_segs: list[str], name_segs: list[str]) -> bool:
+    """Path match written from the definition of `**`, trailing rule included."""
+    if not pat_segs:
+        return not name_segs
+    if pat_segs[0] == "**":
+        if len(pat_segs) == 1:
+            return len(name_segs) > 0
+        return _reference_segments(pat_segs[1:], name_segs) or (len(name_segs) > 0 and _reference_segments(pat_segs, name_segs[1:]))
+    return len(name_segs) > 0 and _reference_chars(pat_segs[0], name_segs[0]) and _reference_segments(pat_segs[1:], name_segs[1:])
 
-def _reference_match(pattern: str, path: str, literal_empty: bool) -> bool:
+def _reference_match(pattern: str, path: str) -> bool:
+    """match_path's contract: trailing slash trimmed, empty pattern matches nothing."""
     if pattern.endswith("/"):
         pattern = pattern[:-1]
-    if not pattern:
-        return False
-    return _reference_segments(pattern.split("/"), path.split("/"), literal_empty)
+    return pattern != "" and _reference_segments(pattern.split("/"), path.split("/"))
 
 def _has_empty_segment(pattern: str) -> bool:
     if pattern.endswith("/"):
@@ -221,33 +206,29 @@ def _joins(segments: list[str], counts: list[int]) -> list[str]:
             out.extend(["/".join(p) for p in level])
     return out
 
-_PATTERN_SEGMENTS = ["", "**", "*", "?", "a", "a*", "*a", "*.b", ".*", "?a", "a*b?", "*?"]
+_PATTERN_SEGMENTS = ["", "**", "*", "?", "a", "a*", "*a", "*a*", "*.b", ".*", "?a", "a*b?", "*?"]
 _PATTERNS = (
     _joins(_PATTERN_SEGMENTS, [1, 2]) +
     _joins(["", "**", "*", "a"], [3]) +
     ["**/a/**/a", "a/**/*/**", "**/*/**/.*", "**/**/a/*", "**/a/**/a/**", "*/**/a.b/**/*"]
 )
 _PATHS = (
-    _joins(["", "a", "b", ".a", "a.b", "aab"], [1, 2]) +
+    _joins(["", "a", "b", ".a", "a.b", "aab", "*"], [1, 2]) +
     _joins(["", "a", ".a"], [3]) +
     ["a/b/a/a", "b/a/.a/a.b/a", "a/a/a/a/a", "a//a/a", "/a/a/a.b/a"]
 )
 
 def _test_agrees_with_reference(_ctx):
-    """match_path agrees with the reference matcher on every pair of a broad
-    table, and an empty segment is the only thing `literal_empty` changes:
-    without it, the reference agrees on every pattern that has none and
-    matches nothing for one that has."""
+    """match_path agrees with the reference on every pair of a broad table."""
     matched = 0
     empty_matched = 0
     for pattern in _PATTERNS:
         empty = _has_empty_segment(pattern)
         for path in _PATHS:
             got = match_path(pattern, path)
-            want = _reference_match(pattern, path, True)
-            plain = _reference_match(pattern, path, False)
-            if got != want or plain != (False if empty else got):
-                fail("%r ~ %r: match_path %r, reference %r, reference with empty segments matching nothing %r" % (pattern, path, got, want, plain))
+            want = _reference_match(pattern, path)
+            if got != want:
+                fail("%r ~ %r: match_path %r, reference %r" % (pattern, path, got, want))
             if got:
                 matched += 1
                 if empty:
@@ -262,6 +243,7 @@ _UNIT_TESTS = [
     _test_literals,
     _test_wildcards,
     _test_double_star,
+    _test_many_double_stars,
     _test_empty_segments,
     _test_dotfiles,
     _test_match_any,
