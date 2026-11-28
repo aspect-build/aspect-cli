@@ -12,7 +12,8 @@
 //!   `degraded_usage()` tell `main` whether the selected task is one of the
 //!   built-ins that run against a workspace that did not fully load
 //!   ([`DEGRADED_COMMANDS`]), `runs_degraded()` which features still run for
-//!   it, and `degraded_settings()` what its warning lists.
+//!   it, and `degraded_settings()` and `typed_feature_flags()` what its
+//!   warning lists.
 //!   `dispatch()` turns parsed [`ArgMatches`] into a [`Dispatch`].
 //!   `print_feature_help()` renders `aspect feature [<name>]`, the discovery
 //!   surface for feature flags (which are hidden from each task's `--help`)
@@ -95,8 +96,9 @@ pub struct DegradedCommands {
 /// `aspect worktree` hands out the clean checkout to fix the config in. Most
 /// of what config sets for it picks which slot is reused and how many the pool
 /// keeps. The one setting that protects anything, how long a stopped
-/// session's slot is kept for it, is not trusted in such a run: the tasks read
-/// `ctx.task.degraded` and keep every such slot. `prune` is left out, since a
+/// session's slot is kept for it, is not trusted when a config or feature file
+/// failed: the tasks read `ctx.task.degraded` and keep every such slot, unless
+/// the command line gave that setting. `prune` is left out, since a
 /// config may raise its `max_idle_days` and the default would delete slots the
 /// config keeps. Only tasks the built-in module defines qualify: a
 /// repository's own task in one of these groups may depend on what failed.
@@ -406,22 +408,16 @@ impl<'a, 'v> Cmd<'a, 'v> {
     }
 
     /// [`Self::degraded_commands`] for a command line Clap rejected: the
-    /// entry whose task `argv` names, walking `root` as Clap would, or whose
-    /// group it names with a subcommand the group does not have
-    /// (`aspect worktree bogus`).
+    /// entry whose task `argv` names, walking `root` as Clap would. A command
+    /// line that names no task, such as `aspect worktree sync` for a task
+    /// whose file did not load, has none: the load failure may be its cause.
     pub fn degraded_usage(
         &self,
         root: &Command,
         argv: &[OsString],
     ) -> Option<&'static DegradedCommands> {
         let tokens: Vec<Option<&str>> = argv.iter().map(|token| token.to_str()).collect();
-        if let Some(selection) = select_command(root, &tokens) {
-            return self.degraded_task(selection.task_index);
-        }
-        let group = tokens.get(1).copied().flatten()?;
-        DEGRADED_COMMANDS
-            .iter()
-            .find(|entry| entry.group == group && root.find_subcommand(group).is_some())
+        self.degraded_task(select_command(root, &tokens)?.task_index)
     }
 
     /// Whether `feature` runs for the tasks of `entry` in a degraded run: a
@@ -459,6 +455,37 @@ impl<'a, 'v> Cmd<'a, 'v> {
             .collect();
         parts.push(entry.other_settings.to_owned());
         parts.join(", ")
+    }
+
+    /// The flags of the features `pick` takes that the command line `matches`
+    /// was parsed from typed, spelled as typed: `--telemetry:enabled`, or the
+    /// bare `--telemetry`.
+    pub fn typed_feature_flags(
+        &self,
+        matches: &ArgMatches,
+        pick: impl Fn(&dyn FeatureLike<'v>) -> bool,
+    ) -> Vec<String> {
+        let Some(leaf) = deepest_subcommand(matches) else {
+            return vec![];
+        };
+        let mut flags = vec![];
+        for feature in self.features.iter().filter(|feature| pick(**feature)) {
+            let prefix = feature.name();
+            let scope = Scope::Feature(&prefix);
+            if typed_shorthand(&prefix, leaf).is_some() {
+                flags.push(format!("--{prefix}"));
+            }
+            for (name, arg) in feature.args().iter() {
+                let key = clap_id(scope, name, arg);
+                if arg.is_cli_exposed()
+                    && leaf.try_contains_id(&key).is_ok()
+                    && leaf.value_source(&key) == Some(ValueSource::CommandLine)
+                {
+                    flags.push(format!("--{}", long_flag(scope, name, arg)));
+                }
+            }
+        }
+        flags
     }
 
     /// The [`DEGRADED_COMMANDS`] entry task `index` is one of, if any.
@@ -3893,8 +3920,7 @@ mod tests {
     /// Only a listed built-in task runs degraded: not a repository's own task
     /// in its group, an unlisted built-in of that group (`prune`), a built-in
     /// in another group, or a command that is not a task. A usage error finds
-    /// the same entry from the command line, and from the group alone when it
-    /// names no task of it.
+    /// the same entry from the command line, and none when it names no task.
     #[test]
     fn only_listed_built_in_tasks_run_degraded() {
         let builtins = Mod::new(
@@ -3937,7 +3963,7 @@ mod tests {
             usage(&["aspect", "worktree", "inspect", "--bogus"]),
             Some("worktree")
         );
-        assert_eq!(usage(&["aspect", "worktree", "bogus"]), Some("worktree"));
+        assert_eq!(usage(&["aspect", "worktree", "bogus"]), None);
         assert_eq!(usage(&["aspect", "worktree", "prune", "--bogus"]), None);
         assert_eq!(usage(&["aspect", "history", "list", "--bogus"]), None);
         assert_eq!(usage(&["aspect", "bogus"]), None);

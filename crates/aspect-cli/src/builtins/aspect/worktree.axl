@@ -37,7 +37,7 @@ resumable — `list` still offers the command to return to it. A dirty checkout,
 or one git cannot read, is never taken automatically.
 A run that goes ahead although the workspace's config did not load
 (`ctx.task.degraded`) takes nothing back, since that config may set a longer
-grace period than the default.
+grace period than the default, unless the command line gives the grace period.
 
 Leases record who took them, so `list` names the session holding each slot.
 Detection is automatic for harnesses the CLI recognizes, and
@@ -1273,8 +1273,9 @@ def _already_free_doc(pool: dict, slot_id: str) -> dict:
     }
 
 def _held_by_another_session(ctx: TaskContext, pool: dict, registry: dict, slot_id: str, kept_ms: int = 0, root: str = "") -> dict:
-    """A lease another session holds that has not verifiably stopped — or has,
-    with `kept_ms` of its grace left — which `release` was asked to end.
+    """A lease another session holds, which `release` was asked to end: its
+    holder has not verifiably stopped, or has with `kept_ms` of its grace left,
+    or while the grace period is not known (`_grace_known`).
 
     Ending it removes a checkout somebody may be working in, so it is theirs to
     do — the same line `add` draws with `--take-over`. A session can be finished
@@ -1323,7 +1324,7 @@ def _held_by_another_session(ctx: TaskContext, pool: dict, registry: dict, slot_
             "session_state": session_state(ctx.std, agent),
             "uncommitted": _porcelain_entries(work),
             "same_session": _same_harness_session(me, agent),
-            "grace_left_ms": kept_ms if kept_ms > 0 else 0,
+            "grace_left_ms": None if kept_unknown else (kept_ms if kept_ms > 0 else 0),
         },
     )
 
@@ -3011,9 +3012,12 @@ def _newer_registry(ctx: TaskContext, pool: dict) -> TaskConclusion:
         facts = {"pool": pool["dir"]},
     )
 
-def _grace_left_ms(ctx: TaskContext, pool: dict, registry: dict, slot_id: str, root: str) -> int:
+def _grace_left_ms(ctx: TaskContext, pool: dict, registry: dict, slot_id: str, root: str) -> int | None:
     """How much of the `WorktreePool` grace period a leased slot has left,
-    counted from its last activity; 0 once it is over."""
+    counted from its last activity; 0 once it is over, and None while the
+    grace period is not known (`_grace_known`), when the slot is kept."""
+    if not _grace_known(ctx):
+        return None
     left = _grace_ms(ctx) - (time.now_ms() - lease_last_active_ms(ctx.std, pool, slot_id, registry["slots"][slot_id], root))
     return left if left > 0 else 0
 
@@ -3026,9 +3030,10 @@ def _grace_known(ctx: TaskContext) -> bool:
     """Whether the grace period is the one this workspace configures, so a
     stopped session's slot may be taken back once it is over. Not in a
     degraded run (`ctx.task.degraded`), where the config that did not load may
-    set a longer one than the default: every such slot is kept for its
-    session, and only `--take-over` or `release --force=all` end its lease."""
-    return not ctx.task.degraded
+    set a longer one than the default, unless the command line gave it, which
+    beats any config: otherwise every such slot is kept for its session, and
+    only `--take-over` or `release --force=all` end its lease."""
+    return not ctx.task.degraded or worktree_pool.abandoned_grace_hours_given(ctx)
 
 def _adopted(ctx: TaskContext, pool: dict, taken: list | None = None) -> dict:
     """The registry with slots of a clone gone from its path adopted by this
@@ -3337,7 +3342,8 @@ def _add_impl(ctx: TaskContext) -> int | TaskConclusion:
             "same_session": _same_harness_session(mine, holder),
             # How long a stopped holder's slot is still kept for it, as the
             # message says, and as `release` reports it; 0 once that is over,
-            # or while the holder runs.
+            # or while the holder runs; None while the grace period is not
+            # known, which keeps the slot.
             "grace_left_ms": _grace_left_ms(ctx, pool, registry, held, root) if _process_state(ctx, holder) == "stopped" else 0,
         }
 

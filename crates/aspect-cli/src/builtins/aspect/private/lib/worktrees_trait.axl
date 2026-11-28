@@ -32,8 +32,9 @@ When the workspace's own AXL does not load, most `aspect worktree` tasks still
 run (`DEGRADED_COMMANDS` in `crates/aspect-cli/src/cmd.rs`) and these may be at
 their defaults. Their warning lists `WorktreePool`'s options from the feature
 itself, and the `Worktrees` hooks from that table, so a hook added here belongs
-there too. Such a run takes no stopped session's slot back, whatever
-`abandoned_grace_hours` says.
+there too. Such a run takes no stopped session's slot back unless
+`--worktree-pool:abandoned-grace-hours` was given on the command line, which
+beats any config and so is known.
 """
 
 # The `score_slot` hook's limits: how long its calls for one `add` may take in
@@ -64,12 +65,18 @@ _WorktreePoolSettings = trait(
         default = _MAX_SLOTS,
         description = "Set from `WorktreePool`'s `max_slots` option.",
     ),
+    abandoned_grace_hours_given = attr(
+        bool,
+        default = False,
+        description = "Whether `abandoned_grace_hours` was given on the command line, which beats any config and so is known even while the config does not load.",
+    ),
 )
 
 def _worktree_pool_impl(ctx: FeatureContext):
     settings = ctx.traits[_WorktreePoolSettings]
     settings.max_slots = ctx.args.max_slots
     settings.abandoned_grace_hours = ctx.args.abandoned_grace_hours
+    settings.abandoned_grace_hours_given = ctx.args.is_explicit("abandoned_grace_hours")
 
 WorktreePool = feature(
     display_name = "Worktree pool",
@@ -92,4 +99,5 @@ WorktreePool = feature(
 worktree_pool = struct(
     max_slots = lambda ctx: ctx.traits[_WorktreePoolSettings].max_slots,
     abandoned_grace_hours = lambda ctx: ctx.traits[_WorktreePoolSettings].abandoned_grace_hours,
+    abandoned_grace_hours_given = lambda ctx: ctx.traits[_WorktreePoolSettings].abandoned_grace_hours_given,
 )

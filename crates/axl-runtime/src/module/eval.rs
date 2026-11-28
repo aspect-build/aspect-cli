@@ -190,10 +190,14 @@ pub const AXL_USER_MODULE_NAME: &str = "user";
 /// The module the CLI's built-in tasks and features load as: `@aspect//build.axl`.
 pub const AXL_BUILTIN_MODULE_NAME: &str = "aspect";
 
-/// Refuse a dependency named like a module the CLI itself provides: the root
-/// module, or the built-in one, which a dependency of that name would replace.
+/// The names of the modules the CLI itself provides, the root module and the
+/// built-in one, which a dependency of the same name would replace. No
+/// dependency may take one (`ctx.aspect.reserved_module_names` in AXL).
+pub const AXL_RESERVED_MODULE_NAMES: &[&str] = &[AXL_ROOT_MODULE_NAME, AXL_BUILTIN_MODULE_NAME];
+
+/// Refuse a dependency named in [`AXL_RESERVED_MODULE_NAMES`].
 fn reject_reserved_dep_name(function: &str, name: &str) -> anyhow::Result<()> {
-    if name == AXL_ROOT_MODULE_NAME || name == AXL_BUILTIN_MODULE_NAME {
+    if AXL_RESERVED_MODULE_NAMES.contains(&name) {
         anyhow::bail!("{function} name {name:?} not allowed.");
     }
     Ok(())
@@ -319,7 +323,7 @@ mod tests {
     /// both dep kinds refuse those names.
     #[test]
     fn a_dep_cannot_take_a_name_the_cli_provides() {
-        for name in [AXL_ROOT_MODULE_NAME, AXL_BUILTIN_MODULE_NAME] {
+        for &name in AXL_RESERVED_MODULE_NAMES {
             for (function, call) in [
                 (
                     "axl_local_dep",

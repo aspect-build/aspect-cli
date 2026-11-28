@@ -50,6 +50,18 @@ pub(crate) fn aspect_methods(registry: &mut MethodsBuilder) {
     fn tips<'v>(#[allow(unused)] this: values::Value<'v>) -> anyhow::Result<tips::Tips> {
         Ok(tips::Tips {})
     }
+
+    /// The module names the CLI provides itself, which `axl_local_dep` and
+    /// `axl_archive_dep` refuse for a dependency.
+    #[starlark(attribute)]
+    fn reserved_module_names<'v>(
+        #[allow(unused)] this: values::Value<'v>,
+    ) -> anyhow::Result<Vec<String>> {
+        Ok(crate::module::AXL_RESERVED_MODULE_NAMES
+            .iter()
+            .map(|name| name.to_string())
+            .collect())
+    }
 }
 
 #[starlark_module]

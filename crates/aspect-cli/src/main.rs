@@ -277,12 +277,15 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
                         return Ok(ExitCode::from(err.exit_code() as u8));
                     }
                     // A usage error on a command that runs degraded is Clap's to
-                    // report: that command was there, so the load failure did
+                    // report: the task it names loaded, so the load failure did
                     // not cause it.
                     if !unloadable.is_empty()
                         && let Some(entry) = cmd.degraded_usage(&root_cmd, &argv)
                     {
-                        unloadable.warn_degraded(entry, &cmd.degraded_settings(entry));
+                        let settings = unloadable
+                            .settings_lost()
+                            .then(|| cmd.degraded_settings(entry));
+                        unloadable.warn_degraded(entry, settings.as_deref(), &[]);
                         err.print().ok();
                         return Ok(ExitCode::from(err.exit_code() as u8));
                     }
@@ -305,9 +308,19 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
                 if runs_without_tasks(matches.subcommand_name()) {
                     unloadable.warn();
                 } else if let Some(entry) = cmd.degraded_commands(&matches) {
-                    unloadable.warn_degraded(entry, &cmd.degraded_settings(entry));
-                    mpe.mark_degraded();
-                    degraded = Some(entry);
+                    // With only task files broken the configs ran in full, so
+                    // the run is degraded only when a config or feature file
+                    // failed.
+                    if unloadable.settings_lost() {
+                        let ignored =
+                            cmd.typed_feature_flags(&matches, |f| !cmd.runs_degraded(entry, f));
+                        let settings = cmd.degraded_settings(entry);
+                        unloadable.warn_degraded(entry, Some(&settings), &ignored);
+                        mpe.mark_degraded();
+                        degraded = Some(entry);
+                    } else {
+                        unloadable.warn_degraded(entry, None, &[]);
+                    }
                 } else if let Some(err) = unloadable.into_error() {
                     return Err(err);
                 }
@@ -548,6 +561,15 @@ impl Unloadable {
         self.scripts.is_empty() && self.configs.is_empty()
     }
 
+    /// Whether a config or feature file failed, which leaves out settings it
+    /// would have applied. A task file sets none.
+    fn settings_lost(&self) -> bool {
+        self.scripts
+            .iter()
+            .chain(&self.configs)
+            .any(|failure| failure.role != AxlFileRole::Tasks)
+    }
+
     /// `err`, after reporting everything recorded. The one way to raise an
     /// error of its own out of startup: holding the two together is what makes
     /// "every raise path reports first" a single place rather than a rule each
@@ -628,16 +650,22 @@ impl Unloadable {
 
     /// Report the failures for a built-in task of `entry` that runs without
     /// them, or whose command line Clap rejected: a single `warning:` naming
-    /// the command, then a line per file with
-    /// the first line of its own error, scripts first. When a config or a
-    /// feature file failed, a line naming `settings`, which the run may have at
-    /// their defaults; a task file sets none. Each line is that file's own
-    /// message, so no config is blamed on a script here.
+    /// the command, then a line per file with the first line of its own
+    /// error, scripts first. Each line is that file's own message, so no
+    /// config is blamed on a script here. Then a line naming `settings`, which
+    /// the run may have at their defaults, and one naming the `ignored` flags
+    /// of the features it does not run, each when given: the caller gives them
+    /// when a config or feature file failed ([`Self::settings_lost`]).
     ///
-    /// The full diagnostics are left to `ASPECT_DEBUG`, which prints each
-    /// one below: pages of source excerpts would bury the answer the user ran
-    /// the command for.
-    fn warn_degraded(&self, entry: &cmd::DegradedCommands, settings: &str) {
+    /// The full diagnostics are left to `ASPECT_DEBUG`, which prints each one
+    /// below: pages of source excerpts would bury the answer the user ran the
+    /// command for.
+    fn warn_degraded(
+        &self,
+        entry: &cmd::DegradedCommands,
+        settings: Option<&str>,
+        ignored: &[String],
+    ) {
         errln!(
             "warning: `aspect {}` runs without the AXL that failed to load:",
             entry.group
@@ -650,10 +678,17 @@ impl Unloadable {
                 headline(&failure.error, &failure.path)
             );
         }
-        if failures().any(|failure| failure.role != AxlFileRole::Tasks) {
+        if let Some(settings) = settings {
             errln!(
                 "  Settings these files would have applied to it may be at their defaults: \
                  {settings}."
+            );
+        }
+        if !ignored.is_empty() {
+            errln!(
+                "  This run ignores {}: the features they set do not run while those files \
+                 do not load.",
+                ignored.join(", ")
             );
         }
         errln!("  `ASPECT_DEBUG=1` prints each error in full.");

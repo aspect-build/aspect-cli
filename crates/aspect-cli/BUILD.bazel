@@ -241,6 +241,20 @@ rust_test(
 )
 
 rust_test(
+    name = "axl_add_test",
+    srcs = ["tests/axl_add.rs"] + INTEGRATION_TEST_COMMON_SRCS,
+    crate_root = "tests/axl_add.rs",
+    data = [":aspect-cli"],
+    env = {
+        "ASPECT_CLI_BIN": "$(rootpath :aspect-cli)",
+    },
+    deps = [
+        "//crates/axl-runtime",
+        "@crates//:tempfile",
+    ],
+)
+
+rust_test(
     name = "crash_handler_test",
     srcs = ["tests/crash_handler.rs"] + INTEGRATION_TEST_COMMON_SRCS,
     crate_root = "tests/crash_handler.rs",

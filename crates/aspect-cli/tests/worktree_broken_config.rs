@@ -324,7 +324,8 @@ fn every_other_command_still_fails_on_a_config_that_does_not_load() {
 
 /// A command line Clap rejects for a degraded command gets Clap's error and
 /// exit code, after the warning, rather than the config's error. One for a
-/// task that cannot run degraded still gets the config's.
+/// task that cannot run degraded, or naming no task at all, still gets the
+/// load failure: the task it names may be one whose file did not load.
 #[test]
 fn a_usage_error_on_a_degraded_command_is_reported_as_one() {
     let (_, config, headline) = BROKEN_CONFIGS[0];
@@ -332,7 +333,6 @@ fn a_usage_error_on_a_degraded_command_is_reported_as_one() {
     for (args, clap_says) in [
         (&["worktree", "add", "x", "--detatch"][..], "--detatch"),
         (&["worktree", "path"][..], "required"),
-        (&["worktree", "bogus"][..], "bogus"),
     ] {
         let out = ws.aspect(args);
         let stderr = stderr(&out);
@@ -350,6 +350,61 @@ fn a_usage_error_on_a_degraded_command_is_reported_as_one() {
         );
     }
     assert_fails_on(&ws.aspect(&["worktree", "prune", "--bogus"]), headline);
+    assert_fails_on(&ws.aspect(&["worktree", "bogus"]), headline);
+
+    let sync = "load(\"@aspect//traits.axl\", \"NoSuchTrait\")\n\n\
+                def _impl(ctx: TaskContext) -> int:\n    return 0\n\n\
+                sync = task(group = [\"worktree\"], summary = \"Mine.\", implementation = _impl)\n";
+    let ws = Workspace::new(&[(".aspect/mytask.axl", sync)]);
+    assert_fails_on(&ws.aspect(&["worktree", "sync"]), headline);
+}
+
+/// With only a task file broken the configs ran in full, so the run is not
+/// degraded: a repository's feature still runs (its `score_slot` hook scores
+/// the free slot), and a stopped session's slot is judged by the grace period
+/// as ever, here released once that is over.
+#[test]
+fn a_broken_task_file_alone_leaves_settings_and_features_alone() {
+    let scorer = "load(\"@aspect//traits.axl\", \"Worktrees\")\n\n\
+                  def _score(ctx, slot, want):\n    print(\"scorer ran\")\n    return 1\n\n\
+                  def _impl(ctx: FeatureContext):\n    ctx.traits[Worktrees].score_slot.append(_score)\n\n\
+                  Scorer = feature(implementation = _impl)\n";
+    let ws = Workspace::new(&[
+        (
+            "MODULE.aspect",
+            "use_feature(\"tools/scorer.axl\", \"Scorer\")\n",
+        ),
+        ("tools/scorer.axl", scorer),
+        (".aspect/config.axl", "def config(ctx):\n    pass\n"),
+    ]);
+    let taken = ws.aspect(&["worktree", "add", "feat", "--create", "--output=json"]);
+    assert_clean(&taken);
+    let slot = json(&taken)["slot"].as_str().expect("a slot").to_owned();
+    let slot_dir = PathBuf::from(json(&taken)["path"].as_str().expect("a path"));
+    let freed = ws.aspect(&["worktree", "add", "spare", "--create", "--output=path"]);
+    assert_clean(&freed);
+    let spare = stdout(&freed).trim_end().to_owned();
+    assert_clean(&ws.aspect(&["worktree", "release", &spare]));
+    stop_and_age(&ws, &slot_dir, &slot, Duration::from_secs(30 * 3600));
+
+    ws.write(".aspect/broken.axl", UNPARSABLE);
+    let added = ws.aspect(&["worktree", "add", "other", "--create", "--output=json"]);
+    assert_eq!(added.status.code(), Some(0), "{}", stderr(&added));
+    assert_warned(&added, ".aspect/broken.axl", "Parse error", false);
+    assert!(
+        stderr(&added).contains("scorer ran"),
+        "the feature did not run:\n{}",
+        stderr(&added)
+    );
+
+    let released = ws.aspect(&["worktree", "release", "feat", "--output=json"]);
+    assert_eq!(released.status.code(), Some(0), "{}", stderr(&released));
+    assert!(
+        !stderr(&released).contains("did not load"),
+        "{}",
+        stderr(&released)
+    );
+    assert!(!slot_dir.exists(), "the stopped session's slot was kept");
 }
 
 /// A config that turns a feature off and then fails to load leaves it on, so a
@@ -380,6 +435,20 @@ fn a_degraded_run_runs_no_feature_its_tasks_do_not_read() {
         stderr(&out)
     );
 
+    // A flag for a feature that does not run is named as ignored, in the one
+    // warning.
+    let out = ws.run(
+        &["worktree", "inspect", "--telemetry:enabled=true"],
+        &exporter,
+    );
+    assert_degraded(&out, ".aspect/config.axl", "FromTheFuture");
+    assert!(
+        stderr(&out).contains("  This run ignores --telemetry:enabled: "),
+        "{}",
+        stderr(&out)
+    );
+    assert_eq!(spans(&out), 0, "{}", stderr(&out));
+
     ws.write(".aspect/config.axl", "def config(ctx):\n    pass\n");
     let out = ws.run(&["worktree", "inspect"], &exporter);
     assert_clean(&out);
@@ -387,43 +456,88 @@ fn a_degraded_run_runs_no_feature_its_tasks_do_not_read() {
 }
 
 /// The `WorktreePool` grace period a config sets is not known while that
-/// config does not load, so a degraded `add` takes no stopped session's slot
-/// back: a clean lease idle for 30 hours, past the 24-hour default and inside
-/// the config's 72, is kept and a new slot made. Once a config loads, the
-/// same lease is taken back, which shows the lease was one `add` would take.
+/// config does not load, so a degraded run takes no stopped session's slot
+/// back. Two clean leases idle for 30 hours, past the 24-hour default and
+/// inside the config's 72, stay through a degraded `add` of another branch, an
+/// `add` of the stopped session's own branch, and a `release` of it, each
+/// reporting the grace left as unknown; `release --force=all` still ends one.
+/// A grace period given on the command line beats any config, so with one the
+/// other lease is taken back, which also shows the leases were ones a run that
+/// knows the grace would take.
 #[test]
-fn a_degraded_add_takes_no_stopped_sessions_slot_back() {
+fn a_degraded_run_takes_no_stopped_sessions_slot_back() {
     let broken = "load(\"@aspect//feature/worktree_pool.axl\", \"WorktreePool\", \"FromTheFuture\")\n\n\
                   def config(ctx):\n    ctx.features[WorktreePool].args.abandoned_grace_hours = 72\n";
     let ws = Workspace::new(&[(".aspect/config.axl", "def config(ctx):\n    pass\n")]);
-    let taken = ws.aspect(&["worktree", "add", "feat", "--create", "--output=json"]);
-    assert_clean(&taken);
-    let stopped = json(&taken)["slot"].as_str().expect("a slot").to_owned();
-    let slot_dir = PathBuf::from(json(&taken)["path"].as_str().expect("a path"));
-    stop_and_age(&ws, &slot_dir, &stopped, Duration::from_secs(30 * 3600));
-
+    // Both are taken before either is aged, or the second `add` would take
+    // the first back.
+    let stopped: Vec<(String, PathBuf)> = ["feat", "feat2"]
+        .iter()
+        .map(|branch| {
+            let taken = ws.aspect(&["worktree", "add", branch, "--create", "--output=json"]);
+            assert_clean(&taken);
+            let doc = json(&taken);
+            (
+                doc["slot"].as_str().expect("a slot").to_owned(),
+                PathBuf::from(doc["path"].as_str().expect("a path")),
+            )
+        })
+        .collect();
+    for (slot, dir) in &stopped {
+        stop_and_age(&ws, dir, slot, Duration::from_secs(30 * 3600));
+    }
+    let degraded = |out: &Output| assert_warned(out, ".aspect/config.axl", "FromTheFuture", true);
     ws.write(".aspect/config.axl", broken);
+
     let added = ws.aspect(&["worktree", "add", "other", "--create", "--output=json"]);
-    assert_degraded(&added, ".aspect/config.axl", "FromTheFuture");
+    assert_eq!(added.status.code(), Some(0), "{}", stderr(&added));
+    degraded(&added);
     let doc = json(&added);
-    assert_ne!(
-        doc["slot"],
-        stopped.as_str(),
-        "took the stopped lease: {doc}"
+    assert!(
+        stopped.iter().all(|(slot, _)| doc["slot"] != slot.as_str()),
+        "took a stopped lease: {doc}"
     );
     assert!(!stdout(&added).contains("lease_reclaimed"), "{doc}");
-    assert!(slot_dir.is_dir(), "the stopped session's checkout went");
 
-    ws.write(".aspect/config.axl", "def config(ctx):\n    pass\n");
-    let control = ws.aspect(&["worktree", "add", "third", "--create", "--output=json"]);
-    assert_clean(&control);
-    let doc = json(&control);
-    assert_eq!(
-        doc["slot"],
-        stopped.as_str(),
-        "the control did not reclaim: {doc}"
+    let own = ws.aspect(&["worktree", "add", "feat", "--output=json"]);
+    assert_eq!(own.status.code(), Some(1), "{}", stderr(&own));
+    degraded(&own);
+    let doc = json(&own);
+    assert_eq!(doc["error"], "branch_in_use", "{doc}");
+    assert_eq!(doc["process"], "stopped", "{doc}");
+    assert!(doc["grace_left_ms"].is_null(), "{doc}");
+
+    let released = ws.aspect(&["worktree", "release", "feat", "--output=json"]);
+    assert_eq!(released.status.code(), Some(1), "{}", stderr(&released));
+    degraded(&released);
+    let doc = json(&released);
+    assert_eq!(doc["error"], "held_by_another_session", "{doc}");
+    assert!(doc["grace_left_ms"].is_null(), "{doc}");
+    assert!(
+        stopped.iter().all(|(_, dir)| dir.is_dir()),
+        "a stopped session's checkout went"
     );
-    assert!(stdout(&control).contains("lease_reclaimed"), "{doc}");
+
+    let forced = ws.aspect(&["worktree", "release", "feat", "--force=all"]);
+    assert_eq!(forced.status.code(), Some(0), "{}", stderr(&forced));
+    assert!(!stopped[0].1.exists(), "--force=all kept the checkout");
+
+    let given = ws.aspect(&[
+        "worktree",
+        "add",
+        "feat2",
+        "--worktree-pool:abandoned-grace-hours=1",
+        "--output=json",
+    ]);
+    assert_eq!(given.status.code(), Some(0), "{}", stderr(&given));
+    degraded(&given);
+    let doc = json(&given);
+    assert!(
+        doc["warnings"].as_array().is_some_and(|w| w
+            .iter()
+            .any(|w| w["code"] == "lease_reclaimed" && w["branch"] == "feat2")),
+        "the given grace did not take feat2 back: {doc}"
+    );
 }
 
 /// Make slot `slot`'s lease look like a session that stopped `idle` ago: a

@@ -208,7 +208,7 @@ pub struct TaskInfo {
     pub name: String,
     pub friendly_name: String,
     pub task_id: String,
-    /// Whether the task runs although the workspace's AXL did not fully load
+    /// Whether the task runs although a config or feature file did not load
     /// (`ctx.task.degraded`). False from [`TaskInfo::new`].
     pub degraded: bool,
 
@@ -325,11 +325,12 @@ fn task_info_methods(registry: &mut MethodsBuilder) {
         Ok(info.name.clone())
     }
 
-    /// `True` when the task runs although the workspace's own AXL did not
-    /// fully load: one of the built-in tasks the CLI lets go ahead with a
-    /// warning. A setting a config would have applied may then be at its
-    /// default, so a task holds back from anything that default could make
-    /// it do that the setting was there to prevent.
+    /// `True` when the task runs although a config or feature file of the
+    /// workspace did not load: one of the built-in tasks the CLI lets go
+    /// ahead with a warning. A setting that file would have applied may then
+    /// be at its default, so a task holds back from anything that default
+    /// could make it do that the setting was there to prevent. `False` when
+    /// only task files failed, since the configs then ran in full.
     #[starlark(attribute)]
     fn degraded<'v>(this: Value<'v>) -> anyhow::Result<bool> {
         let info = this

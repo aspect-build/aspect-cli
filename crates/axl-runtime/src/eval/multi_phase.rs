@@ -238,7 +238,7 @@ pub struct MultiPhaseEval<'v, 'l> {
     /// The run's `TaskHooks`, shared by ConfigContext, FeatureContext, and
     /// TaskContext as `ctx.hooks`; phase 4 runs what was registered into it.
     hooks_value: Value<'v>,
-    /// Whether the task runs although the workspace's AXL did not fully load,
+    /// Whether the task runs although a config or feature file did not load,
     /// set by [`Self::mark_degraded`] and read by the task as
     /// `ctx.task.degraded`.
     degraded: bool,
@@ -259,9 +259,9 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
         }
     }
 
-    /// Run the task as one that goes ahead although the workspace's AXL did
-    /// not fully load: `ctx.task.degraded` is then `True`, so the task can
-    /// hold back from what a default could make it do that a config's setting
+    /// Run the task as one that goes ahead although a config or feature file
+    /// did not load: `ctx.task.degraded` is then `True`, so the task can hold
+    /// back from what a default could make it do that a setting of that file
     /// was there to prevent.
     pub fn mark_degraded(&mut self) {
         self.degraded = true;
