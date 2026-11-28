@@ -163,12 +163,12 @@ fn a_spawned_clis_history_is_the_test_processs_own() {
     assert!(recorded, "no entry for {here:?} in {history:?}");
 }
 
-/// A post-task hook that holds the run (as the Dashboard's finished screen
-/// does while it is read) is not the task's time: its record ends where its
-/// implementation returned, with that return's exit code.
+/// Post-task work the user waits for (a hook's sleep here; uploads, status
+/// checks and tips in a real run) is the task's time: its record and its
+/// closing line count it, with the task's own exit code.
 #[test]
-fn a_held_post_task_hook_is_not_in_the_recorded_duration() {
-    const HOLD_MS: u64 = 3000;
+fn a_post_task_hooks_time_is_in_the_recorded_duration() {
+    const HOOK_MS: u64 = 2000;
     let dir = tempfile::tempdir().expect("temp dir");
     std::fs::write(dir.path().join("MODULE.bazel"), "").expect("MODULE.bazel");
     std::fs::create_dir(dir.path().join(".aspect")).expect(".aspect");
@@ -177,11 +177,11 @@ fn a_held_post_task_hook_is_not_in_the_recorded_duration() {
         format!(
             r#"load("@std//time.axl", "sleep")
 
-def _hold(ctx, outcome):
-    sleep({HOLD_MS})
+def _slow(ctx, outcome):
+    sleep({HOOK_MS})
 
 def _impl(ctx):
-    ctx.hooks.post_task(_hold)
+    ctx.hooks.post_task(_slow)
     return 3
 
 held = task(implementation = _impl, summary = "Test fixture.")
@@ -190,7 +190,7 @@ held = task(implementation = _impl, summary = "Test fixture.")
     )
     .expect("held.axl");
     let history = dir.path().join("history");
-    let status = Command::new(aspect_cli())
+    let output = Command::new(aspect_cli())
         .arg("held")
         .current_dir(dir.path())
         .env("ASPECT_HISTORY_DIR", &history)
@@ -199,9 +199,9 @@ held = task(implementation = _impl, summary = "Test fixture.")
             dir.path().join("credentials.json"),
         )
         .env_remove("ASPECT_DEBUG")
-        .status()
+        .output()
         .expect("running the CLI");
-    assert_eq!(status.code(), Some(3), "{status:?}");
+    assert_eq!(output.status.code(), Some(3), "{output:?}");
     let record: serde_json::Value = std::fs::read_dir(&history)
         .expect("the history")
         .flatten()
@@ -210,9 +210,15 @@ held = task(implementation = _impl, summary = "Test fixture.")
         .expect("a task.json");
     assert_eq!(record["status"], "ended", "{record}");
     assert_eq!(record["exit_code"], 3, "{record}");
+    assert_eq!(record["cancelled"], false, "{record}");
     let took = record["duration_ms"].as_u64().expect("duration_ms");
     assert!(
-        took < HOLD_MS - 1000,
-        "the hold counted: {took}ms in {record}"
+        took >= HOOK_MS,
+        "the hook's time left out: {took}ms in {record}"
+    );
+    let said = common::closing_line_ms(&String::from_utf8_lossy(&output.stderr));
+    assert!(
+        said >= HOOK_MS && said.abs_diff(took) < 100,
+        "the closing line's {said}ms against the record's {took}ms"
     );
 }

@@ -194,6 +194,18 @@ def _isigkept(ctx):
 
 isigkept = task(implementation = _isigkept, summary = "Interrupts off, then an interactive child: Ctrl+C is still a key.")
 
+def _heldpost(ctx, outcome):
+    screen = ctx.std.term.take()
+    screen.write("HELD")
+    screen.key(timeout_ms = 2500)
+    screen.release()
+
+def _heldscreen(ctx):
+    ctx.hooks.post_task(_heldpost)
+    return 0
+
+heldscreen = task(implementation = _heldscreen, summary = "A post-task hook holding a screen up for its reader.")
+
 def _exitgrand(ctx):
     screen = ctx.std.term.take()
     screen.write("FRAME")
@@ -1594,6 +1606,34 @@ fn interrupts_stay_off_across_a_suspend() {
     let text = plain(&String::from_utf8_lossy(&raw));
     assert!(status.success(), "{status:?}: {text:?}");
     assert!(text.contains("CTRL-C-WAS-A-KEY"), "{text:?}");
+}
+
+/// A post-task hook that holds a screen up for its reader (waiting for a
+/// key, as the Dashboard's finished screen does) is not the task's time:
+/// its record and its closing line leave the wait out, and only that.
+#[cfg(unix)]
+#[test]
+fn a_screen_held_for_its_reader_is_not_in_the_recorded_duration() {
+    use std::time::Duration;
+    let (mut child, chunks, dir) = on_a_pty("heldscreen", None);
+    let status = wait_bounded(&mut child, 60, &chunks);
+    std::thread::sleep(Duration::from_millis(200));
+    let raw: Vec<u8> = chunks.try_iter().flat_map(|(_, bytes)| bytes).collect();
+    let text = plain(&String::from_utf8_lossy(&raw));
+    assert!(status.success(), "{status:?}: {text:?}");
+    let record: serde_json::Value = std::fs::read_dir(dir.path().join("history"))
+        .expect("the history")
+        .flatten()
+        .find_map(|e| std::fs::read_to_string(e.path().join("task.json")).ok())
+        .map(|t| serde_json::from_str(&t).expect("task.json"))
+        .expect("a task.json");
+    let took = record["duration_ms"].as_u64().expect("duration_ms");
+    assert!(took < 1500, "the 2.5s wait counted: {took}ms in {record}");
+    let said = common::closing_line_ms(&text);
+    assert!(
+        said < 1500 && said.abs_diff(took) < 100,
+        "the closing line's {said}ms against the record's {took}ms"
+    );
 }
 
 /// Ctrl+Z, the terminal resized while stopped, then fg: the screen comes

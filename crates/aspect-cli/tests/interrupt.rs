@@ -741,3 +741,44 @@ fn a_tool_a_signal_ends_ends_the_task_with_its_shell_code() {
     assert_eq!(output.status.code(), Some(128 + 9), "{stderr}");
     assert!(!stderr.contains("Traceback"), "{stderr}");
 }
+
+/// A task whose post-task hook is still running when Ctrl+C comes: the body
+/// had ended with 0.
+const HOOKED: &str = r#"
+load("@std//time.axl", "sleep")
+
+def _slow(ctx, outcome):
+    print("ready")
+    sleep(3000)
+
+def _impl(ctx):
+    ctx.hooks.post_task(_slow)
+    return 0
+
+hooked = task(summary = "Test fixture.", implementation = _impl)
+"#;
+
+/// Ctrl+C during a post-task hook, after the body has ended, changes no
+/// outcome: the task exits 0 and its record says it was not cancelled.
+#[test]
+fn a_signal_during_a_post_task_hook_leaves_the_outcome_alone() {
+    let run = Run::start(HOOKED, "hooked");
+    let given = run._dir.path().to_path_buf();
+    let here = std::fs::canonicalize(&given).expect("canonical");
+    run.signal(libc::SIGINT);
+    let (status, stderr) = run.finish();
+    assert_eq!(status.code(), Some(0), "{stderr}");
+    let record = std::fs::read_dir(common::test_history_dir())
+        .expect("the test's history")
+        .flatten()
+        .filter_map(|e| std::fs::read_to_string(e.path().join("task.json")).ok())
+        .filter_map(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+        .find(|t| {
+            t["cwd"].as_str().is_some_and(|c| {
+                std::path::Path::new(c) == here || std::path::Path::new(c) == given
+            })
+        })
+        .unwrap_or_else(|| panic!("no record for {here:?}"));
+    assert_eq!(record["exit_code"], 0, "{record}");
+    assert_eq!(record["cancelled"], false, "{record}");
+}

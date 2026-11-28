@@ -311,3 +311,26 @@ pub fn descendants(pid: u32) -> Vec<u32> {
     }
     out
 }
+
+/// What the closing line says the task took (`→ Passed held task in 3.0s`,
+/// `… (exit 3) in 503ms`), in milliseconds.
+#[allow(dead_code)]
+pub fn closing_line_ms(stderr: &str) -> u64 {
+    let line = stderr
+        .lines()
+        .rev()
+        .find(|l| l.contains(" task") && l.contains(" in "))
+        .unwrap_or_else(|| panic!("no closing line in {stderr:?}"));
+    let took = line
+        .rsplit(" in ")
+        .next()
+        .unwrap()
+        .split_whitespace()
+        .next()
+        .unwrap();
+    if let Some(ms) = took.strip_suffix("ms") {
+        ms.parse().unwrap()
+    } else {
+        (took.strip_suffix('s').unwrap().parse::<f64>().unwrap() * 1000.0) as u64
+    }
+}

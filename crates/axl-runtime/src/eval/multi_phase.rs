@@ -989,15 +989,18 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
             .hooks_value
             .downcast_ref::<TaskHooks>()
             .expect("hooks_value is a TaskHooks");
+        // The screen's waits for its reader before this task, which its
+        // duration leaves out from here on (`reader_wait`).
+        let reader_before = crate::engine::reader_wait();
         hooks.start();
         let body_result = match hooks.run_pre(context, &mut eval) {
             Ok(()) => eval.eval_function(task.implementation(), &[context], &[]),
             Err(e) => Err(e),
         };
         let (mut outcome, ending) = Outcome::resolve(body_result, &self.loader.env.signals);
-        // The task's end in its record: here, before the post-task hooks,
-        // one of which may hold a finished screen up for as long as it is read.
-        let ended = std::time::SystemTime::now();
+        // Whether the run was cancelled is the body's: a signal during a
+        // post-task hook, after the body has ended, changes no outcome.
+        let cancelled = self.loader.env.signals.root().is_cancelled();
         // The body has ended: from here the post-task hooks, defers and
         // bookend run to completion whatever the root token says. Starlark
         // runs the cancel check after every `eval_function`, so an armed
@@ -1018,11 +1021,27 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
         let conclusion = heap.alloc(outcome.to_conclusion());
         hooks.run_post(context, conclusion, &mut eval);
         run_deferred(context, &mut eval);
-        let cancelled = self.loader.env.signals.root().is_cancelled();
+
+        // How long the task ran, for its record and its closing line alike:
+        // to here, its post-task hooks and defers in, but for the time a
+        // screen waited for its reader (the Dashboard's finished screen).
+        // Reads the phases off the heap-allocated TaskInfo too, any phase
+        // still active when `_impl` returned closed so the breakdown is whole.
+        let (elapsed, phases) = {
+            let info = task_info_val
+                .downcast_ref::<TaskInfo>()
+                .expect("task_info_val downcasts to TaskInfo");
+            info.close_active_phase();
+            let held = crate::engine::reader_wait().saturating_sub(reader_before);
+            (
+                info.started_at.elapsed().saturating_sub(held),
+                info.phases.borrow().clone(),
+            )
+        };
         if let Ending::Failed(e) = ending {
             let error = e.to_string();
             self.loader.env.history.end_task(
-                ended,
+                elapsed,
                 None,
                 String::new(),
                 crate::engine::task_record::error_line(&error),
@@ -1031,7 +1050,7 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
             return Err(e.into());
         }
         self.loader.env.history.end_task(
-            ended,
+            elapsed,
             Some(outcome.exit_code.unwrap_or(0)),
             outcome.text.clone(),
             String::new(),
@@ -1043,17 +1062,6 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
             text: conclusion,
             ..
         } = outcome;
-
-        // Reads elapsed + phases off the heap-allocated TaskInfo. Closes
-        // any phase still active when `_impl` returned so the breakdown
-        // is whole.
-        let (elapsed, phases) = {
-            let info = task_info_val
-                .downcast_ref::<TaskInfo>()
-                .expect("task_info_val downcasts to TaskInfo");
-            info.close_active_phase();
-            (info.started_at.elapsed(), info.phases.borrow().clone())
-        };
 
         tracing::Span::current().record("exit_code", exit_code.unwrap_or(0) as i64);
         if let Some(code) = exit_code

@@ -489,12 +489,13 @@ impl RecordFile {
         self.record.lock().unwrap().clone()
     }
 
-    /// The task's end: when (`ended`, its implementation's return, which
-    /// the duration runs to), how it ended (its error and closing line with
-    /// any URL's credentials stripped), the git details if they have come.
+    /// The task's end: how long it ran (`duration`, its closing line's,
+    /// which leaves out the screen held for its reader; `ended` is the start
+    /// and that), how it ended (its error and closing line with any URL's
+    /// credentials stripped), the git details if they have come.
     pub fn end(
         &self,
-        ended: SystemTime,
+        duration: Duration,
         exit_code: Option<u8>,
         conclusion: String,
         error: String,
@@ -509,10 +510,9 @@ impl RecordFile {
             }
             Some(git)
         });
-        let duration = ended.duration_since(self.started).unwrap_or_default();
         self.update(|r| {
             r.status = "ended".into();
-            r.ended = Some(timestamp(ended));
+            r.ended = Some(timestamp(self.started + duration));
             r.duration_ms = Some(duration.as_millis() as u64);
             r.exit_code = exit_code;
             // URL credentials go at once, as the command line's are shown.
@@ -1020,7 +1020,7 @@ mod tests {
         };
         let file = RecordFile::begin(dir.path(), record, None).unwrap();
         file.end(
-            SystemTime::now(),
+            Duration::from_millis(5),
             Some(3),
             "Build failed".into(),
             String::new(),
@@ -1122,7 +1122,7 @@ mod tests {
             })
         });
         file.end(
-            SystemTime::now(),
+            Duration::from_millis(5),
             Some(1),
             "Rejected S3CRET".into(),
             "fail: S3CRET bad".into(),
@@ -1148,7 +1148,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let file = RecordFile::begin(dir.path(), TaskRecord::default(), None).unwrap();
         file.end(
-            SystemTime::now(),
+            Duration::from_millis(5),
             Some(1),
             "Pushed to https://u:tok@reg.example".into(),
             "fail: push to https://u:tok@reg.example failed".into(),
