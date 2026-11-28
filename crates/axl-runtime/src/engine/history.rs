@@ -346,10 +346,13 @@ impl History {
         }
     }
 
-    /// The task has ended: its record says how, with the summaries of its
-    /// builds whose streams are over (one never waited for may not be).
+    /// The task has ended: its record says when (`ended`, its
+    /// implementation's return, before any post-task hook such as a screen
+    /// held up for reading) and how, with the summaries of its builds whose
+    /// streams are over (one never waited for may not be).
     pub fn end_task(
         &self,
+        ended: SystemTime,
         exit_code: Option<u8>,
         conclusion: String,
         error: String,
@@ -364,7 +367,7 @@ impl History {
         let Some(file) = self.task_record.lock().unwrap().take() else {
             return;
         };
-        file.end(exit_code, conclusion, error, cancelled);
+        file.end(ended, exit_code, conclusion, error, cancelled);
         // A run that started no prune (it kept no build's files, or another
         // task had pruned) still caps the records, which runs like it add,
         // unless one did within `every`: a walk of the root's names, cheap
@@ -1095,7 +1098,13 @@ mod tests {
         h.retention.records = 1;
         h.retention.record_age = Duration::from_secs(u32::MAX as u64 * 100);
         h.begin_task(&id(99), TaskStart::default());
-        h.end_task(Some(0), String::new(), String::new(), false);
+        h.end_task(
+            SystemTime::now(),
+            Some(0),
+            String::new(),
+            String::new(),
+            false,
+        );
         let kept: Vec<bool> = (1..=3)
             .map(|n| root.path().join(name(n)).exists())
             .collect();

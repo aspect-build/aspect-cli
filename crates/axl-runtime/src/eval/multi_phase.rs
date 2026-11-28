@@ -995,6 +995,9 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
             Err(e) => Err(e),
         };
         let (mut outcome, ending) = Outcome::resolve(body_result, &self.loader.env.signals);
+        // The task's end in its record: here, before the post-task hooks,
+        // one of which may hold a finished screen up for as long as it is read.
+        let ended = std::time::SystemTime::now();
         // The body has ended: from here the post-task hooks, defers and
         // bookend run to completion whatever the root token says. Starlark
         // runs the cancel check after every `eval_function`, so an armed
@@ -1019,6 +1022,7 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
         if let Ending::Failed(e) = ending {
             let error = e.to_string();
             self.loader.env.history.end_task(
+                ended,
                 None,
                 String::new(),
                 crate::engine::task_record::error_line(&error),
@@ -1027,6 +1031,7 @@ impl<'v, 'l> MultiPhaseEval<'v, 'l> {
             return Err(e.into());
         }
         self.loader.env.history.end_task(
+            ended,
             Some(outcome.exit_code.unwrap_or(0)),
             outcome.text.clone(),
             String::new(),

@@ -489,9 +489,17 @@ impl RecordFile {
         self.record.lock().unwrap().clone()
     }
 
-    /// The task's end: how it ended (its error and closing line with any
-    /// URL's credentials stripped), the git details if they have come.
-    pub fn end(&self, exit_code: Option<u8>, conclusion: String, error: String, cancelled: bool) {
+    /// The task's end: when (`ended`, its implementation's return, which
+    /// the duration runs to), how it ended (its error and closing line with
+    /// any URL's credentials stripped), the git details if they have come.
+    pub fn end(
+        &self,
+        ended: SystemTime,
+        exit_code: Option<u8>,
+        conclusion: String,
+        error: String,
+        cancelled: bool,
+    ) {
         let git = self.git.lock().unwrap().take().and_then(|rx| {
             let GitPart::Head(mut git) = rx.recv_timeout(GIT_WAIT).ok()? else {
                 return None;
@@ -501,11 +509,10 @@ impl RecordFile {
             }
             Some(git)
         });
-        let now = SystemTime::now();
-        let duration = now.duration_since(self.started).unwrap_or_default();
+        let duration = ended.duration_since(self.started).unwrap_or_default();
         self.update(|r| {
             r.status = "ended".into();
-            r.ended = Some(timestamp(now));
+            r.ended = Some(timestamp(ended));
             r.duration_ms = Some(duration.as_millis() as u64);
             r.exit_code = exit_code;
             // URL credentials go at once, as the command line's are shown.
@@ -1012,7 +1019,13 @@ mod tests {
             ..Default::default()
         };
         let file = RecordFile::begin(dir.path(), record, None).unwrap();
-        file.end(Some(3), "Build failed".into(), String::new(), false);
+        file.end(
+            SystemTime::now(),
+            Some(3),
+            "Build failed".into(),
+            String::new(),
+            false,
+        );
         let read = read(file.path()).unwrap();
         assert_eq!(
             (
@@ -1109,6 +1122,7 @@ mod tests {
             })
         });
         file.end(
+            SystemTime::now(),
             Some(1),
             "Rejected S3CRET".into(),
             "fail: S3CRET bad".into(),
@@ -1134,6 +1148,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let file = RecordFile::begin(dir.path(), TaskRecord::default(), None).unwrap();
         file.end(
+            SystemTime::now(),
             Some(1),
             "Pushed to https://u:tok@reg.example".into(),
             "fail: push to https://u:tok@reg.example failed".into(),

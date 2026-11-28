@@ -162,3 +162,57 @@ fn a_spawned_clis_history_is_the_test_processs_own() {
         });
     assert!(recorded, "no entry for {here:?} in {history:?}");
 }
+
+/// A post-task hook that holds the run (as the Dashboard's finished screen
+/// does while it is read) is not the task's time: its record ends where its
+/// implementation returned, with that return's exit code.
+#[test]
+fn a_held_post_task_hook_is_not_in_the_recorded_duration() {
+    const HOLD_MS: u64 = 3000;
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::fs::write(dir.path().join("MODULE.bazel"), "").expect("MODULE.bazel");
+    std::fs::create_dir(dir.path().join(".aspect")).expect(".aspect");
+    std::fs::write(
+        dir.path().join(".aspect/held.axl"),
+        format!(
+            r#"load("@std//time.axl", "sleep")
+
+def _hold(ctx, outcome):
+    sleep({HOLD_MS})
+
+def _impl(ctx):
+    ctx.hooks.post_task(_hold)
+    return 3
+
+held = task(implementation = _impl, summary = "Test fixture.")
+"#
+        ),
+    )
+    .expect("held.axl");
+    let history = dir.path().join("history");
+    let status = Command::new(aspect_cli())
+        .arg("held")
+        .current_dir(dir.path())
+        .env("ASPECT_HISTORY_DIR", &history)
+        .env(
+            "ASPECT_CREDENTIALS_FILE",
+            dir.path().join("credentials.json"),
+        )
+        .env_remove("ASPECT_DEBUG")
+        .status()
+        .expect("running the CLI");
+    assert_eq!(status.code(), Some(3), "{status:?}");
+    let record: serde_json::Value = std::fs::read_dir(&history)
+        .expect("the history")
+        .flatten()
+        .find_map(|e| std::fs::read_to_string(e.path().join("task.json")).ok())
+        .map(|t| serde_json::from_str(&t).expect("task.json"))
+        .expect("a task.json");
+    assert_eq!(record["status"], "ended", "{record}");
+    assert_eq!(record["exit_code"], 3, "{record}");
+    let took = record["duration_ms"].as_u64().expect("duration_ms");
+    assert!(
+        took < HOLD_MS - 1000,
+        "the hold counted: {took}ms in {record}"
+    );
+}
