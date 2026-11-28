@@ -28,16 +28,20 @@ const SETTINGS: &str = "Settings these files would have applied to it may be at 
                         the `WorktreePool` options (`max_slots`, `abandoned_grace_hours`), the \
                         `Worktrees` `score_slot` hooks";
 
-/// The warning's line for the features that are off.
+/// The warning's line for the features that are off once a config failed.
 const FEATURES: &str =
     "Only the `WorktreePool` feature runs, so any hook another feature adds is off.";
+
+/// The end of the warning's line naming the feature files that failed while
+/// every config loaded.
+const MISSING: &str = "define do not run, so any hook they add is off.";
 
 /// What kind of file failed, which decides the warning's lines past the files.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Lost {
     /// Only task files: no line.
     Tasks,
-    /// A feature file, and no config: the features line.
+    /// A feature file, and no config: the line naming the feature files.
     Feature,
     /// A config: the settings line and the features line.
     Config,
@@ -161,8 +165,15 @@ fn assert_warned(out: &Output, file: &str, headline: &str, lost: Lost) {
     );
     assert_eq!(
         stderr.contains(FEATURES),
-        lost != Lost::Tasks,
+        lost == Lost::Config,
         "the features line, for {lost:?}, in:\n{stderr}"
+    );
+    assert_eq!(
+        stderr
+            .lines()
+            .any(|l| l.starts_with("  The features ") && l.contains(file) && l.ends_with(MISSING)),
+        lost == Lost::Feature,
+        "the line naming {file} as a feature file, for {lost:?}, in:\n{stderr}"
     );
     assert!(
         stderr.contains("`ASPECT_DEBUG=1` prints each error in full."),
@@ -251,7 +262,8 @@ fn the_degraded_worktree_commands_run_on_a_config_that_does_not_load() {
 
 /// A task file, a feature file and the user-global config are the workspace's
 /// AXL as much as the repository's `config.axl` is. A task file sets nothing
-/// and a feature file only adds hooks, so neither brings the settings line.
+/// and a feature file only adds hooks, so neither brings the settings line;
+/// the feature file is named as one whose hooks are off.
 #[test]
 fn a_broken_task_feature_or_user_config_does_not_block_it_either() {
     for (path, file, lost) in [
@@ -429,9 +441,11 @@ fn a_broken_task_file_alone_leaves_settings_and_features_alone() {
 
 /// A feature file alone leaves every config loaded, so the grace period a
 /// config sets is known: its 2 hours let `release` end a stopped session's
-/// lease idle for 3, which the 24-hour default would keep. The warning lists
-/// no setting and says the other features are off, and a healthy repository
-/// feature's `score_slot` hook does not run.
+/// lease idle for 3, which the 24-hour default would keep. Which features are
+/// enabled is known too, and one feature cannot change another, so a healthy
+/// repository feature still runs, its `score_slot` hook included. The warning
+/// lists no setting, and names the broken file as a feature file whose hooks
+/// are off.
 #[test]
 fn a_broken_feature_file_alone_keeps_the_configured_grace() {
     let config = "load(\"@aspect//feature/worktree_pool.axl\", \"WorktreePool\")\n\n\
@@ -466,7 +480,11 @@ fn a_broken_feature_file_alone_keeps_the_configured_grace() {
     let added = ws.aspect(&["worktree", "add", "other", "--create", "--output=json"]);
     assert_eq!(added.status.code(), Some(0), "{}", stderr(&added));
     assert_warned(&added, "tools/broken.axl", "Parse error", Lost::Feature);
-    assert!(!stderr(&added).contains("scorer ran"), "{}", stderr(&added));
+    assert!(
+        stderr(&added).contains("scorer ran"),
+        "the healthy feature did not run:\n{}",
+        stderr(&added)
+    );
 
     let released = ws.aspect(&["worktree", "release", "feat", "--output=json"]);
     assert_eq!(

@@ -311,8 +311,6 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
                     unloadable.warn_degraded(entry, &lines);
                     if unloadable.config_lost() {
                         mpe.mark_degraded();
-                    }
-                    if lines.features.is_some() {
                         features_off = Some(entry);
                     }
                 } else if let Some(err) = unloadable.into_error() {
@@ -374,8 +372,8 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
             .map_err(anyhow::Error::from)?;
 
             // Phase 3: run enabled feature impls; in a degraded run whose
-            // config or feature files failed, only the ones its task reads
-            // (see `DegradedLines::of`).
+            // config failed, only the ones its task reads, since that config
+            // may have turned the others off.
             time("features", || {
                 mpe.execute_features_with_args(
                     |f| features_off.is_none_or(|entry| cmd.runs_degraded(entry, f)),
@@ -561,12 +559,14 @@ impl Unloadable {
         !self.configs.is_empty()
     }
 
-    /// Whether a feature file failed, which leaves out the hooks its feature
-    /// would have added. A task file adds none.
-    fn feature_lost(&self) -> bool {
+    /// The feature files that failed, whose features go missing with the
+    /// hooks they would add. A task file adds none.
+    fn lost_feature_files(&self) -> Vec<String> {
         self.scripts
             .iter()
-            .any(|failure| failure.role != AxlFileRole::Tasks)
+            .filter(|failure| failure.role != AxlFileRole::Tasks)
+            .map(|failure| failure.path.display().to_string())
+            .collect()
     }
 
     /// `err`, after reporting everything recorded. The one way to raise an
@@ -676,13 +676,19 @@ impl Unloadable {
                  {settings}."
             );
         }
-        if let Some(features) = &lines.features {
+        if let Some(features) = &lines.running {
             let (noun, verb) = if entry.features.len() == 1 {
                 ("feature", "runs")
             } else {
                 ("features", "run")
             };
             errln!("  Only the {features} {noun} {verb}, so any hook another feature adds is off.");
+        }
+        if !lines.missing.is_empty() {
+            errln!(
+                "  The features {} define do not run, so any hook they add is off.",
+                lines.missing.join(", ")
+            );
         }
         if !lines.ignored.is_empty() {
             errln!(
@@ -744,10 +750,14 @@ impl Unloadable {
 struct DegradedLines {
     /// The settings that may be at their defaults, when a config failed.
     settings: Option<String>,
-    /// The features that still run, when a config failed, which may have
-    /// turned the others off, or a feature file did, whose hooks are gone:
-    /// every other feature is off.
-    features: Option<String>,
+    /// The features that still run, when a config failed: it may have turned
+    /// the others off, so every other feature is off.
+    running: Option<String>,
+    /// The feature files that failed, when every config loaded: the other
+    /// features run as ever, since which are enabled is known and a feature
+    /// cannot change another, and only these files' features and their
+    /// hooks are missing.
+    missing: Vec<String>,
     /// The flags of the features that are off which the command line gave,
     /// as typed. Not the console's, whose flags the runtime reads before the
     /// features run ([`args_read_before_features`]).
@@ -763,18 +773,21 @@ impl DegradedLines {
         entry: &cmd::DegradedCommands,
         matches: Option<&clap::ArgMatches>,
     ) -> Self {
-        let features_off = unloadable.config_lost() || unloadable.feature_lost();
+        if !unloadable.config_lost() {
+            return DegradedLines {
+                missing: unloadable.lost_feature_files(),
+                ..DegradedLines::default()
+            };
+        }
         DegradedLines {
-            settings: unloadable
-                .config_lost()
-                .then(|| cmd.degraded_settings(entry)),
-            features: features_off.then(|| cmd.degraded_features(entry)),
-            ignored: match matches {
-                Some(matches) if features_off => cmd.typed_feature_flags(matches, |f| {
+            settings: Some(cmd.degraded_settings(entry)),
+            running: Some(cmd.degraded_features(entry)),
+            missing: vec![],
+            ignored: matches.map_or_else(Vec::new, |matches| {
+                cmd.typed_feature_flags(matches, |f| {
                     !cmd.runs_degraded(entry, f) && !args_read_before_features(f)
-                }),
-                _ => vec![],
-            },
+                })
+            }),
         }
     }
 }

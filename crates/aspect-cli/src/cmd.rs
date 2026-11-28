@@ -81,8 +81,7 @@ pub struct DegradedCommands {
     pub tasks: &'static [&'static str],
     /// The built-in features that still run for them, by exported name: the
     /// ones whose settings the tasks read. When a config failed, which may
-    /// have turned the others off, or a feature file did, every other feature
-    /// stays off.
+    /// have turned the others off, every other feature stays off.
     pub features: &'static [&'static str],
     /// The settings a config applies to these tasks besides those features'
     /// options, as the degraded run's warning names them.
