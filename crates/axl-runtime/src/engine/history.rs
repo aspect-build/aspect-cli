@@ -470,6 +470,24 @@ impl History {
         scan
     }
 
+    /// The entries from the newest down to `since` (an entry's folder),
+    /// read for this answer alone: what a list that stopped there passed.
+    pub fn scan_since(&self, since: &Path) -> Arc<Scan> {
+        let since = since.file_name();
+        let seen = self
+            .entry_dirs()
+            .into_iter()
+            .take_while(|dir| since.is_none_or(|s| dir.file_name().is_some_and(|n| n >= s)))
+            .map(|dir| {
+                let path = dir.join(task_record::FILE_NAME);
+                let now = file_stamp(&path);
+                let held = read_held(&path);
+                (dir, now, held)
+            })
+            .collect();
+        Arc::new(Scan::of(None, seen))
+    }
+
     /// Every entry's record, read.
     fn scan_whole(&self, stamp: Option<SystemTime>) -> Scan {
         let seen = self
@@ -523,6 +541,15 @@ impl History {
                 .unwrap_or("");
             (dir, version.to_owned())
         })
+    }
+
+    /// The entry's folder of the run `id` names (as [`record`](Self::record)
+    /// finds it) when it is there but its record does not read, of neither
+    /// this schema nor a newer one's, or it has none (yet: a run starting).
+    pub fn unreadable_record(&self, id: &str) -> Option<PathBuf> {
+        let dir = self.entry_of(id).filter(|dir| dir.is_dir())?;
+        let held = read_held(&dir.join(task_record::FILE_NAME));
+        matches!(held, Held::Unreadable | Held::Missing).then_some(dir)
     }
 
     /// The entry's folder for the run `id` names: its task ID ignoring
@@ -1406,6 +1433,43 @@ mod tests {
         assert!(h.record(&id(5)).is_none());
         assert_eq!(h.newer_record(&id(5)), Some((dir, "2099.1.0".to_owned())));
         assert!(h.newer_record(&id(6)).is_none());
+    }
+
+    /// A record that does not read is found by its ID as that; one that
+    /// reads, or a newer CLI's, is not.
+    #[test]
+    fn an_unreadable_record_is_found_as_that() {
+        let root = tempfile::tempdir().unwrap();
+        let h = history(root.path(), 1 << 30, 10);
+        h.begin_task(&id(2), TaskStart::default());
+        let dir = root.path().join(name(4));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join(task_record::FILE_NAME), "not json").unwrap();
+        assert!(h.record(&id(4)).is_none());
+        assert_eq!(h.unreadable_record(&id(4)), Some(dir));
+        assert!(h.unreadable_record(&id(2)).is_none());
+        assert!(h.unreadable_record(&id(9)).is_none());
+    }
+
+    /// Scanned down to an entry, only the entries from the newest to it are
+    /// counted, the newer CLI's among them.
+    #[test]
+    fn a_scan_since_an_entry_counts_down_to_it() {
+        let root = tempfile::tempdir().unwrap();
+        for n in [1, 3] {
+            let dir = root.path().join(name(n));
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(
+                dir.join(task_record::FILE_NAME),
+                format!(r#"{{"schema": {}}}"#, task_record::SCHEMA + 1),
+            )
+            .unwrap();
+        }
+        let h = history(root.path(), 1 << 30, 10);
+        h.begin_task(&id(2), TaskStart::default());
+        let scan = h.scan_since(&root.path().join(name(2)));
+        assert_eq!((scan.entries, scan.newer, scan.records.len()), (2, 1, 1));
+        assert_eq!(h.scan().newer, 2);
     }
 
     /// A run that keeps no history makes nothing in it, a build's included.

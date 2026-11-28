@@ -43,13 +43,23 @@ _page_of = dashboard_render.page_of
 _render = dashboard_render.render
 
 def _workspace_arg(ctx: TaskContext) -> str | None:
-    """`--workspace`'s root: `.` this workspace's (None outside one), a
-    path as given, `""` none (every workspace's runs)."""
+    """`--workspace`'s root: `.` this workspace's ("" outside one), a path
+    as given (`list` resolves it as the CLI does its own root), None for
+    none (every workspace's runs)."""
     if ctx.args.workspace == ".":
-        return _workspace_of(ctx.std) or None
+        return _workspace_of(ctx.std)
     return ctx.args.workspace or None
 
+def _filtered(ctx: TaskContext) -> bool:
+    """Whether `list` was asked for only some runs."""
+    a = ctx.args
+    return bool(a.kind or a.outcome != "all" or a.branch or a.workspace or a.builds)
+
 def _list_impl(ctx: TaskContext) -> int:
+    workspace = _workspace_arg(ctx)
+    if workspace == "":
+        print("error: --workspace=. names the workspace you are in, and %s is in none; give a workspace's root instead" % ctx.std.env.current_dir())
+        return 1
     records = [
         r
         for r in ctx.std.history.list(
@@ -57,15 +67,17 @@ def _list_impl(ctx: TaskContext) -> int:
             kind = ctx.args.kind or None,
             outcome = None if ctx.args.outcome == "all" else ctx.args.outcome,
             branch = ctx.args.branch or None,
-            workspace = _workspace_arg(ctx),
+            workspace = workspace,
             builds = ctx.args.builds,
         )
         if r.get("task", {}).get("id") != ctx.task.id
     ][:ctx.args.limit]
 
     # Records a newer CLI wrote do not read here: said apart from the list,
-    # so a script reading stdout gets the runs alone.
-    newer = ctx.std.history.census().get("newer", 0)
+    # so a script reading stdout gets the runs alone. Counted among the
+    # entries it went through: down to its oldest run when it is full.
+    full = records and len(records) == ctx.args.limit
+    newer = ctx.std.history.census(since = records[-1]["dir"] if full else None).get("newer", 0)
     if newer:
         ctx.std.io.stderr.write("%d run%s from a newer aspect not listed (upgrade to read %s)\n" % (newer, "" if newer == 1 else "s", "it" if newer == 1 else "them"))
     out = ctx.std.io.stdout
@@ -73,7 +85,7 @@ def _list_impl(ctx: TaskContext) -> int:
         out.write(json.encode(records, indent = 2) + "\n")
         return 0
     if not records:
-        out.write("No runs in the history at %s.\n" % ctx.std.history.root())
+        out.write("No runs %s the history at %s.\n" % ("match in" if _filtered(ctx) else "in", ctx.std.history.root()))
         return 0
     for line in list_lines(records):
         out.write(line + "\n")
@@ -88,6 +100,9 @@ def _show_impl(ctx: TaskContext) -> int:
     if record.get("newer"):
         version = (" (%s)" % record["cli_version"]) if record.get("cli_version") else ""
         print("error: run %s was written by a newer aspect%s; upgrade to read it · files: %s" % (id, version, record.get("dir", "")))
+        return 1
+    if record.get("unreadable"):
+        print("error: run %s's record does not read (task.json damaged, or not written yet) · files: %s" % (id, record.get("dir", "")))
         return 1
     out = ctx.std.io.stdout
     if ctx.args.output == "json":

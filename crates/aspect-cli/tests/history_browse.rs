@@ -3,7 +3,8 @@
 //! its own kept in the history, and no `--mouse` flag. On a terminal, a
 //! signal ends it with the shell's code for that signal. `aspect history list`
 //! and `show` print only what they show, and say when a newer aspect wrote a
-//! run they cannot read.
+//! run they cannot read, or its record does not read; `list --workspace`
+//! takes a root however it is spelled.
 
 mod common;
 
@@ -18,22 +19,45 @@ fn run(args: &[&str]) -> (Output, tempfile::TempDir) {
 
 /// [`run`], `seed` first given the history folder to put entries in.
 fn run_with(args: &[&str], seed: impl FnOnce(&std::path::Path)) -> (Output, tempfile::TempDir) {
+    run_in(true, args, seed)
+}
+
+/// [`run_with`], in a workspace (a `MODULE.aspect`) or, without
+/// `workspace`, in a folder that is in none.
+fn run_in(
+    workspace: bool,
+    args: &[&str],
+    seed: impl FnOnce(&std::path::Path),
+) -> (Output, tempfile::TempDir) {
+    let dir = scratch(workspace, seed);
+    (history_in(dir.path(), args), dir)
+}
+
+/// A scratch folder, a workspace (a `MODULE.aspect`) or not, with a history
+/// folder of its own, `seed` given it to put entries in.
+fn scratch(workspace: bool, seed: impl FnOnce(&std::path::Path)) -> tempfile::TempDir {
     let dir = tempfile::tempdir().expect("temp dir");
-    std::fs::write(dir.path().join("MODULE.aspect"), "").expect("MODULE.aspect");
+    if workspace {
+        std::fs::write(dir.path().join("MODULE.aspect"), "").expect("MODULE.aspect");
+    }
     std::fs::create_dir(dir.path().join("history")).expect("history");
     seed(&dir.path().join("history"));
-    let output = Command::new(aspect_cli())
+    dir
+}
+
+/// `aspect history <args>` run in `dir` ([`scratch`]), with piped stdio.
+fn history_in(dir: &std::path::Path, args: &[&str]) -> Output {
+    Command::new(aspect_cli())
         .arg("history")
         .args(args)
-        .current_dir(dir.path())
+        .current_dir(dir)
         .env_clear()
         .envs(base_env())
-        .env("ASPECT_HISTORY_DIR", dir.path().join("history"))
-        .env("HOME", dir.path().join("home"))
+        .env("ASPECT_HISTORY_DIR", dir.join("history"))
+        .env("HOME", dir.join("home"))
         .stdin(Stdio::null())
         .output()
-        .unwrap_or_else(|e| panic!("running `aspect history {}`: {e}", args.join(" ")));
-    (output, dir)
+        .unwrap_or_else(|e| panic!("running `aspect history {}`: {e}", args.join(" ")))
 }
 
 #[test]
@@ -100,11 +124,113 @@ fn list_counts_runs_a_newer_aspect_wrote_and_prints_only_its_list() {
         stderr.contains("1 run from a newer aspect not listed (upgrade to read it)"),
         "{stderr}"
     );
-    assert!(stdout.starts_with("No runs in the history at "), "{stdout}");
+    assert!(
+        stdout.starts_with("No runs match in the history at "),
+        "{stdout}"
+    );
     assert!(
         !stderr.contains("history list task"),
         "no verdict line after list:\n{stderr}"
     );
+}
+
+/// A run of `aspect build` in the scratch workspace (the history folder's
+/// parent, its links resolved, as the CLI records its root).
+fn seed_run(history: &std::path::Path) {
+    let workspace = std::fs::canonicalize(history.parent().unwrap()).expect("workspace");
+    let entry = history.join("20261102T000000000Z-00000000-0000-0000-0000-000000000006");
+    std::fs::create_dir(&entry).expect("entry");
+    let record = format!(
+        r#"{{"schema": 1, "status": "ended", "cli_version": "", "task": {{"id": "00000000-0000-0000-0000-000000000006", "name": "build", "kind": "build"}}, "pid": 1, "argv": ["aspect", "build", "//..."], "argv_redacted": true, "cwd": {ws:?}, "workspace": {ws:?}, "started": "2026-11-02T00:00:00.000Z", "ended": "2026-11-02T00:00:01.000Z", "duration_ms": 1000, "exit_code": 0}}"#,
+        ws = workspace.to_string_lossy()
+    );
+    std::fs::write(entry.join("task.json"), record).expect("task.json");
+}
+
+#[test]
+fn list_takes_a_workspace_however_it_is_spelled() {
+    let dir = scratch(true, seed_run);
+    let links = tempfile::tempdir().expect("temp dir");
+    let name = dir
+        .path()
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let mut spelled = vec![
+        ".".to_owned(),
+        format!("{}/", dir.path().display()),
+        format!("../{name}/"),
+    ];
+    #[cfg(unix)]
+    {
+        let link = links.path().join("ws");
+        std::os::unix::fs::symlink(dir.path(), &link).expect("link");
+        spelled.push(link.display().to_string());
+    }
+    for workspace in spelled {
+        let output = history_in(dir.path(), &["list", &format!("--workspace={workspace}")]);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stdout.contains("00000000"),
+            "--workspace={workspace}: {stdout}{stderr}"
+        );
+    }
+    for filter in ["--workspace=/nowhere", "--kind=test"] {
+        let output = history_in(dir.path(), &["list", filter]);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.starts_with("No runs match in the history at "),
+            "{filter}: {stdout}"
+        );
+    }
+}
+
+#[test]
+fn list_counts_newer_runs_only_among_those_it_went_through() {
+    let dir = scratch(true, |h| {
+        seed_newer(h);
+        seed_run(h);
+    });
+    let note = "1 run from a newer aspect not listed";
+    let full = history_in(dir.path(), &["list", "--limit=1"]);
+    let stderr = String::from_utf8_lossy(&full.stderr);
+    assert!(
+        !stderr.contains(note),
+        "an older run past the limit: {stderr}"
+    );
+    let all = history_in(dir.path(), &["list"]);
+    let stderr = String::from_utf8_lossy(&all.stderr);
+    assert!(stderr.contains(note), "{stderr}");
+}
+
+#[test]
+fn list_of_this_workspace_outside_one_is_an_error() {
+    let (output, _dir) = run_in(false, &["list", "--workspace=."], seed_run);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    assert!(
+        stderr.contains("--workspace=. names the workspace you are in, and "),
+        "{stderr}"
+    );
+    assert!(output.stdout.is_empty());
+}
+
+#[test]
+fn show_says_a_record_does_not_read() {
+    let entry = "20261103T000000000Z-00000000-0000-0000-0000-000000000007";
+    let (output, dir) = run_with(&["show", "00000000-0000-0000-0000-000000000007"], |h| {
+        std::fs::create_dir(h.join(entry)).expect("entry");
+        std::fs::write(h.join(entry).join("task.json"), "not json").expect("task.json");
+    });
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    let want = format!(
+        "run 00000000-0000-0000-0000-000000000007's record does not read (task.json damaged, or not written yet) · files: {}",
+        dir.path().join("history").join(entry).display()
+    );
+    assert!(stderr.contains(&want), "{stderr}");
 }
 
 #[test]

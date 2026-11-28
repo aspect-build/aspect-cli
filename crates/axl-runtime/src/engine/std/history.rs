@@ -47,6 +47,22 @@ impl<'v> StarlarkValue<'v> for History {
 
 starlark_simple_value!(History);
 
+/// A workspace's root as a record names it (`std.env.bazel_root_dir()`, as
+/// the CLI resolves it): absolute, from the current directory, its symbolic
+/// links resolved, without a trailing `/`; one that does not resolve (since
+/// removed) only absolute.
+fn workspace_root(workspace: &str) -> String {
+    let path = std::path::absolute(workspace).unwrap_or_else(|_| workspace.into());
+    let path = std::fs::canonicalize(&path).unwrap_or(path);
+    let text = path.to_string_lossy();
+    let trimmed = text.trim_end_matches(['/', '\\']);
+    if trimmed.is_empty() {
+        text.into_owned()
+    } else {
+        trimmed.to_owned()
+    }
+}
+
 /// Whether `folder`, a build's folder as a record names it, is a path inside
 /// its entry: plain names only, none empty, absolute, `.` or `..`.
 fn within_entry(folder: &str) -> bool {
@@ -172,8 +188,9 @@ fn history_methods(registry: &mut MethodsBuilder) {
     /// The records of past runs, newest first: at most `limit` of them, only
     /// those of task `kind`, those that ended `outcome` (`ok`, `failed`,
     /// `error`, `cancelled`, `running`, `abandoned`), those run on git
-    /// `branch` and those run in `workspace` (its root, as
-    /// `std.env.bazel_root_dir()` gives it), when given, and with `builds`,
+    /// `branch` and those run in `workspace` (a path to its root, resolved as
+    /// `std.env.bazel_root_dir()` gives it: absolute, from the current
+    /// directory, links resolved, no trailing `/`), when given, and with `builds`,
     /// only those that started Bazel. Each is a dict, as `task.json` has it,
     /// its command line redacted, with `dir` (the entry's folder), `outcome`,
     /// and each build's `build_events` (its kept stream, for
@@ -191,7 +208,7 @@ fn history_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = named, default = false)] builds: bool,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<Vec<Value<'v>>> {
-        let workspace = workspace.into_option();
+        let workspace = workspace.into_option().map(|w| workspace_root(&w));
         let history = RuntimeEnv::from_eval(eval)?.history.clone();
         let (kind, wanted, branch) = (
             kind.into_option(),
@@ -239,12 +256,20 @@ fn history_methods(registry: &mut MethodsBuilder) {
     /// wrote, of a schema this one skips; and `unreadable`, those whose
     /// record is there but does not read. It reads every record once, and `list` and
     /// later calls answer from that read, a record rewritten since (a run
-    /// that ended) read again.
+    /// that ended) read again. With `since` (an entry's folder, as a
+    /// record's `dir` names it), only the entries from the newest down to
+    /// it, read for this answer alone: what a `list` that stopped there
+    /// passed.
     fn census<'v>(
         #[allow(unused)] this: values::Value<'v>,
+        #[starlark(require = named, default = NoneOr::None)] since: NoneOr<String>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<Value<'v>> {
-        let scan = RuntimeEnv::from_eval(eval)?.history.scan();
+        let history = &RuntimeEnv::from_eval(eval)?.history;
+        let scan = match since.into_option() {
+            Some(since) => history.scan_since(std::path::Path::new(&since)),
+            None => history.scan(),
+        };
         Ok(eval.heap().alloc(serde_json::json!({
             "runs": scan.records.len(),
             "without_record": scan.without_record,
@@ -308,7 +333,8 @@ fn history_methods(registry: &mut MethodsBuilder) {
     /// named `id`), as `list` gives it; None when it is not kept. A record a
     /// newer CLI wrote, of a schema this one cannot read, is a dict of only
     /// `dir`, `cli_version` (the version that wrote it, "" when unknown) and
-    /// `newer` (True).
+    /// `newer` (True); one whose record does not read, or that has none yet,
+    /// of only `dir` and `unreadable` (True).
     fn get<'v>(
         #[allow(unused)] this: values::Value<'v>,
         #[starlark(require = pos)] id: &str,
@@ -319,12 +345,18 @@ fn history_methods(registry: &mut MethodsBuilder) {
             let gone = abandoned(&dir, &record);
             return Ok(NoneOr::Other(eval.heap().alloc(shown(&dir, &record, gone))));
         }
-        Ok(NoneOr::from_option(history.newer_record(id).map(
-            |(dir, version)| {
+        if let Some((dir, version)) = history.newer_record(id) {
+            return Ok(NoneOr::Other(eval.heap().alloc(serde_json::json!({
+                "dir": dir.to_string_lossy(),
+                "cli_version": version,
+                "newer": true,
+            }))));
+        }
+        Ok(NoneOr::from_option(history.unreadable_record(id).map(
+            |dir| {
                 eval.heap().alloc(serde_json::json!({
                     "dir": dir.to_string_lossy(),
-                    "cli_version": version,
-                    "newer": true,
+                    "unreadable": true,
                 }))
             },
         )))
@@ -409,6 +441,26 @@ mod tests {
         assert!(shown["bazel"][2].get("build_events").is_some(), "{shown}");
         assert!(!super::unlinked(&entry, "bazel/1/x"));
         assert!(super::unlinked(&entry, "bazel/3/missing"));
+    }
+
+    /// A workspace a list is filtered by reads as its root as a record names
+    /// it: absolute, its links resolved, no trailing `/`.
+    #[cfg(unix)]
+    #[test]
+    fn a_workspace_reads_as_its_resolved_root() {
+        let root = tempfile::tempdir().unwrap();
+        let real = std::fs::canonicalize(root.path()).unwrap().join("ws");
+        std::fs::create_dir_all(&real).unwrap();
+        std::os::unix::fs::symlink(&real, root.path().join("link")).unwrap();
+        let want = real.to_string_lossy().into_owned();
+        let linked = format!("{}/link/", root.path().display());
+        assert_eq!(super::workspace_root(&linked), want);
+        assert_eq!(super::workspace_root(&want), want);
+        assert_eq!(super::workspace_root(&format!("{want}/")), want);
+        assert_eq!(super::workspace_root("/gone/ws/"), "/gone/ws");
+        assert_eq!(super::workspace_root("/"), "/");
+        let here = std::fs::canonicalize(".").unwrap();
+        assert_eq!(super::workspace_root("."), here.to_string_lossy());
     }
 
     /// A long output is read from its first whole line in the limit, a line
