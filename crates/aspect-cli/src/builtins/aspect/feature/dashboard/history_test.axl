@@ -487,6 +487,13 @@ def _test_broken_runs(ctx):
     use_kept_logs(kept, "/h/e", {"summary": {"failures": [{"kind": "action", "label": "//a:a", "detail": "Genrule", "logs": ["../outside/secret.txt"]}]}}, actions = [{"label": "//o:o", "mnemonic": "Genrule", "success": True, "stderr": "../../other/stderr"}], folder = "/h/e/bazel/1")
     _eq("a summary's log outside the entry is not taken", kept["fails"][0]["files"], [("stderr", "file:///out/a")])
     _eq("nor an index's", kept["outputs"][0]["files"], [])
+    tree = {"/h/e/bazel": "dir", "/h/e/bazel/1": "dir", "/h/e/bazel/1/x.log": "file", "/h/e/bazel/1/sym.txt": "link", "/h/e/out": "link", "/h/e/bazel/1/actions": "dir", "/h/e/bazel/1/actions/up": "link"}
+    fs = struct(try_metadata = lambda p: struct(is_symlink = tree[p] == "link", is_dir = tree[p] == "dir") if p in tree else None)
+    _eq("looking, a file inside the entry, or one not there", (within("/h/e", "bazel/1/x.log", fs), within("/h/e", "bazel/1/gone.log", fs)), ("/h/e/bazel/1/x.log", "/h/e/bazel/1/gone.log"))
+    _eq("none through a symbolic link, the file or a folder", [within("/h/e", p, fs) for p in ["bazel/1/sym.txt", "out/secret.txt"]], [None, None])
+    linked = {"fs": fs, "fails": [{"kind": "action", "label": "//a:a", "detail": "Genrule", "success": False, "files": []}], "outputs": [{"kind": "action", "label": "//o:o", "detail": "Genrule", "success": True, "files": []}]}
+    use_kept_logs(linked, "/h/e", {"summary": {"failures": [{"kind": "action", "label": "//a:a", "detail": "Genrule", "logs": ["bazel/1/sym.txt"]}]}}, actions = [{"label": "//o:o", "mnemonic": "Genrule", "success": True, "stderr": "actions/up/stderr"}], folder = "/h/e/bazel/1")
+    _eq("a summary's log through a link is not taken, nor an index's", (linked["fails"][0]["files"], linked["outputs"][0]["files"]), ([], []))
 
 def _test_notes(ctx):
     """`aspect history browse`'s state times its notes by its own clock, so

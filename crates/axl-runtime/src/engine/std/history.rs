@@ -55,11 +55,22 @@ fn within_entry(folder: &str) -> bool {
         .all(|name| !name.is_empty() && name != "." && name != "..")
 }
 
+/// Whether `rel`, a path inside the entry `dir`, reaches its file through no
+/// symbolic link: one planted in an entry could name a file outside it.
+fn unlinked(dir: &std::path::Path, rel: &str) -> bool {
+    let mut at = dir.to_path_buf();
+    rel.split(['/', '\\']).all(|name| {
+        at.push(name);
+        !std::fs::symlink_metadata(&at).is_ok_and(|m| m.file_type().is_symlink())
+    })
+}
+
 /// A record as handed out: redacted, with its folder (`dir`), how it ended
 /// (`outcome`, from `abandoned`, which the caller reads once per record so
 /// the two agree), a `running` one whose process is gone marked `abandoned`,
 /// and each build's kept stream (`build_events`) where its folder has one; a
-/// build folder that would leave the entry (`within_entry`) is not looked in.
+/// build folder that would leave the entry (`within_entry`), or a stream
+/// reached through a symbolic link (`unlinked`), is not looked in.
 fn shown(dir: &std::path::Path, record: &TaskRecord, abandoned: bool) -> serde_json::Value {
     let mut value = serde_json::to_value(record.redacted()).unwrap_or_default();
     value["dir"] = dir.to_string_lossy().into_owned().into();
@@ -71,11 +82,12 @@ fn shown(dir: &std::path::Path, record: &TaskRecord, abandoned: bool) -> serde_j
     // `bazel.build_events.read`.
     if let Some(builds) = value.get_mut("bazel").and_then(|b| b.as_array_mut()) {
         for (build, kept) in builds.iter_mut().zip(&record.bazel) {
+            let stream = bazel::bes::binary_file::FILE_NAME;
             let file = kept
                 .folder
                 .as_ref()
-                .filter(|f| within_entry(f))
-                .map(|f| dir.join(f).join(bazel::bes::binary_file::FILE_NAME))
+                .filter(|f| within_entry(f) && unlinked(dir, &format!("{f}/{stream}")))
+                .map(|f| dir.join(f).join(stream))
                 .filter(|f| f.is_file());
             if let Some(file) = file {
                 build["build_events"] = file.to_string_lossy().into_owned().into();
@@ -263,6 +275,9 @@ fn history_methods(registry: &mut MethodsBuilder) {
                 anyhow::anyhow!("read_output: expected a record from list() or get()")
             })?;
         let path = std::path::Path::new(&dir).join(crate::out::OUTPUT_ANSI);
+        if !unlinked(std::path::Path::new(&dir), crate::out::OUTPUT_ANSI) {
+            return Ok(NoneOr::None);
+        }
         let Ok(file) = std::fs::File::open(&path) else {
             return Ok(NoneOr::None);
         };
@@ -362,6 +377,38 @@ mod tests {
         };
         let shown = super::shown(&entry, &record, false);
         assert!(shown["bazel"][0].get("build_events").is_none(), "{shown}");
+    }
+
+    /// A build folder, or its stream, that is a symbolic link inside the
+    /// entry is not looked in either: it could name another entry's.
+    #[cfg(unix)]
+    #[test]
+    fn a_build_folder_through_a_symbolic_link_is_not_looked_in() {
+        let root = tempfile::tempdir().unwrap();
+        let entry = root.path().join("entry");
+        let other = root.path().join("other/bazel/1");
+        std::fs::create_dir_all(entry.join("bazel/2")).unwrap();
+        std::fs::create_dir_all(entry.join("bazel/3")).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        let stream = bazel::bes::binary_file::FILE_NAME;
+        std::fs::write(other.join(stream), b"").unwrap();
+        std::fs::write(entry.join("bazel/3").join(stream), b"").unwrap();
+        std::os::unix::fs::symlink(&other, entry.join("bazel/1")).unwrap();
+        std::os::unix::fs::symlink(other.join(stream), entry.join("bazel/2").join(stream)).unwrap();
+        let build = |folder: &str| crate::engine::task_record::BazelRecord {
+            folder: Some(folder.into()),
+            ..Default::default()
+        };
+        let record = crate::engine::task_record::TaskRecord {
+            bazel: vec![build("bazel/1"), build("bazel/2"), build("bazel/3")],
+            ..Default::default()
+        };
+        let shown = super::shown(&entry, &record, false);
+        assert!(shown["bazel"][0].get("build_events").is_none(), "{shown}");
+        assert!(shown["bazel"][1].get("build_events").is_none(), "{shown}");
+        assert!(shown["bazel"][2].get("build_events").is_some(), "{shown}");
+        assert!(!super::unlinked(&entry, "bazel/1/x"));
+        assert!(super::unlinked(&entry, "bazel/3/missing"));
     }
 
     /// A long output is read from its first whole line in the limit, a line

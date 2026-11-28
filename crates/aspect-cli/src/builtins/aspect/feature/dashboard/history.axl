@@ -671,12 +671,23 @@ def ctrl_c(state: dict) -> bool:
         state["screen"].interrupt()
     return False
 
-def _within(dir: str, rel) -> str | None:
+def _within(dir: str, rel, fs = None) -> str | None:
     """`dir` + `/` + `rel`, a path a record names inside its entry (`dir`):
-    None for one that is not a string, is empty or absolute, or climbs out
-    (a `..`), so a record cannot show a file outside its run's."""
+    None for one that is not a string, is empty or absolute, climbs out (a
+    `..`), or, with `fs` (`std.fs`) to look, reaches its file through a
+    symbolic link, so a record cannot show a file outside its run's."""
     if type(rel) != "string" or not rel or rel.startswith("/") or ".." in rel.split("/"):
         return None
+    at = dir
+    for name in (rel.split("/") if fs != None else []):
+        at += "/" + name
+        found = fs.try_metadata(at)
+        if found == None:
+            break
+        if found.is_symlink:
+            return None
+        if not found.is_dir:
+            break
     return dir + "/" + rel
 
 def _is_test_log(name: str) -> bool:
@@ -697,13 +708,13 @@ def _summary_failures(build: dict) -> list:
     failures = summary.get("failures") if type(summary) == "dict" else None
     return [f for f in failures if type(f) == "dict"] if type(failures) == "list" else []
 
-def _kept_files(dir: str, logs, kind: str) -> list:
+def _kept_files(dir: str, logs, kind: str, fs = None) -> list:
     """A summary failure's `logs` as `(name, "kept:<path>")` files inside its
-    entry `dir` (`_within`; any other left out), a test's `test.log` alone,
-    as the live record has."""
+    entry `dir` (`_within`, looking with `fs`; any other left out), a test's
+    `test.log` alone, as the live record has."""
     files = []
     for log in (logs if type(logs) == "list" else []):
-        path = _within(dir, log)
+        path = _within(dir, log, fs)
         if path == None:
             continue
         name = path.rpartition("/")[2]
@@ -711,10 +722,11 @@ def _kept_files(dir: str, logs, kind: str) -> list:
             files.append((name, "kept:" + path))
     return files
 
-def _summary_records(dir: str, build: dict) -> list:
+def _summary_records(dir: str, build: dict, fs = None) -> list:
     """Failure records from a build's summary in its record, for a build
     whose event stream was cut short before them: each a past run's, its
-    logs the history's copies inside its entry `dir` (`_kept_files`)."""
+    logs the history's copies inside its entry `dir` (`_kept_files`,
+    looking with `fs`)."""
     out = []
     for f in _summary_failures(build):
         kind = "test" if f.get("kind") == "test" else "action"
@@ -723,7 +735,7 @@ def _summary_records(dir: str, build: dict) -> list:
             "kind": kind,
             "label": str(f.get("label", "")),
             "detail": str(f.get("detail", "") or ("attempt %d" % attempt[2] if kind == "test" else "Action")),
-            "files": _kept_files(dir, f.get("logs"), kind),
+            "files": _kept_files(dir, f.get("logs"), kind, fs),
             "output": "",
             "config": "",
             "success": False,
@@ -747,7 +759,8 @@ def use_kept_logs(state: dict, dir: str, build: dict, actions: list = [], folder
     """Point each failure of a past run's `build` at the logs the history
     kept for it (its summary's, inside its entry `dir`, `_kept_files`),
     matched by label and the action's mnemonic or the test attempt, in
-    order, a failure that kept none holding its place. Point each action
+    order, a failure that kept none holding its place; `_within` looks with
+    the state's `fs`, where it has one. Point each action
     that wrote output at the logs its build's `actions.json` lists
     (`actions`, its entries; `folder`, where it is, each log inside it,
     `_within`), those that succeeded, matched by label and mnemonic in
@@ -760,7 +773,7 @@ def use_kept_logs(state: dict, dir: str, build: dict, actions: list = [], folder
     for f in _summary_failures(build):
         attempt = f.get("attempt")
         key = (f.get("kind", ""), f.get("label", ""), tuple(attempt) if type(attempt) == "list" and attempt else f.get("detail", ""))
-        kept.setdefault(key, []).append(_kept_files(dir, f.get("logs"), f.get("kind", "")))
+        kept.setdefault(key, []).append(_kept_files(dir, f.get("logs"), f.get("kind", ""), state.get("fs")))
     for record in state["fails"]:
         record["past"] = True
         record["indexed"] = indexed.get(record["kind"], False)
@@ -786,7 +799,7 @@ def use_kept_logs(state: dict, dir: str, build: dict, actions: list = [], folder
         entries = listed.get((record["label"], record["detail"]))
         a = entries.pop(0) if entries else None
         if a:
-            files = [(name, "kept:" + _within(folder, a[name])) for name in ("stderr", "stdout") if _within(folder, a.get(name)) != None]
+            files = [(name, "kept:" + _within(folder, a[name])) for name in ("stderr", "stdout") if _within(folder, a.get(name), state.get("fs")) != None]
             if files:
                 record["files"] = files
 
@@ -830,7 +843,7 @@ def _replay_build(s: dict, record: dict, build: dict, events: str) -> None:
         # Cut short before its failures came, the record's summary of them.
         s["stream_cut"] = True
         if not s["fails"]:
-            s["fails"] = _summary_records(record.get("dir", ""), build)
+            s["fails"] = _summary_records(record.get("dir", ""), build, s.get("fs"))
     code = build.get("exit_code")
     s["build_failed"] = code not in (None, 0)
     s["bazel_exit"] = code if type(code) == "int" else None
