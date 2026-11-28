@@ -1,0 +1,43 @@
+exit 1
+── Failures (3) ──
+✗ @@ext+//s:z  loading · d/BUILD.bazel:3:8
+  │ no such target '@@ext+//s:z': target 'z' not declared in package 's' defined by
+  │   ${OUTPUT_BASE}/external/ext+/s/BUILD.bazel
+  ○ blocked: //d:f
+
+✗ @@ext+//q:x  loading · ${OUTPUT_BASE}/external/ext+/q/BUILD.bazel:1:8
+  │ its package has an error
+  │ @@ext+//q:x: no such attribute 'bogus' in 'genrule' rule
+  ○ blocked: //d:d
+
+✗ @@ext+//r:y  loading · d/BUILD.bazel:2:8
+  │ no such target '@@ext+//r:y': target 'y' not declared in package 'r' defined by
+  │   ${OUTPUT_BASE}/external/ext+/r/BUILD.bazel
+  ○ blocked: //d:e
+
+── Other errors from Bazel ──
+ERROR: Traceback (most recent call last):
+  │         File "${OUTPUT_BASE}/external/ext+/s/BUILD.bazel", line 2, column 10, in <toplevel>
+  │                 bad_macro(name = "m")
+  │ …
+  │ Error in fail: bad_macro refuses m
+ERROR: Traceback (most recent call last):
+  │         File "${OUTPUT_BASE}/external/ext+/r/BUILD.bazel", line 2, column 2, in <toplevel>
+  │                 m(name = "y")
+  │ …
+  │ Error in fail: ext macro refuses y
+0 built, 3 failed, 3 blocked · 0 tests passed, 0 failed · Bazel's raw log: ${FIXTURE}/9.3.3.console
+All of it: aspect history show t-replay
+--- Failures tab
+✗ @@ext+//s:z  loading · d/BUILD.bazel:3:8
+  │ no such target '@@ext+//s:z': target 'z' not declared in package 's' defined by ${OUTPUT_BASE}/external/ext+/s/BUIL…
+✗ @@ext+//q:x  loading · ${OUTPUT_BASE}/external/ext+/q/BUILD.bazel:1:8
+  │ its package has an error
+  │ @@ext+//q:x: no such attribute 'bogus' in 'genrule' rule
+✗ @@ext+//r:y  loading · d/BUILD.bazel:2:8
+  │ no such target '@@ext+//r:y': target 'y' not declared in package 'r' defined by ${OUTPUT_BASE}/external/ext+/r/BUIL…
+○ //d:e  blocked by @@ext+//r:y
+○ //d:d  blocked by @@ext+//q:x
+○ //d:f  blocked by @@ext+//s:z
+! Traceback (most recent call last):
+! Traceback (most recent call last):

@@ -123,7 +123,7 @@ def _test_package_errors_claim(ctx):
     state = _ended(ctx, [_aborted("configured_label", "//a:b", "")], _error("/ws/a/BUILD:2:8: //a:b: no such attribute 'bogus' in 'genrule' rule") + _redrawn(_error("package contains errors: a: //a:b: no such attribute 'bogus' in 'genrule' rule")))
     _eq("both lines are Bazel's", len(state["collected_errors"]["blocks"]), 2)
     _eq("a package's repeat is claimed", failure_ties.console_ties(state)["others"], [])
-    state = _ended(ctx, [_aborted("configured_label", "@@ext+//a:b", "")], _error("/ws/a/BUILD:2:8: @@ext+//a:b: no such attribute 'bogus' in 'genrule' rule") + _redrawn(_error("package contains errors: @@ext+//a: @@ext+//a:b: no such attribute 'bogus' in 'genrule' rule")))
+    state = _ended(ctx, [_aborted("configured_label", "@@ext+//a:b", "")], _error("/ws/a/BUILD:2:8: @@ext+//a:b: no such attribute 'bogus' in 'genrule' rule") + _redrawn(_error("package contains errors: a: @@ext+//a:b: no such attribute 'bogus' in 'genrule' rule")))
     _eq("an external repository's repeat too", failure_ties.console_ties(state)["others"], [])
     state = _ended(ctx, [_aborted("configured_label", "//a:b", "")], _error("package contains errors: c: something else"))
     _eq("another package's is Bazel's other error", [o["lines"][0] for o in failure_ties.console_ties(state)["others"]], ["package contains errors: c: something else"])
@@ -145,7 +145,7 @@ def _test_restated_traceback(ctx):
     _eq("quoted by its package's entry: no other error", failure_ties.console_ties(state)["others"], [])
     state = _ended(ctx, [_aborted("configured_label", "//other:m", description)], restated)
     _eq("quoted by another package's: listed", len(failure_ties.console_ties(state)["others"]), 1)
-    state = _ended(ctx, [_aborted("configured_label", "@@ext+//mf:m", description)], _error("package contains errors: @@ext+//mf: " + traceback) + body)
+    state = _ended(ctx, [_aborted("configured_label", "@@ext+//mf:m", description)], _error("package contains errors: mf: " + traceback) + body)
     _eq("an external repository's package, as Bazel names it", failure_ties.console_ties(state)["others"], [])
 
 def _test_bzl_traceback(ctx):

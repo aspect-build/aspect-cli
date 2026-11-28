@@ -1,0 +1,2 @@
+def m(name):
+    fail("ext macro refuses " + name)

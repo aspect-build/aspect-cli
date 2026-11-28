@@ -1,0 +1,3 @@
+genrule(name = "d", srcs = ["@ext//q:x"], outs = ["d.out"], cmd = "cat $(SRCS) > $@")
+genrule(name = "e", srcs = ["@ext//r:y"], outs = ["e.out"], cmd = "cat $(SRCS) > $@")
+genrule(name = "f", srcs = ["@ext//s:z"], outs = ["f.out"], cmd = "cat $(SRCS) > $@")
