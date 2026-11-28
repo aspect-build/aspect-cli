@@ -1,0 +1,283 @@
+"""Unit tests for lib/path_glob.axl.
+
+Run with:
+  aspect dev test-path-glob
+"""
+
+load("./path_glob.axl", "match_any", "match_path")
+
+def _eq(label, got, want):
+    if got != want:
+        fail("%s: got %r, want %r" % (label, got, want))
+
+def _check(cases):
+    for pattern, path, want in cases:
+        _eq("%r ~ %r" % (pattern, path), match_path(pattern, path), want)
+
+def _test_literals(_ctx):
+    _check([
+        ("foo", "foo", True),
+        ("foo", "Foo", False),
+        ("foo", "foobar", False),
+        ("a/b", "a/b", True),
+        ("a/b", "a/b/c", False),
+        ("a/b/c", "a/b", False),
+        ("foo/", "foo", True),
+        ("", "a", False),
+        ("", "", False),
+        ("/", "", False),
+    ])
+
+def _test_wildcards(_ctx):
+    # `*<suffix>` is a suffix check; the rest backtrack, including names long
+    # enough to need more iterations than len(pat) + len(name).
+    _check([
+        ("*", "foo", True),
+        ("*", "", True),
+        ("*", "a/foo", False),
+        ("*.lock", "Cargo.lock", True),
+        ("*.lock", "Cargo.lockfile", False),
+        ("*.lock", "subdir/Cargo.lock", False),
+        ("*.generated.go", "foo.generated.go", True),
+        ("*.generated.go", "Foo.Generated.Go", False),
+        ("*b", "b" * 11, True),
+        ("*b", "b" * 64, True),
+        ("*b", "aaaaaaaaaab", True),
+        ("?ar", "bar", True),
+        ("?ar", "ar", False),
+        ("?ar", "bar/baz", False),
+        ("?", "ab", False),
+        ("*?", "a" * 11, True),
+        ("*?", "a" * 32, True),
+        ("*?", "", False),
+        ("*?b", "a" * 32 + "b", True),
+        ("a*", "abc", True),
+        ("a*", "ba", False),
+        ("a*b?c", "aXbYc", True),
+        ("a*b?c", "abc", False),
+        ("*a*", "bab", True),
+        ("a**b", "aXYb", True),
+        ("a**b", "a/b", False),
+        ("vendor/*", "vendor/foo", True),
+        ("vendor/*", "vendor/foo/bar", False),
+    ])
+
+def _test_double_star(_ctx):
+    _check([
+        # Leading.
+        ("**/foo", "foo", True),
+        ("**/foo", "a/foo", True),
+        ("**/foo", "a/b/c/foo", True),
+        ("**/foo", "foo/bar", False),
+        ("**/*.bzl", "a/b/defs.bzl", True),
+        ("**/*.generated.go", "a/b/foo.generated.go", True),
+        ("**/BUILD", "a/BUILD.bazel", False),
+        ("**/a/*", "a", False),
+        ("**/a/*", "x/a/b", True),
+        # Trailing: at least one segment.
+        ("vendor/**", "vendor/foo", True),
+        ("vendor/**", "vendor/foo/bar/baz", True),
+        ("vendor/**", "vendor", False),
+        ("vendor/**/", "vendor/foo", True),
+        # Middle.
+        ("a/**/b", "a/b", True),
+        ("a/**/b", "a/x/b", True),
+        ("a/**/b", "a/x/y/b", True),
+        ("a/**/b", "a/x", False),
+        ("a/**/b", "b", False),
+        ("a/**/b/*.c", "a/q/b/c.c", True),
+        ("a/**/b/*.c", "a/q/b/d/c.c", False),
+        # Alone, and twice in a row.
+        ("**", "foo", True),
+        ("**", "a/b/c", True),
+        ("**/**", "a", True),
+        ("**/**/a", "a", True),
+        # Several: every `**` but the last tries each split.
+        ("**/x/**/y", "q/x/r/s/y", True),
+        ("**/x/**/y", "x/y", True),
+        ("**/x/**/y", "q/y", False),
+        ("**/x/**/y", "y/x", False),
+        ("**/x/**/x", "x", False),
+        ("**/x/**/x", "q/x/x", True),
+        ("**/x/**/x", "x/q/x", True),
+        ("a/**/b/**/c", "a/b/c", True),
+        ("a/**/b/**/c", "a/1/b/2/3/c", True),
+        ("a/**/b/**/c", "a/c/b", False),
+        ("**/x/**", "q/x/r", True),
+        ("**/x/**", "q/x", False),
+        ("**/testdata/**/*.golden", "crates/c/tests/testdata/failures/uni/9.3.3.golden", True),
+    ])
+
+def _test_empty_segments(_ctx):
+    _check([
+        ("a//b", "a//b", True),
+        ("a//b", "a/b", False),
+        ("/a", "/a", True),
+        ("/a", "a", False),
+        ("/**", "/a", True),
+        ("/**", "a", False),
+        ("/a/**", "/a/b", True),
+        ("**//a", "x//a", True),
+        ("**//a", "x/a", False),
+        ("*/a", "/a", True),
+        ("?/a", "/a", False),
+    ])
+
+def _test_dotfiles(_ctx):
+    _check([
+        ("*", ".bazelrc", True),
+        ("*.axl", ".axl", True),
+        (".*", ".bazelrc", True),
+        (".*", "bazelrc", False),
+        ("?bazelrc", ".bazelrc", True),
+        ("**/.bazelrc", "a/.bazelrc", True),
+        ("**/.bazelrc", "a/bazelrc", False),
+        ("**/*.bzl", ".hidden/defs.bzl", True),
+        (".github/**", ".github/workflows/ci.yaml", True),
+        ("**/.*/*.yaml", "x/.github/ci.yaml", True),
+    ])
+
+def _test_match_any(_ctx):
+    _eq("first matches", match_any(["*.lock", "vendor/**"], "Cargo.lock"), True)
+    _eq("second matches", match_any(["*.lock", "vendor/**"], "vendor/foo/bar"), True)
+    _eq("none matches", match_any(["*.lock", "vendor/**"], "src/main.rs"), False)
+    _eq("no patterns", match_any([], "anything"), False)
+    _eq("any of them", match_any(["**/BUILD", "**/*.axl"], "a/b/c.axl"), True)
+
+def _reference_chars(pat: str, name: str, literal_empty: bool) -> bool:
+    """Backtracking segment match with none of `_match_chars`' shortcuts.
+
+    With `literal_empty`, an empty pattern segment matches an empty name, as
+    match_path's does; without it, an empty segment matches nothing.
+    """
+    if literal_empty and not pat:
+        return not name
+    pi = 0
+    ni = 0
+    star_pi = -1
+    star_ni = 0
+    for _ in range(len(pat) * len(name) + len(pat) + len(name) + 8):
+        if ni < len(name) and pi < len(pat) and (pat[pi] == "?" or pat[pi] == name[ni]):
+            pi += 1
+            ni += 1
+        elif pi < len(pat) and pat[pi] == "*":
+            star_pi = pi
+            star_ni = ni
+            pi += 1
+        elif star_pi >= 0:
+            star_ni += 1
+            pi = star_pi + 1
+            ni = star_ni
+        else:
+            return False
+        if pi == len(pat) and ni == len(name):
+            return True
+    return pi == len(pat) and ni == len(name)
+
+def _reference_segments(pat_segs: list[str], name_segs: list[str], literal_empty: bool) -> bool:
+    """Segment match where every `**` tries every split."""
+    pi = 0
+    ni = 0
+    pn = len(pat_segs)
+    nn = len(name_segs)
+    for _ in range(pn + nn + 8):
+        if pi == pn:
+            return ni == nn
+        if pat_segs[pi] == "**":
+            tail = pat_segs[pi + 1:]
+            if not tail:
+                return ni < nn
+            for k in range(nn - ni + 1):
+                if _reference_segments(tail, name_segs[ni + k:], literal_empty):
+                    return True
+            return False
+        if ni == nn:
+            return False
+        if not _reference_chars(pat_segs[pi], name_segs[ni], literal_empty):
+            return False
+        pi += 1
+        ni += 1
+    return pi == pn and ni == nn
+
+def _reference_match(pattern: str, path: str, literal_empty: bool) -> bool:
+    if pattern.endswith("/"):
+        pattern = pattern[:-1]
+    if not pattern:
+        return False
+    return _reference_segments(pattern.split("/"), path.split("/"), literal_empty)
+
+def _has_empty_segment(pattern: str) -> bool:
+    if pattern.endswith("/"):
+        pattern = pattern[:-1]
+    return pattern != "" and "" in pattern.split("/")
+
+def _joins(segments: list[str], counts: list[int]) -> list[str]:
+    """Every `/`-join of `n` items of `segments`, for each `n` in `counts`."""
+    out = []
+    level = [[]]
+    for n in range(1, max(counts) + 1):
+        level = [prefix + [s] for prefix in level for s in segments]
+        if n in counts:
+            out.extend(["/".join(p) for p in level])
+    return out
+
+_PATTERN_SEGMENTS = ["", "**", "*", "?", "a", "a*", "*a", "*.b", ".*", "?a", "a*b?", "*?"]
+_PATTERNS = (
+    _joins(_PATTERN_SEGMENTS, [1, 2]) +
+    _joins(["", "**", "*", "a"], [3]) +
+    ["**/a/**/a", "a/**/*/**", "**/*/**/.*", "**/**/a/*", "**/a/**/a/**", "*/**/a.b/**/*"]
+)
+_PATHS = (
+    _joins(["", "a", "b", ".a", "a.b", "aab"], [1, 2]) +
+    _joins(["", "a", ".a"], [3]) +
+    ["a/b/a/a", "b/a/.a/a.b/a", "a/a/a/a/a", "a//a/a", "/a/a/a.b/a"]
+)
+
+def _test_agrees_with_reference(_ctx):
+    """match_path agrees with the reference matcher on every pair of a broad
+    table, and an empty segment is the only thing `literal_empty` changes:
+    without it, the reference agrees on every pattern that has none and
+    matches nothing for one that has."""
+    matched = 0
+    empty_matched = 0
+    for pattern in _PATTERNS:
+        empty = _has_empty_segment(pattern)
+        for path in _PATHS:
+            got = match_path(pattern, path)
+            want = _reference_match(pattern, path, True)
+            plain = _reference_match(pattern, path, False)
+            if got != want or plain != (False if empty else got):
+                fail("%r ~ %r: match_path %r, reference %r, reference with empty segments matching nothing %r" % (pattern, path, got, want, plain))
+            if got:
+                matched += 1
+                if empty:
+                    empty_matched += 1
+
+    # Not vacuous: a fair share of pairs match, some through an empty segment.
+    pairs = len(_PATTERNS) * len(_PATHS)
+    if matched * 20 < pairs or empty_matched == 0:
+        fail("only %d of %d pairs matched, %d through an empty segment" % (matched, pairs, empty_matched))
+
+_UNIT_TESTS = [
+    _test_literals,
+    _test_wildcards,
+    _test_double_star,
+    _test_empty_segments,
+    _test_dotfiles,
+    _test_match_any,
+    _test_agrees_with_reference,
+]
+
+def _test_impl(ctx):
+    for t in _UNIT_TESTS:
+        t(ctx)
+    print("path_glob.axl: OK (%d tests)" % len(_UNIT_TESTS))
+    return 0
+
+path_glob_tests = task(
+    summary = "Run the path glob AXL unit tests.",
+    kind = "test-path-glob",
+    group = ["dev"],
+    implementation = _test_impl,
+    args = {},
+)
