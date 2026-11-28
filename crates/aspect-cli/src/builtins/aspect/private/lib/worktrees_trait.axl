@@ -93,7 +93,7 @@ WorktreePool = feature(
         ),
         "max_idle_days": args.int(
             default = PRUNE_IDLE_DAYS,
-            description = "Days a free slot may go unused before it is deleted with its Bazel output base: by the sweep each `aspect worktree add` runs before it picks a slot, and by `aspect worktree prune` when no slot is named. Unused means no Bazel command in its output base and no lease taken or given back, as the `last used` column of `aspect worktree list` shows. A free slot a live Bazel server holds, or whose checkout holds work, is kept whatever its age, and a leased slot is never deleted for being idle. Below 1, `aspect worktree add` refuses, since every free slot would go before it could hand one out. `aspect worktree prune` takes 0 for a one-off that considers every free slot, because it lists them and asks first.",
+            description = "Days a free slot may go unused before it is deleted with its Bazel output base: by the sweep each `aspect worktree add` runs before it picks a slot, and by `aspect worktree prune` when no slot is named. Unused means no Bazel command in its output base and no lease taken or given back, as the `last used` column of `aspect worktree list` shows. A free slot a live Bazel server holds, or whose checkout holds work, is kept whatever its age, and a leased slot is never deleted for being idle. Below 1, `aspect worktree add` refuses, since every free slot would go before it could hand one out. `aspect worktree prune` takes 0 or less for a one-off that considers every free slot, because it lists them and asks first.",
         ),
     },
 )

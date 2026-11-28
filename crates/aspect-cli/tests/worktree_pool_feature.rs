@@ -200,10 +200,9 @@ fn age_slots(dir: &Path, days: u64) {
         .expect("writing the registry");
 }
 
-/// In a clone with `config` as its `config.axl`, whose pool holds one free
-/// slot last used 45 days ago: that slot's directory, the one `add` gives the
-/// next branch, and what that `add` printed on stderr.
-fn add_after_45_idle_days(config: &str) -> (String, String, String) {
+/// A scratch clone with `config` as its `config.axl`, whose pool holds one
+/// free slot last used 45 days ago, and that slot's directory.
+fn clone_with_a_45_day_idle_slot(config: &str) -> (tempfile::TempDir, String) {
     let dir = tempfile::tempdir().expect("temp dir");
     std::fs::create_dir_all(dir.path().join("repo/.aspect")).unwrap();
     std::fs::create_dir_all(dir.path().join("home")).unwrap();
@@ -211,44 +210,70 @@ fn add_after_45_idle_days(config: &str) -> (String, String, String) {
     std::fs::write(dir.path().join("repo/.aspect/config.axl"), config).unwrap();
     git(dir.path(), &["init", "-q"]);
     git(dir.path(), &["commit", "-q", "--allow-empty", "-m", "init"]);
-
-    let path = |out: Output| String::from_utf8_lossy(&out.stdout).trim().to_owned();
-    let first = path(worktree(
-        dir.path(),
-        &["add", "first", "--create=HEAD", "--output=path"],
-    ));
-    worktree(dir.path(), &["release", "first"]);
-    age_slots(dir.path(), 45);
     let out = worktree(
         dir.path(),
-        &["add", "second", "--create=HEAD", "--output=path"],
+        &["add", "first", "--create=HEAD", "--output=path"],
     );
+    let slot = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+    worktree(dir.path(), &["release", "first"]);
+    age_slots(dir.path(), 45);
+    (dir, slot)
+}
+
+/// The directory `add` gives a new branch in the clone at `dir`, and what it
+/// printed on stderr.
+fn add_second(dir: &Path) -> (String, String) {
+    let out = worktree(dir, &["add", "second", "--create=HEAD", "--output=path"]);
     let said = String::from_utf8_lossy(&out.stderr).into_owned();
-    let second = path(out);
-    dir.close().expect("removing temp dir");
-    (first, second, said)
+    (String::from_utf8_lossy(&out.stdout).trim().to_owned(), said)
+}
+
+/// `prune --dry-run --output=json <args>` in the clone at `dir`: the limit it
+/// reports, and the directories of the slots it would delete.
+fn prune_preview(dir: &Path, args: &[&str]) -> (i64, Vec<String>) {
+    let out = worktree(
+        dir,
+        &[&["prune", "--dry-run", "--output=json"], args].concat(),
+    );
+    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).expect("prune JSON");
+    let paths = doc["candidates"]
+        .as_array()
+        .expect("candidates")
+        .iter()
+        .map(|c| c["path"].as_str().expect("path").to_owned())
+        .collect();
+    (doc["max_idle_days"].as_i64().expect("max_idle_days"), paths)
 }
 
 #[test]
-fn a_configured_idle_limit_keeps_a_slot_through_add() {
-    let (first, second, said) = add_after_45_idle_days("def config(ctx):\n    pass\n");
+fn a_configured_idle_limit_reaches_add_and_prune() {
+    let (dir, slot) = clone_with_a_45_day_idle_slot("def config(ctx):\n    pass\n");
+    let (second, said) = add_second(dir.path());
     assert!(said.contains("pruned slot (idle "), "{said}");
     assert_ne!(
-        first, second,
+        slot, second,
         "the default limit kept a 45-day slot:\n{said}"
     );
+    dir.close().expect("removing temp dir");
 
     let config = r#"load("@aspect//feature/worktree_pool.axl", "WorktreePool")
 
 def config(ctx):
     ctx.features[WorktreePool].args.max_idle_days = 90
 "#;
-    let (first, second, said) = add_after_45_idle_days(config);
+    let (dir, slot) = clone_with_a_45_day_idle_slot(config);
+    assert_eq!(prune_preview(dir.path(), &[]), (90, vec![]));
+    assert_eq!(
+        prune_preview(dir.path(), &["--worktree-pool:max-idle-days=0"]),
+        (0, vec![slot.clone()]),
+    );
+    let (second, said) = add_second(dir.path());
     assert!(!said.contains("pruned slot"), "{said}");
     assert_eq!(
-        first, second,
+        slot, second,
         "a 90-day limit did not keep the 45-day slot:\n{said}"
     );
+    dir.close().expect("removing temp dir");
 }
 
 #[test]
