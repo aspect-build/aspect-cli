@@ -101,7 +101,7 @@ def _replay(ctx: TaskContext, case: str, prefix: str) -> str:
     title = [l for l in summary if l.startswith("── Failures (")]
     said = int(title[0].rpartition(" of ")[2].partition(")")[0].rpartition("(")[2]) if title else 0
     tabbed = len([r for r in rows if r.startswith("✗ ")])
-    counted = len([e for e in failure_entries(dict(tab, bazel_exit = code))["entries"] if not e["flaky"]])
+    counted = len([e for e in failure_entries(dict(tab, bazel_exit = code))["entries"] if failures.counted(e)])
     if not (said == tabbed and tabbed == counted):
         fail("%s/%s: the summary says %d, the tab has %d rows, the counts %d" % (case, prefix, said, tabbed, counted))
 

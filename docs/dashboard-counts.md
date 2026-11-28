@@ -243,8 +243,9 @@ the build events.
 
 It has a `── Failures (N) ──` section when anything failed, a
 `── Other errors from Bazel ──` section when Bazel wrote errors no entry claims
-(on a passing build too), then on every build the counts line and
-`All of it: aspect history show <id>`.
+(on a passing build too), for a build Bazel was interrupted in with nothing
+else to say a `■ Bazel was interrupted (exit 8)` line in place of both, then on
+every build the counts line and `All of it: aspect history show <id>`.
 
 ### Entries
 
@@ -260,7 +261,7 @@ Entries come from build events alone, never from guessing at text:
 | `ActionExecuted` failed | The action | action |
 | `TestResult` not `PASSED` (one of the failed statuses above) | The test: the last attempt of its first failed shard or run stands for it (`test_group`) | test |
 | A failed target none of those is about and no root cause blocks | `Bazel's events give no reason; its error is in the console` (`_NO_REASON`) | target, after the tests |
-| None of those, no other errors, and Bazel exited non-zero | `✗ Bazel exited N`, quoting the raw log's last `ERROR:` lines, else a crashed server's `FATAL:` lines, else its last lines but progress (`_last_words`) | target |
+| None of those, no other errors, and Bazel exited non-zero | `✗ Bazel exited N`, quoting the raw log's last `ERROR:` lines, else a crashed server's `FATAL:` lines, else its last lines but progress (`_last_words`). Where `BuildFinished`'s exit code is named `INTERRUPTED` (a Ctrl+C), a mark instead, `■ Bazel was interrupted (exit 8)`, which counts as no failure (`counted`) | target |
 
 Each label has one target entry. A test attempt Bazel posts twice is one. A
 failed `TestRunner` action (a test Bazel failed itself) is an action entry
@@ -371,10 +372,12 @@ The tab has a row per entry, in the summary's order and with its heading
 (`failure_rows`, `listed_failures`), a flaky test's too, marked `~` and never
 counted. The chosen row shows its excerpt under it (every row's with Ctrl+O).
 After them come the rows of no record: a failed target with no reason
-(`✗ <label>  no log`), Bazel's exit code, each blocked target
-(`○ <label>  blocked by :x`), and, once the build has ended, Bazel's other errors
-(`! …`). The tab's badge (`Failures ✗6 ○1`) and the Results pane's `Failed`
-row count the entries but a flaky test's, and the blocked targets. While the
+(`✗ <label>  no log`), Bazel's exit code (`■ Bazel was interrupted (exit 8)`
+where Bazel was interrupted), each blocked target (`○ <label>  blocked by
+:x`), and, once the build has ended, Bazel's other errors (`! …`). The tab's
+badge (`Failures ✗6 ○1`) and the Results pane's `Failed` row count the entries
+but a flaky test's and an interrupted build's mark, and the blocked targets.
+While the
 build runs the entries have no console ties, so no location: those come when it
 ends.
 

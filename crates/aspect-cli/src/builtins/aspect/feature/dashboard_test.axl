@@ -190,6 +190,19 @@ def _held_line_reads(ctx):
         opened = [r[1] for r in reads if r[0] == path and r[1] > 4]
         _eq("held: %s read from its end, at most once a line, as far as that line is long" % path, (len(opened) <= 33, [n for n in opened if n > 256]), (True, []))
 
+def _interrupted_mark(ctx):
+    """A build Bazel was interrupted in, nothing else to list: the Failures
+    tab's row is its `■` mark, the tab's badge and Results count no failure,
+    and a real failure's code keeps its `✗` row and count."""
+    for name, row, failed in [("INTERRUPTED", "■ Bazel was interrupted (exit 8)", False), ("BUILD_FAILURE", "✗ Bazel exited 8", True)]:
+        st = _screen(ctx, ["x"], building = False, ended = True, task = "build", bazel_exit = 8, log_path = "", panes = True, tab = "failures", focus = "console")
+        st["inv"]["build_finished"] = struct(exit_code = struct(name = name, code = 8))
+        st["counts"]["configured"] = 1
+        rows = [_visible(r).rstrip() for r in failure_rows(st, 10, 60)]
+        _eq("%s: its row" % name, rows, [row])
+        frame = _visible(render(st, 120, 30))
+        _eq("%s: a failure counted" % name, ("Failures ✗1" in frame, "Failed   ✗ 1" in frame), (failed, failed))
+
 def _headed(block):
     """A kept block, its `ERROR:` header read as the collector reads one
     (`location`, `message`, `coloured`, `boilerplate`, `body`)."""
@@ -2730,6 +2743,7 @@ def _impl(ctx: TaskContext) -> int:
                 fail("action_row(%r, %d) is %d cells" % (text[:6], width, text_width(cut)))
     _goldens(ctx, view_state, act, ctx.args.update)
     _held_line_reads(ctx)
+    _interrupted_mark(ctx)
     print("dashboard_test.axl: OK")
     return 0
 

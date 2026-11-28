@@ -330,6 +330,33 @@ def _test_last_words(ctx):
     got = failures.failure_summary(state, "t-1", False, log_path = "/log", bazel_exit = 2)
     _eq("the exit code's entry quotes Bazel's last errors", [l for l in got if "first" in l or "the last one" in l], ["  │ first", "  │ the last one"])
 
+def _test_interrupted(ctx):
+    # A build Bazel was interrupted in (Ctrl+C), nothing else to list: its
+    # `BuildFinished` says `INTERRUPTED`, by name, so the exit code's entry
+    # is a mark of it, counted as no failure; any other code a failure.
+    log = "INFO: Invocation ID: x\nERROR: build interrupted\n"
+    interrupted = struct(exit_code = struct(name = "INTERRUPTED", code = 8))
+
+    def ended(finished):
+        state = failure_records.new_state(lambda path, n: (log, 0) if path == "/log" else None, None, ctx.std.re.compile(term_text.ANSI))
+        state["inv"]["build_finished"] = finished
+        state.update(building = False, bazel_exit = 8, log_path = "/log")
+        return state
+
+    state = ended(interrupted)
+    found = failures.failure_entries(state)
+    _eq("interrupted: one entry, marked", [(e["exited"], e["interrupted"]) for e in found["entries"]], [(8, True)])
+    _eq("interrupted: no failure counted", (failures.failure_counts(state), failures.target_counts(state)[1]), ((0, 0), 0))
+    got = failures.failure_summary(state, "t-1", False, log_path = "/log", bazel_exit = 8)
+    _eq("interrupted: a mark, no rule nor ✗", ([l for l in got if "Bazel" in l and "raw log" not in l], [l for l in got if "Failures" in l or "✗" in l]), (["■ Bazel was interrupted (exit 8)"], []))
+    _eq("interrupted: the counts say so", got[-2].startswith("interrupted · "), True)
+
+    # The same number with another name is a failure, as is a crash's.
+    for name in ("BUILD_FAILURE", None):
+        state = ended(struct(exit_code = struct(name = name, code = 8)) if name else None)
+        got = failures.failure_summary(state, "t-1", False, log_path = "/log", bazel_exit = 8)
+        _eq("%s: a failure" % name, ("── Failures (1) ──" in got, "✗ Bazel exited 8" in got, failures.failure_counts(state)), (True, True, (1, 0)))
+
 def _impl(ctx: TaskContext) -> int:
     _test_shard_tie(ctx)
     _test_output_not_created(ctx)
@@ -352,6 +379,7 @@ def _impl(ctx: TaskContext) -> int:
     _test_referenced_by(ctx)
     _test_target_counts(ctx)
     _test_last_words(ctx)
+    _test_interrupted(ctx)
     print("failures_test.axl: OK")
     return 0
 

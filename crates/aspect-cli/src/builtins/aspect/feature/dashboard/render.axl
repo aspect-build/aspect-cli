@@ -95,7 +95,8 @@ def failure_rows(state: dict, room: int, width: int) -> list:
     the list has focus and kept in sight with its excerpt under it behind a
     `│` (every row's with Ctrl+O, `expand_failures`); then the rows of no
     record of their own (`_tab_extras`): a failed target no event says
-    more of, each blocked target (`○`), Bazel's other errors (`!`). What
+    more of, Bazel's exit code (`■`, no failure, where Bazel was
+    interrupted), each blocked target (`○`), Bazel's other errors (`!`). What
     is hidden above and below is
     counted in rows of the list, an excerpt never cut from its row."""
     fails = state["fails"]
@@ -126,6 +127,10 @@ def failure_rows(state: dict, room: int, width: int) -> list:
         if what == "other":
             text = _middle("! " + label["lines"][0], width)
             return _list_row(state, text, width, pos == at, _c("warning") + "!" + _RESET + _c("muted") + text[1:] + _RESET)
+        if what == "entry" and label.get("interrupted"):
+            # No failure: the mark of a build Bazel was interrupted in.
+            text = _middle("■ " + _entry_text(state, label)["kind"], width)
+            return _list_row(state, text, width, pos == at, _c("warning") + "■" + _RESET + text[1:])
         if what == "entry":
             heading = _entry_text(state, label)
             text = _middle("✗ " + " · ".join(([label["label"]] if label["label"] else []) + ([heading["kind"]] if heading["kind"] else []) + heading["details"]) + ("" if label.get("exited") != None else "  no log"), width)
