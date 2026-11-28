@@ -4,8 +4,9 @@ Off by default: `aspect build //... --dashboard`. What it shows and its keys
 are in the builtins' README.md (`Dashboard`).
 
 A pre-task hook takes the screen; an idle hook draws it until a build does.
-Each `BazelTrait.output_frame` reads Bazel's console (`build.output_feed()`,
-`add_lines`, dashboard/log.axl) and the keys (`on_key`, dashboard/keys.axl)
+Each `BazelTrait.output_frame` (`frame`) reads the CLI's own lines, then
+Bazel's console (`build.output_feed()`, `add_lines`, dashboard/log.axl) and
+the keys (`on_key`, dashboard/keys.axl)
 and draws one frame (`render`, dashboard/render.axl); `build_event` hooks
 gather the counts and failures (`collect_event`,
 private/lib/failure_records.axl, shared with the plain console);
@@ -353,8 +354,13 @@ def _idle(state: dict, task_ctx):
         return
     _tick(state, screen)
 
-def _frame(state: dict, task_ctx, build):
-    # A build whose console is shown (its own `output =`) is left alone.
+def frame(state: dict, task_ctx, build):
+    """One `output_frame` of a build: its console's new lines and progress
+    (`build.output_feed()`) and the CLI's own lines, the CLI's first, since
+    each that came in the same frame (`▸ Build` before Bazel's first) was
+    written before the frame read Bazel's; then the keys and the frame
+    drawn. A build whose console is shown (its own `output =`) is left
+    alone."""
     feed = build.output_feed()
     if feed == None:
         return
@@ -377,6 +383,7 @@ def _frame(state: dict, task_ctx, build):
     screen = state["screen"]
     state["now_ms"] = now
     state["frames"] += 1
+    _add_output(state, screen)
     _add_lines(state, feed["lines"], feed.get("links"), feed.get("colours"), feed.get("kinds"), feed.get("bazel"))
     state["dropped"] = state.get("dropped", 0) + (feed.get("dropped", 0) or 0)
 
@@ -386,7 +393,6 @@ def _frame(state: dict, task_ctx, build):
         state["progress"] = feed["progress"]
         state["phase"] = feed["progress"][0]
         _note_progress(state, feed["progress"])
-    _add_output(state, screen)
     if state["frames"] % _TIPS_EVERY_FRAMES == 0:
         _tips(state)
     _keys_and_draw(state, screen)
@@ -575,7 +581,7 @@ def _dashboard_impl(ctx: FeatureContext):
     # What the Failures tab and the summary tie Bazel's lines from, with the
     # Console's stages off too.
     t.output_stages.append(bazel.output.collect_errors())
-    t.output_frame.append(lambda task_ctx, build: _frame(state, task_ctx, build))
+    t.output_frame.append(lambda task_ctx, build: frame(state, task_ctx, build))
     t.output_end.append(lambda task_ctx, build: _end(state, task_ctx, build))
     t.build_event.append(lambda task_ctx, event: _event(state, task_ctx, event))
     t.exec_log_event.append(ExecLogHook(on_entry = lambda task_ctx, entry: _spawn(state, task_ctx, entry), kinds = ["spawn", "file"], file_paths = ["/testlogs/"]))

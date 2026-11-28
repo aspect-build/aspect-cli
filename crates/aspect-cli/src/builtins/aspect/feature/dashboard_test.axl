@@ -15,7 +15,7 @@ load("@aspect//feature/dashboard/pointer.axl", "dashboard_pointer")
 load("@aspect//feature/dashboard/render.axl", "dashboard_render")
 load("@aspect//feature/dashboard/testing.axl", "dashboard_testing")
 load("@aspect//feature/dashboard/view.axl", "dashboard_view")
-load("@aspect//feature/dashboard.axl", "end_build", "fold_build", "new_build", "new_state", "refusal")
+load("@aspect//feature/dashboard.axl", "end_build", "fold_build", "frame", "new_build", "new_state", "refusal")
 load("@std//theme.axl", "theme")
 load("../private/lib/failure_records.axl", "failure_records")
 load("../private/lib/failures.axl", "failures")
@@ -217,6 +217,26 @@ def _narrow_failure_rows(ctx):
         if text_width(text) > width or ("…" in text and label == "//t:flaky"):
             fail("headed_row at %d: %r" % (width, text))
     _eq("too narrow for the label", headed_row("✗", "//pkg/sub:a_long_target_name", details, 16), ("✗ //pkg/su…_name", "//pkg/su…_name"))
+
+def _frame_order(ctx):
+    """The CLI's own lines and Bazel's that one frame reads together go to
+    the console the CLI's first: `▸ Build` is written before the build that
+    prints `INFO: Analyzed …`, whichever the frame drains first."""
+    cli = ["▸ Setup", "▸ Build"]
+    bazel = ["INFO: Analyzed target //a:b (0 packages loaded, 1 target configured).", "INFO: Found 1 target..."]
+    written = []
+    screen = struct(
+        held = True,
+        output = lambda: [(line, [], line) for line in cli],
+        size = lambda: (100, 30),
+        key = lambda: None,
+        write = lambda frame: written.append(frame),
+    )
+    build = struct(output_feed = lambda: {"lines": bazel, "links": None, "colours": None, "kinds": None, "bazel": None, "progress": [], "dropped": 0})
+    st = _screen(ctx, [], building = False, screen = screen, task = "build")
+    frame(st, None, build)
+    _eq("the CLI's lines first", [l for l in st["log"] if l in cli or l in bazel], cli + bazel)
+    _eq("drawn once", len(written), 1)
 
 def _headed(block):
     """A kept block, its `ERROR:` header read as the collector reads one
@@ -2774,6 +2794,7 @@ def _impl(ctx: TaskContext) -> int:
     _held_line_reads(ctx)
     _interrupted_mark(ctx)
     _narrow_failure_rows(ctx)
+    _frame_order(ctx)
     print("dashboard_test.axl: OK")
     return 0
 
