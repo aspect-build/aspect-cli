@@ -435,6 +435,10 @@ fn manifest_dir() -> PathBuf {
         .unwrap_or_else(|| std::env::current_dir().expect("current_dir"))
 }
 
+/// How long `basil_bin`'s one-time `cargo build -p basil` may take: long
+/// enough for a cold build on a loaded machine.
+const BASIL_BUILD_TIMEOUT: Duration = Duration::from_secs(20 * 60);
+
 /// Locate the `basil` binary (the fake `bazel` used by tests that exercise
 /// `ctx.bazel.build`).
 ///
@@ -489,11 +493,27 @@ pub fn basil_bin() -> &'static str {
         for k in package_vars {
             build.env_remove(k);
         }
-        let status = build
+        // Its own bound, so a build that wedges fails here, named, rather than
+        // in whichever hang bound is waiting on it.
+        let mut child = build
             .args(["build", "--quiet", "-p", "basil"])
             .current_dir(&workspace_root)
-            .status()
+            .spawn()
             .expect("failed to invoke cargo to build basil");
+        let deadline = std::time::Instant::now() + BASIL_BUILD_TIMEOUT;
+        let status = loop {
+            if let Some(status) = child.try_wait().expect("waiting on cargo build -p basil") {
+                break status;
+            }
+            if std::time::Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!(
+                    "`cargo build -p basil` for the fake-Bazel tests took over {BASIL_BUILD_TIMEOUT:?}"
+                );
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        };
         assert!(
             status.success(),
             "cargo build -p basil failed (status: {status})"
