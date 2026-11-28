@@ -1304,7 +1304,8 @@ def action_lines(state: dict) -> list:
     end and the execution log's while it runs; the internal actions'
     mnemonics, said to be some where they do not sum), each in one column
     and none of a kind there is none of; Bazel's action cache with why it
-    missed, and the execution log's spawns."""
+    missed, and the execution log's spawns (not replayed for a past run from
+    the task history, `past`)."""
     c = state["counts"]
     inv = state.get("inv") or {}
     summary = bes_get(inv.get("build_metrics"), "action_summary")
@@ -1374,6 +1375,8 @@ def action_lines(state: dict) -> list:
     if c.get("spawns"):
         pct = c["spawn_hits"] * 100 // c["spawns"]
         out.append(_row_of("spawns", _counts("%d · %d from a cache (%d%%) · %d run", (c["spawns"], c["spawn_hits"], pct, c["spawns"] - c["spawn_hits"]))))
+    elif state.get("past") != None:
+        out.append(_row_of("spawns", "not replayed for past runs"))
     elif own_execution_log(state.get("inv") or {}):
         out.append(_row_of("spawns", "not read: this build writes its own execution log (%s)" % own_execution_log(state.get("inv") or {})))
     elif state.get("exec_log_read"):

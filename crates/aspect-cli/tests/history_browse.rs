@@ -1,7 +1,9 @@
 //! `aspect history browse` off a terminal: refused with the error that names
-//! `aspect history list`, no verdict line after it, no run of its own kept
-//! in the history, and no `--mouse` flag. On a terminal, a signal ends it
-//! with the shell's code for that signal.
+//! `aspect history list --output=json`, no verdict line after it, no run of
+//! its own kept in the history, and no `--mouse` flag. On a terminal, a
+//! signal ends it with the shell's code for that signal. `aspect history list`
+//! and `show` print only what they show, and say when a newer aspect wrote a
+//! run they cannot read.
 
 mod common;
 
@@ -11,9 +13,15 @@ use std::process::{Command, Output, Stdio};
 /// Run `aspect history <args>` in a scratch workspace with piped stdio and
 /// a history folder of its own, returned for a look at what it kept.
 fn run(args: &[&str]) -> (Output, tempfile::TempDir) {
+    run_with(args, |_| {})
+}
+
+/// [`run`], `seed` first given the history folder to put entries in.
+fn run_with(args: &[&str], seed: impl FnOnce(&std::path::Path)) -> (Output, tempfile::TempDir) {
     let dir = tempfile::tempdir().expect("temp dir");
     std::fs::write(dir.path().join("MODULE.aspect"), "").expect("MODULE.aspect");
     std::fs::create_dir(dir.path().join("history")).expect("history");
+    seed(&dir.path().join("history"));
     let output = Command::new(aspect_cli())
         .arg("history")
         .args(args)
@@ -35,7 +43,7 @@ fn browse_off_a_terminal_is_refused_quietly_and_keeps_no_run() {
     assert_eq!(output.status.code(), Some(1), "{stderr}");
     assert!(
         stderr.contains(
-            "aspect history browse needs a terminal; `aspect history list` prints the runs."
+            "aspect history browse needs a terminal on stdin and stdout; for a script: aspect history list --output=json"
         ),
         "{stderr}"
     );
@@ -51,6 +59,51 @@ fn browse_off_a_terminal_is_refused_quietly_and_keeps_no_run() {
     assert!(
         kept.is_empty(),
         "aspect history keeps no run of its own: {kept:?}"
+    );
+}
+
+/// An entry whose record a newer aspect wrote, of a schema this one skips.
+const NEWER: &str = "20261101T000000000Z-00000000-0000-0000-0000-000000000005";
+
+fn seed_newer(history: &std::path::Path) {
+    let entry = history.join(NEWER);
+    std::fs::create_dir(&entry).expect("entry");
+    std::fs::write(
+        entry.join("task.json"),
+        r#"{"schema": 999, "cli_version": "2099.1.0", "status": "ended"}"#,
+    )
+    .expect("task.json");
+}
+
+#[test]
+fn show_names_a_run_a_newer_aspect_wrote() {
+    let (output, dir) = run_with(
+        &["show", "00000000-0000-0000-0000-000000000005"],
+        seed_newer,
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    let want = format!(
+        "run 00000000-0000-0000-0000-000000000005 was written by a newer aspect (2099.1.0); upgrade to read it · files: {}",
+        dir.path().join("history").join(NEWER).display()
+    );
+    assert!(stderr.contains(&want), "{stderr}");
+}
+
+#[test]
+fn list_counts_runs_a_newer_aspect_wrote_and_prints_only_its_list() {
+    let (output, _dir) = run_with(&["list", "--builds", "--workspace=."], seed_newer);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(output.status.code(), Some(0), "{stderr}");
+    assert!(
+        stderr.contains("1 run from a newer aspect not listed (upgrade to read it)"),
+        "{stderr}"
+    );
+    assert!(stdout.starts_with("No runs in the history at "), "{stdout}");
+    assert!(
+        !stderr.contains("history list task"),
+        "no verdict line after list:\n{stderr}"
     );
 }
 

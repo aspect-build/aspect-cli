@@ -52,6 +52,7 @@ _browsing = dashboard_history.browsing
 _ctrl_c = dashboard_history.ctrl_c
 _ctrl_c_note = dashboard_history.ctrl_c_note
 _cycle_filter = dashboard_history.cycle_filter
+_history_failed_note = dashboard_history.failed_note
 _history_filter_note = dashboard_history.filter_note
 _history_open = dashboard_history.history_open
 _history_records = dashboard_history.history_records
@@ -59,7 +60,9 @@ _history_rows = dashboard_history.history_rows
 _open_history = dashboard_history.open_history
 _show_live = dashboard_history.show_live
 _show_past = dashboard_history.show_past
+_toggle_failed = dashboard_history.toggle_failed
 _toggle_workspace = dashboard_history.toggle_workspace
+_warned = dashboard_history.warned
 _history_workspace_note = dashboard_history.workspace_note
 
 # Alt (Option) with an arrow scrolls half a page, not an Esc and the arrow.
@@ -99,7 +102,7 @@ def keys_row(state: dict, cols: int) -> str:
     if state.get("help"):
         return _fit(" ↑↓ scroll · any other key closes", cols)
     if _ctrl_c_note(state):
-        return _fit(" " + _ctrl_c_note(state), cols)
+        return _warned(_fit(" " + _ctrl_c_note(state), cols))
     if state.get("note") and (state.get("note_until") == None or _clock(state) < state["note_until"]):
         return _fit(" " + state["note"], cols)
     if state.get("past") != None:
@@ -114,13 +117,18 @@ def keys_row(state: dict, cols: int) -> str:
         return _fit(" " + choose + "Tab next tab · Esc back · q " + ("leave" if state["ended"] else "cancel") + " · ? keys", cols)
     done = state["ended"]
     parts = [("Done ✔" if state.get("verdict", True) else "Done ✗")] if done else []
-    parts += row_labels(state)
-    text = " " + parts[0]
+    return fit_labels(parts + row_labels(state), cols)
+
+def fit_labels(parts: list, cols: int) -> str:
+    """A keys row of `parts`, the likeliest first, `cols` wide: the first,
+    then as many whole ones as fit before `? keys`, which is always
+    there."""
+    text = " " + parts[0] if parts else ""
     for part in parts[1:]:
         if _text_width(text) + 3 + _text_width(part) + len(" · ? keys") > cols:
             break
         text += " · " + part
-    return _fit(text + " · ? keys", cols)
+    return _fit((text + " · ? keys") if text else " ? keys", cols)
 
 def on_key(state: dict, key: str, page: int) -> bool:
     """Apply a key to the dashboard's state; whether it leaves the finished
@@ -539,45 +547,55 @@ def _row_other_list(state: dict) -> list:
         return []
     return ["a failures" if state.get("list") == "actions" else "a actions"]
 
+# What each key moves the History screen's choice by: rows, half a page
+# (`half`), a page, or to the newest or the oldest (`end`).
+_HISTORY_MOVES = {
+    "up": (-1, "row"),
+    "k": (-1, "row"),
+    "wheel-up": (-_WHEEL, "row"),
+    "down": (1, "row"),
+    "j": (1, "row"),
+    "wheel-down": (_WHEEL, "row"),
+    "u": (-1, "half"),
+    "shift-up": (-1, "half"),
+    "ctrl-u": (-1, "half"),
+    "d": (1, "half"),
+    "shift-down": (1, "half"),
+    "ctrl-d": (1, "half"),
+    "b": (-1, "page"),
+    " ": (1, "page"),
+    "pageup": (-1, "page"),
+    "pagedown": (1, "page"),
+    "K": (-1, "end"),
+    "home": (-1, "end"),
+    "J": (1, "end"),
+    "end": (1, "end"),
+}
+
+# The keys the History screen reads: its moves, `_history_key`'s others, `m`
+# and `?`.
+_HISTORY_KEYS = list(_HISTORY_MOVES.keys()) + ["f", "e", "w", "enter", "esc", "q", "h", "m", "?"]
+
 def _history_key(state: dict, key: str, page: int) -> str | None:
     """A key on the History screen: `open` (Enter, a row chosen), `close`
-    (Esc, `q`, `h`), or None, having moved the choice (↑↓, `k`/`j`, the
-    wheel, half a `page` with `u`/`d` and Shift+↑↓, a page with `b`/Space,
-    `K`/`J`, Home and End to the newest and oldest), the filter (`f`:
-    builds, failed builds, all runs) or the workspace (`w`: this one, or
-    all), which the keys row says it did."""
+    (Esc, `q`, `h`), or None, having moved the choice (`_HISTORY_MOVES`,
+    half a `page` or a page of it), or changed what it shows, which the
+    keys row says it did: `f` cycles builds, failed builds and all runs,
+    `e` failed builds only and back, `w` this workspace or every one."""
     b = state["browser"]
     _history_records(state)
     n = len(_history_rows(state))
-    half = max(1, page // 2)
-    moves = {
-        "up": -1,
-        "k": -1,
-        "wheel-up": -_WHEEL,
-        "down": 1,
-        "j": 1,
-        "wheel-down": _WHEEL,
-        "u": -half,
-        "shift-up": -half,
-        "ctrl-u": -half,
-        "d": half,
-        "shift-down": half,
-        "ctrl-d": half,
-        "b": -page,
-        " ": page,
-        "pageup": -page,
-        "pagedown": page,
-        "K": -(1 << 30),
-        "home": -(1 << 30),
-        "J": 1 << 30,
-        "end": 1 << 30,
-    }
-    if key in moves:
-        b["selected"] = max(0, min(n - 1, b["selected"] + moves[key]))
+    if key in _HISTORY_MOVES:
+        step, unit = _HISTORY_MOVES[key]
+        step *= {"row": 1, "half": max(1, page // 2), "page": page, "end": 1 << 30}[unit]
+        b["selected"] = max(0, min(n - 1, b["selected"] + step))
         b["chosen"] = None
     elif key == "f":
         _cycle_filter(state)
         _say_note(state, _history_filter_note(state), _NOTE_MS)
+    elif key == "e":
+        _toggle_failed(state)
+        _say_note(state, _history_failed_note(state), _NOTE_MS)
     elif key == "w":
         if _toggle_workspace(state):
             _say_note(state, _history_workspace_note(state), _NOTE_MS)
@@ -586,9 +604,6 @@ def _history_key(state: dict, key: str, page: int) -> str | None:
     elif key in ("esc", "q", "h"):
         return "close"
     return None
-
-# The keys the History screen reads (`_history_key`, `m` and `?`).
-_HISTORY_KEYS = ["up", "k", "wheel-up", "down", "j", "wheel-down", "u", "shift-up", "ctrl-u", "d", "shift-down", "ctrl-d", "b", " ", "pageup", "pagedown", "K", "home", "J", "end", "f", "w", "enter", "esc", "q", "h", "m", "?"]
 
 def _k_history(state: dict, key: str, page: int) -> bool:
     # Enter opens the chosen run (the live build's row goes back to it);
@@ -614,7 +629,8 @@ def _k_history(state: dict, key: str, page: int) -> bool:
     return False
 
 def _k_open_history(state: dict, key: str, page: int) -> bool:
-    _open_history(state)
+    # From a past run, the list as `q` and Esc go back to it, its run chosen.
+    _open_history(state, back = state.get("past") != None)
     return False
 
 def _k_ctrl_c(state: dict, key: str, page: int) -> bool:
@@ -657,10 +673,16 @@ KEYS = [
     _key(["ctrl-l"], _always, _k_redraw, help = ("^L", "redraw the screen"), group = "Screen", early = True),
     _key(["ctrl-c"], lambda s: s.get("browser") != None and _browsing(s), _k_ctrl_c, early = True),
     _key(_HISTORY_KEYS, lambda s: _history_open(s) and not s.get("help"), _k_history, early = True),
-    _documented("↑ ↓  Enter", "choose a run; open it, the live build's row back to it", "History", shown = _history_open),
-    _documented("f", "filter: builds, failed builds, all runs", "History", shown = _history_open),
+    _documented("↑ ↓  k j", "choose a run", "History", shown = _history_open),
+    _documented("Enter", "open it", "History", shown = lambda s: _history_open(s) and s["browser"]["standalone"]),
+    _documented("Enter", "open it; on the live build's row, back to it", "History", shown = lambda s: _history_open(s) and not s["browser"]["standalone"]),
+    _documented("K J  Home End", "the newest; the oldest", "History", shown = _history_open),
+    _documented("u d  PgUp PgDn", "half a page; a page (b and Space too)", "History", shown = _history_open),
+    _documented("f", "show builds, failed builds or all runs", "History", shown = _history_open),
+    _documented("e", "failed builds only, and back", "History", shown = _history_open),
     _documented("w", "this workspace's runs, or every workspace's", "History", shown = lambda s: _history_open(s) and bool(s["browser"]["workspace"])),
-    _documented("q  Esc", "back to the live build (standalone, quit)", "History", shown = _history_open),
+    _documented("q  Esc", "quit", "History", shown = lambda s: _history_open(s) and s["browser"]["standalone"]),
+    _documented("q  Esc  h", "back to the live build", "History", shown = lambda s: _history_open(s) and not s["browser"]["standalone"]),
     _documented("^C", "twice: cancel the live build", "History", shown = lambda s: _history_open(s) and not s["browser"]["standalone"]),
     _documented("m", "the mouse to the terminal and back", "History", shown = _history_open),
     _key(["1", "2", "3", "4", "5"], _bar_closed, _k_tab_number, help = ("1-5", "a tab: console, failures, metrics, invocation, tips"), group = "Screen"),
@@ -786,6 +808,7 @@ def row_labels(state: dict) -> list:
     return out
 
 dashboard_keys = namespace(
+    fit_labels = fit_labels,
     help_rows = help_rows,
     testonly_KEYS = KEYS,
     keys_row = keys_row,

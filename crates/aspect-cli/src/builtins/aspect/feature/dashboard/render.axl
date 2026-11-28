@@ -77,6 +77,7 @@ _panes_shown = dashboard_view.panes_shown
 _picked_build = dashboard_view.picked_build
 _shown_tips = dashboard_view.shown_tips
 _tips_count = dashboard_view.tips_count
+_editor_link = dashboard_pointer.editor_link
 _hover_colour = dashboard_pointer.hover_colour
 _peek_paint = dashboard_pointer.peek_paint
 _selection_colour = dashboard_pointer.selection_colour
@@ -84,23 +85,26 @@ _link_at = dashboard_pointer.link_at
 _link_marks = dashboard_pointer.link_marks
 _link_spans = dashboard_pointer.link_spans
 _selection_rows = dashboard_pointer.selection_rows
+_fit_labels = dashboard_keys.fit_labels
 _help_rows = dashboard_keys.help_rows
 _keys_row = dashboard_keys.keys_row
-_count_text = dashboard_history.count_text
+_box_title = dashboard_history.box_title
 _ctrl_c_note = dashboard_history.ctrl_c_note
 _CUT_STREAM = dashboard_history.CUT_STREAM
 _damaged_text = dashboard_history.damaged_text
+_empty_text = dashboard_history.empty_text
 _history_bar = dashboard_history.history_bar
+_history_header = dashboard_history.header_text
 _history_open = dashboard_history.history_open
 _history_records = dashboard_history.history_records
 _history_rows = dashboard_history.history_rows
 _history_keys_labels = dashboard_history.keys_labels
-_live_header = dashboard_history.live_header
-_live_row = dashboard_history.live_row
 _live_words = dashboard_history.live_words
 _page_rows = dashboard_history.page_rows
 _past_header = dashboard_history.past_header
-_run_row = dashboard_history.run_row
+_past_note = dashboard_history.past_note
+_table_rows = dashboard_history.table_rows
+_warned = dashboard_history.warned
 
 # Folded builds shown above the tabs, the older counted on a row.
 _MAX_FOLDED = 3
@@ -448,8 +452,19 @@ def _top(state: dict, cols: int, rows: int) -> list:
     if finished:
         actions = _slowest_rows(state)
     past = state.get("past") != None
+    past_links = {}
     if past:
-        actions = ["Action timings aren't kept for past runs"]
+        # The history keeps the build's profile, not a replay of its timings.
+        actions = ["Action timings aren't replayed for past runs"]
+        profile = state.get("profile_path", "")
+        if profile:
+            # Cut in its middle, so its file's name shows; linked whole.
+            lead = "Bazel's profile: "
+            shown = _middle(profile, max(1, cols - _results_width(cols) - 4 - len(lead))).rstrip(" ")
+            actions.append(lead + shown)
+            url = _editor_link(state, profile)
+            if url != None:
+                past_links[1] = [[len(lead), len(lead) + len(shown), url]]
     right_w = _results_width(cols)
     left_w = cols - right_w
     c = state["counts"]
@@ -567,6 +582,9 @@ def _top(state: dict, cols: int, rows: int) -> list:
         s_cell = _c("border") + "│ " + _RESET + s + " " * max(0, right_w - 4 - visible) + _c("border") + " │" + _RESET
         if visible > right_w - 4:
             s_cell = _box_row(_plain(s), right_w)
+        if past:
+            out.append(_box_row(a, left_w, lambda text: _c("muted") + text + _RESET, edge = edge[i] if edge else None, links = past_links.get(i)) + s_cell)
+            continue
         colour = (lambda text: _c("muted") + text + _RESET) if a == _NOTHING_RAN else _aged(a)
         out.append(_box_row(_action_row(a, left_w - 4), left_w, colour, edge = edge[i] if edge else None) + s_cell)
     out.append(_box_bottom(left_w) + _box_bottom(right_w))
@@ -769,7 +787,12 @@ def render(state: dict, cols: int, rows: int) -> str:
     search["centre"] = False
     up = len(log) - end
     held = search["back"] >= 0 and search["pattern"] != None and search["mode"] == "jump" and view == None
-    where = ("on the match, J to follow" if held else ("replay" if state.get("past") != None else "following")) if scroll == 0 else "%d line%s up" % (up, "" if up == 1 else "s")
+    following = "following"
+    if state.get("past") != None:
+        # A past run's Console read back from its output is a replay; its
+        # record in words, or a kept log, is not.
+        following = "replay" if state.get("replayed") and view == None else ""
+    where = ("on the match, J to follow" if held else following) if scroll == 0 else "%d line%s up" % (up, "" if up == 1 else "s")
     if state.get("unseen") and view == None:
         errors = state.get("unseen_errors", 0)
         where += _counts(" · %d new%s, J to follow", (state["unseen"], (_counts(" (%d error%s)", (errors, "" if errors == 1 else "s"))) if errors else ""))
@@ -793,7 +816,7 @@ def render(state: dict, cols: int, rows: int) -> str:
         out.append(_box_top(title, cols))
     else:
         # The tab names the console; its status follows.
-        status = title.removeprefix("Console").lstrip(" ·")
+        status = title.removeprefix("Console").strip(" ·")
         out.append(tab_top(state, status, cols, len(out)))
     state["pane"] = (len(out), len(out) + log_h - 1)
     line_links = {} if state.get("help") else state.get("line_links", {})
@@ -868,11 +891,13 @@ def draw_now(state: dict) -> None:
     state["drawn"] = None
 
 def render_history(state: dict, cols: int, rows: int) -> str:
-    """The History screen, `cols` by `rows`: a header (how many runs, and how
-    the live build is doing), the live build's row then the runs in a box
-    (`run_row`), the chosen one marked, what of the history did not list
-    under it (`damaged_text`), and the keys (`keys_labels`), or what the
-    last one did; the `?` overlay over the box."""
+    """The History screen, `cols` by `rows`: a header (how many runs the
+    history keeps, and how the live build is doing, `header_text`), the
+    live build's row then the runs in a box under what it lists
+    (`box_title`), in columns (`table_rows`), the chosen one in reverse
+    video, what of the history it leaves out under it (`damaged_text`), and
+    the keys (`keys_labels`, as many as fit, `? keys` and the version kept),
+    or what the last one did; the `?` overlay over the box."""
     b = state["browser"]
     records = _history_records(state)
     rows_shown = _history_rows(state)
@@ -882,14 +907,8 @@ def render_history(state: dict, cols: int, rows: int) -> str:
         top = b["selected"] - height + 1
     top = max(0, min(top, max(0, len(rows_shown) - height)))
     b["top"] = top
-    head = " aspect history · " + _count_text(state)
-    if not b["standalone"]:
-        head += " · " + _live_header(state)
-    out = [_history_bar() + _fit(head, cols) + _RESET]
-    title = "Runs · " + b["filter"] + (" · this workspace" if b["here"] and b["workspace"] else "")
-    if b["reading"]:
-        title += " · reading " + b["reading"] + "…"
-    out.append(_box_top("Keys" if state.get("help") else title, cols))
+    out = [_history_bar() + _fit(_history_header(state), cols) + _RESET]
+    out.append(_box_top("Keys" if state.get("help") else _box_title(state), cols))
     w = cols - 4
     body = []
     if state.get("help"):
@@ -898,42 +917,25 @@ def render_history(state: dict, cols: int, rows: int) -> str:
         state["help_top"] = help_top
         body = [_fit(l, w) for l in lines[help_top:help_top + height]]
     elif not records and not (b["census"] or {}).get("runs"):
-        body = ([_live_row(state, w, b["selected"] == 0)] if not b["standalone"] else []) + [
+        body = [
             _fit("No runs yet. Builds and tests you run appear here.", w),
-            _c("muted") + _fit(b["history"].root(), w) + _RESET,
+            _c("muted") + _fit("History folder: " + b["history"].root(), w) + _RESET,
         ]
     else:
-        for i in range(height):
-            at = top + i
-            if at >= len(rows_shown):
-                break
-            row = rows_shown[at]
-            chosen = at == b["selected"]
-            body.append(_live_row(state, w, chosen) if row == None else _run_row(row, w, b["now_ms"], chosen))
+        body = _table_rows(state, rows_shown[top:top + height], w, b["selected"] - top)
         if not records:
-            where = " in this workspace" if b["here"] and b["workspace"] else ""
-            body.append(_c("muted") + _fit("No %s%s." % (b["filter"].replace("all runs", "runs"), where), w) + _RESET)
+            body.append(_c("muted") + _fit(_empty_text(state), w) + _RESET)
     edge = None if state.get("help") else scrollbar(len(rows_shown), height, max(0, len(rows_shown) - top - height))
     for i in range(height):
         drawn = body[i] if i < len(body) else " " * w
-        marked = not state.get("help") and top + i == b["selected"] and i < len(body)
-        left = (_c("marker") + "┃" if marked else _c("border") + "│") + _RESET + " "
-        out.append(left + drawn + _RESET + (" " + edge[i] if edge else _c("border") + " │" + _RESET))
+        out.append(_c("border") + "│" + _RESET + " " + drawn + _RESET + (" " + edge[i] if edge else _c("border") + " │" + _RESET))
     damaged = _damaged_text(state)
     if damaged:
-        note = " %s " % damaged
+        note = " %s " % _fit(damaged, max(1, cols - 5)).rstrip(" ")
         out.append(_c("border") + "└─" + _RESET + _c("muted") + note + _RESET + _c("border") + "─" * max(0, cols - 3 - _text_width(note)) + "┘" + _RESET)
     else:
         out.append(_box_bottom(cols))
-    said = state.get("note") if state.get("note") and (state.get("note_until") == None or _clock(state) < state["note_until"]) else ""
-    note = _ctrl_c_note(state) or said
-    if state.get("help"):
-        keys = " ↑↓ scroll · any other key closes"
-    elif note:
-        keys = " " + note
-    else:
-        keys = " " + " · ".join(_history_keys_labels(state))
-    out.append(_c("muted") + _fit(keys, cols) + _RESET)
+    out.append(_versioned(state, cols, _history_keys_row))
 
     # Nothing of the run's screen to click on here.
     state["tab_row"] = None
@@ -942,6 +944,19 @@ def render_history(state: dict, cols: int, rows: int) -> str:
     state["row_lines"] = {}
     state["pane"] = (2, 1 + height)
     return _frame_of(state, out, rows, cols)
+
+def _history_keys_row(state: dict, cols: int) -> str:
+    """The History screen's keys row, `cols` wide: what a first Ctrl+C or
+    the last key said, or the overlay's own keys, else its labels as many
+    as fit (`fit_labels`)."""
+    said = state.get("note") if state.get("note") and (state.get("note_until") == None or _clock(state) < state["note_until"]) else ""
+    if _ctrl_c_note(state):
+        return _warned(_fit(" " + _ctrl_c_note(state), cols))
+    if state.get("help"):
+        return _fit(" ↑↓ scroll · any other key closes", cols)
+    if said:
+        return _fit(" " + said, cols)
+    return _fit_labels(_history_keys_labels(state), cols)
 
 # A heading in the Metrics and Invocation tabs.
 
@@ -1104,7 +1119,8 @@ def invocation_lines(state: dict) -> list:
 def _tab_pane(state: dict, out: list, cols: int, rows: int) -> list:
     """`out` with the main pane showing the Failures, Metrics or Invocation
     tab, and the keys row under it. The failures as their list, chosen with
-    ↑↓, Enter showing one's log; the others scrolled with ↑↓."""
+    ↑↓, Enter showing one's log; the others scrolled with ↑↓. A past run
+    with nothing for them says why (`past_note`)."""
     tab = state.get("tab", "console")
     log_h = max(1, rows - len(out) - 3)
     width = cols - 4
@@ -1112,10 +1128,13 @@ def _tab_pane(state: dict, out: list, cols: int, rows: int) -> list:
         lines = tips_lines(state, width)
         title = "↑↓ choose · s silence on this machine" if _shown_tips(state) else ""
     elif not _built(state):
-        lines = [_c("muted") + "No build yet" + _RESET]
+        lines = [_c("muted") + (_past_note(state) or "No build yet") + _RESET]
         title = ""
     elif tab == "failures":
         lines = (action_rows if state.get("list") == "actions" else failure_rows)(state, log_h, width)
+        if not lines and _past_note(state):
+            # A past run still going elsewhere: its failures are not in yet.
+            lines = [_c("muted") + _past_note(state) + _RESET]
         title = "Actions with output · ↑↓ choose · Enter show its log" if state.get("list") == "actions" else "↑↓ choose · Enter log · ^O " + ("one" if state.get("expand_failures") else "all")
     else:
         view = _build_view(state)
@@ -1139,13 +1158,18 @@ def _tab_pane(state: dict, out: list, cols: int, rows: int) -> list:
 
 def keys_line(state: dict, cols: int) -> str:
     """The bottom row: the keys (`keys_row`), and at its right end the CLI's
-    version, when it leaves the keys room (60 cells, as many as fit at
-    once in that much)."""
+    version (`_versioned`)."""
+    return _versioned(state, cols, _keys_row)
+
+def _versioned(state: dict, cols: int, row) -> str:
+    """A keys row (`row(state, width)`, muted), and at its right end the
+    CLI's version, when it leaves the keys room (60 cells, as many as fit
+    at once in that much)."""
     version = state.get("cli_version", "")
     tag = (" aspect " + version + " ") if version else ""
     if not tag or cols - len(tag) < 60:
-        return _c("muted") + _keys_row(state, cols) + _RESET
-    return _c("muted") + _keys_row(state, cols - len(tag)) + _RESET + _c("subtle") + tag + _RESET
+        return _c("muted") + row(state, cols) + _RESET
+    return _c("muted") + row(state, cols - len(tag)) + _RESET + _c("subtle") + tag + _RESET
 
 def _frame_of(state: dict, out: list, rows: int, cols: int) -> str:
     """The frame of `out`'s rows: the link under the pointer lit, the

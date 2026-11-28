@@ -1,20 +1,21 @@
 """`aspect history`: the tasks run on this machine, from the task history's
 records (`ctx.std.history`), newest first.
 
-    aspect history list [--kind=build] [--outcome=failed] [--branch=main] [--limit=20] [--output=json]
+    aspect history list [--kind=build] [--outcome=failed] [--branch=main] [--workspace=.] [--builds] [--limit=20] [--output=json]
     aspect history show <task-id> [--output=json]
     aspect history browse
 
 `list` gives a run a line: the start of its task ID (enough for `show`),
-when it started (UTC), how it ended (`ok`, `exit
+when it started (local time), how it ended (`ok`, `exit
 <n>`, `error`, `cancelled`, `running`, or `abandoned` for one whose process
 is gone without writing its end), how long it took, the task, and its
-command line, redacted. `show` gives one run whole: its command line, where
-it ran (the directory, and the git branch and commit), each Bazel
-invocation with its counts and its failures, each with the logs the history
-kept for it, and the folder holding the run's files, or when a prune
-removed them. `--output=json` prints the records as `task.json` has them,
-redacted, for a script.
+command line, redacted; runs a newer CLI recorded are counted on stderr.
+`show` gives one run whole: its command line, where it ran (the directory,
+and the git branch and commit), each Bazel invocation with its counts and
+its failures, each with the logs the history kept for it, and the folder
+holding the run's files, or when a prune removed them. `--output=json`
+prints the records as `task.json` has them, redacted, times in UTC, for a
+script. Both print only that: no header or verdict line around it.
 
 `browse` is the Dashboard's History screen on a full screen of its own
 (`feature/dashboard/history.axl`): the runs that started Bazel, in this
@@ -30,18 +31,23 @@ load("@aspect//feature/dashboard/history.axl", "dashboard_history")
 load("@aspect//feature/dashboard/keys.axl", "dashboard_keys")
 load("@aspect//feature/dashboard/render.axl", "dashboard_render")
 load("@aspect//feature/dashboard/state.axl", "dashboard_state")
-load("@aspect//feature/dashboard.axl", "refusal")
+load("@aspect//feature/dashboard.axl", "refusal_reason")
 load("./private/lib/history_records.axl", "list_lines", "show_lines")
 
-_new_browser = dashboard_history.new_browser
 _open_history = dashboard_history.open_history
+_standalone_state = dashboard_history.standalone_state
 _workspace_of = dashboard_history.workspace_of
 _on_key = dashboard_keys.on_key
 _draw_now = dashboard_render.draw_now
 _page_of = dashboard_render.page_of
 _render = dashboard_render.render
-_new_state = dashboard_state.new_state
-_use_context = dashboard_state.use_context
+
+def _workspace_arg(ctx: TaskContext) -> str | None:
+    """`--workspace`'s root: `.` this workspace's (None outside one), a
+    path as given, `""` none (every workspace's runs)."""
+    if ctx.args.workspace == ".":
+        return _workspace_of(ctx.std) or None
+    return ctx.args.workspace or None
 
 def _list_impl(ctx: TaskContext) -> int:
     records = [
@@ -51,9 +57,17 @@ def _list_impl(ctx: TaskContext) -> int:
             kind = ctx.args.kind or None,
             outcome = None if ctx.args.outcome == "all" else ctx.args.outcome,
             branch = ctx.args.branch or None,
+            workspace = _workspace_arg(ctx),
+            builds = ctx.args.builds,
         )
         if r.get("task", {}).get("id") != ctx.task.id
     ][:ctx.args.limit]
+
+    # Records a newer CLI wrote do not read here: said apart from the list,
+    # so a script reading stdout gets the runs alone.
+    newer = ctx.std.history.census().get("newer", 0)
+    if newer:
+        ctx.std.io.stderr.write("%d run%s from a newer aspect not listed (upgrade to read %s)\n" % (newer, "" if newer == 1 else "s", "it" if newer == 1 else "them"))
     out = ctx.std.io.stdout
     if ctx.args.output == "json":
         out.write(json.encode(records, indent = 2) + "\n")
@@ -71,6 +85,10 @@ def _show_impl(ctx: TaskContext) -> int:
     if record == None:
         print("error: no run %s in the history at %s." % (id, ctx.std.history.root()))
         return 1
+    if record.get("newer"):
+        version = (" (%s)" % record["cli_version"]) if record.get("cli_version") else ""
+        print("error: run %s was written by a newer aspect%s; upgrade to read it · files: %s" % (id, version, record.get("dir", "")))
+        return 1
     out = ctx.std.io.stdout
     if ctx.args.output == "json":
         out.write(json.encode(record, indent = 2) + "\n")
@@ -79,19 +97,33 @@ def _show_impl(ctx: TaskContext) -> int:
         out.write(line + "\n")
     return 0
 
+def _browse_refusal(std) -> str:
+    """Why `aspect history browse` does not take this terminal, and what a
+    script reads instead; "" when it does. As the Dashboard refuses one
+    (`refusal_reason`), stdin a terminal too, for the keys."""
+    why, detail = refusal_reason(std)
+    if why in ("tty", "unsized") or not std.io.stdin.is_tty:
+        return "aspect history browse needs a terminal on stdin and stdout; for a script: aspect history list --output=json"
+    if why == "ci":
+        return "aspect history browse is interactive and this is CI; aspect history list --output=json prints the runs"
+    if why == "agent":
+        return "aspect history browse is interactive and a coding agent is running this; aspect history list --output=json prints the runs"
+    if why == "term":
+        return "aspect history browse: TERM is %s; aspect history list prints the runs" % detail
+    if why == "size":
+        return "aspect history browse: the terminal is %s; aspect history list prints the runs" % detail
+    return ""
+
 def _browse_impl(ctx: TaskContext) -> int:
-    # As the dashboard refuses a terminal (CI, a coding agent, a dumb or
-    # tiny one), with stdin a terminal too, for the keys.
-    if refusal(ctx.std) != "" or not ctx.std.io.stdin.is_tty:
-        ctx.std.io.stderr.write("error: aspect history browse needs a terminal; `aspect history list` prints the runs.\n")
+    why = _browse_refusal(ctx.std)
+    if why:
+        ctx.std.io.stderr.write("error: " + why + "\n")
         return 1
     screen = ctx.std.term.take()
     screen.interrupts(False)
-    state = _new_state(task = "history browse", screen = screen, mouse = True, excerpt = ctx.std.excerpt)
+    state = _standalone_state(ctx, screen)
     screen.wheel_keys(True)
     screen.mouse(True)
-    _use_context(state, ctx)
-    state["browser"] = _new_browser(ctx.std.history, exclude = ctx.task.id, standalone = True, workspace = _workspace_of(ctx.std))
     state["draw"] = lambda: _draw_now(state)
     _open_history(state)
     code = 0
@@ -128,7 +160,7 @@ history_list = task(
     kind = "list",
     group = ["history"],
     summary = "List the tasks run on this machine, newest first.",
-    description = "List the task runs the history keeps, newest first: when each started (UTC), how it ended, how long it took, the task and its command line, redacted. Runs whose files a prune removed are still listed, from the record kept of them.",
+    description = "List the task runs the history keeps, newest first: when each started (local time), how it ended, how long it took, the task and its command line, redacted. Runs whose files a prune removed are still listed, from the record kept of them; runs a newer aspect recorded are counted on stderr.",
     keep_history = False,
     implementation = _list_impl,
     args = {
@@ -139,6 +171,8 @@ history_list = task(
             description = "Only runs that ended so (`all` by default): `ok`, `failed` (a non-zero exit), `error`, `cancelled`, `running`, or `abandoned` (its process gone without writing its end).",
         ),
         "branch": args.string(default = "", description = "Only runs on this git branch."),
+        "workspace": args.string(default = "", description = "Only runs in this workspace: its root, or `.` for the one you are in."),
+        "builds": args.boolean(default = False, description = "Only runs that started Bazel."),
         "limit": args.uint(default = 20, description = "The most runs listed."),
         "output": _OUTPUT,
     },
@@ -157,11 +191,13 @@ history_show = task(
     },
 )
 
+testonly_browse_refusal = _browse_refusal
+
 history_browse = task(
     kind = "browse",
     group = ["history"],
-    summary = "Browse the tasks run on this machine in a full-screen view, and open one as the dashboard showed it.",
-    description = "Browse the runs the task history keeps, newest first, and open one as the dashboard showed it. Needs a terminal; `aspect history list` prints the runs.",
+    summary = "Browse the task history full-screen, and open a run as the dashboard showed it.",
+    description = "Browse the task history full-screen: this workspace's builds and tests, newest first (`f` builds, failed builds, all runs; `w` every workspace). Enter opens a run as the dashboard showed it: console, failures, kept logs, metrics. `?` lists the keys. Needs a terminal; for scripts, `aspect history list --output=json`.",
     keep_history = False,
     implementation = _browse_impl,
 )

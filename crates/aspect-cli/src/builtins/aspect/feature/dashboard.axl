@@ -18,7 +18,8 @@ the task's output dumped to the scrollback, then prints the failure summary
 `h` opens the History screen (dashboard/history.axl): the task history's
 runs, a past one opened in the live run's place, read back from what the
 history kept. The live task goes on out of sight: every hook changes the
-live run where it waits (`on_live`). While browsing, Ctrl+C is a key, and
+live run where it waits (`on_live`, `take_live_event`, or `_live_of` for a
+hook that writes the run's keys alone). While browsing, Ctrl+C is a key, and
 a task that ends keeps the screen up until the user is back on the live
 one, whatever `stay` says.
 
@@ -71,7 +72,7 @@ _new_build = dashboard_state.new_build
 _new_state = dashboard_state.new_state
 _on_live = dashboard_state.on_live
 _show_run = dashboard_state.show_run
-_take_event = dashboard_state.take_event
+_take_live_event = dashboard_state.take_live_event
 _use_context = dashboard_state.use_context
 _browsing = dashboard_history.browsing
 _new_browser = dashboard_history.new_browser
@@ -98,25 +99,43 @@ _MIN_COLS = 40
 
 _MIN_ROWS = 12
 
-def refusal(std):
-    """Why the screen does not take this terminal, for a line on stderr, or
-    "" when it does; None when it is not one to ask (not a terminal, CI),
-    where Bazel's console is what is wanted. Under a coding agent the
-    screen would wait for keys nobody types, so it refuses even when
-    enabled."""
+def refusal_reason(std) -> tuple:
+    """Whether a full screen can take this terminal, `(why, detail)`:
+    `("", "")` when it can; else `tty` (stdout or stderr is no terminal),
+    `ci`, `agent` (a coding agent is running this: the screen would wait
+    for keys nobody types), `term` (`TERM` is `dumb`, or `not set`), `size`
+    (the terminal is under 40x12, `WxH`), or `unsized` (no size to read)."""
     io = std.io
-    if not (io.stdout.is_tty and io.stderr.is_tty) or std.env.var("CI"):
-        return None
+    if not (io.stdout.is_tty and io.stderr.is_tty):
+        return ("tty", "")
+    if std.env.var("CI"):
+        return ("ci", "")
     if under_agent(std):
-        return "dashboard off: a coding agent is running this; Bazel's console is shown instead"
+        return ("agent", "")
     term = std.env.var("TERM") or ""
     if term in ("", "dumb"):
-        return "dashboard off: TERM is %s; Bazel's console is shown instead" % ("dumb" if term else "not set")
+        return ("term", "dumb" if term else "not set")
     size = std.term.size()
     if size == None:
-        return None
+        return ("unsized", "")
     if size[0] < _MIN_COLS or size[1] < _MIN_ROWS:
-        return "dashboard off: the terminal is %dx%d, under %dx%d; Bazel's console is shown instead" % (size[0], size[1], _MIN_COLS, _MIN_ROWS)
+        return ("size", "%dx%d, under %dx%d" % (size[0], size[1], _MIN_COLS, _MIN_ROWS))
+    return ("", "")
+
+def refusal(std):
+    """Why the screen does not take this terminal, for a line on stderr, or
+    "" when it does (`refusal_reason`); None when it is not one to ask (not
+    a terminal, CI, no size), where Bazel's console is what is wanted.
+    Under a coding agent it refuses even when enabled."""
+    why, detail = refusal_reason(std)
+    if why in ("tty", "ci", "unsized"):
+        return None
+    if why == "agent":
+        return "dashboard off: a coding agent is running this; Bazel's console is shown instead"
+    if why == "term":
+        return "dashboard off: TERM is %s; Bazel's console is shown instead" % detail
+    if why == "size":
+        return "dashboard off: the terminal is %s; Bazel's console is shown instead" % detail
     return ""
 
 def _keys_and_draw(state: dict, screen):
@@ -257,7 +276,7 @@ def _frame(state: dict, task_ctx, build):
     _keys_and_draw(state, screen)
 
 def _event(state: dict, task_ctx, event):
-    _on_live(state, lambda s: _take_event(s, event))
+    _take_live_event(state, event)
 
 def _update(state: dict, task_ctx, update):
     if update.data:
@@ -377,6 +396,7 @@ def _post(state: dict, task_ctx, outcome):
         if task_ctx.cancellation.root.cancelled:
             live["cancelling"] = True
         live["verdict"] = outcome.exit_code == 0
+        live["exit_code"] = outcome.exit_code
 
         # A task that failed before any build has nothing to browse:
         # gone at once, its error last in the scrollback.
@@ -472,6 +492,16 @@ def _dashboard_impl(ctx: FeatureContext):
     ctx.hooks.idle(lambda task_ctx: _idle(state, task_ctx))
     ctx.hooks.post_task(lambda task_ctx, outcome: _post(state, task_ctx, outcome))
 
+# The feature's hooks, for the tests that drive them with a fake screen and
+# task context while a past run is shown.
+testonly_hooks = namespace(
+    event = _event,
+    hold = _hold,
+    post = _post,
+    report = _report,
+    spawn = _spawn,
+)
+
 Dashboard = feature(
     display_name = "Dashboard",
     summary = "Run build, test, lint, gazelle and format in a full-screen dashboard: the task's console, its builds' running actions and results, failures, metrics.",
@@ -482,7 +512,7 @@ Dashboard = feature(
             default = "always",
             values = ["always", "failure", "never"],
             bare = "always",
-            description = "Whether the screen stays up once the task ends, until q, Enter, Esc or Ctrl+C: `always` (the default) stays whatever the outcome, to look at its tabs; `failure` stays when anything failed, and with nothing failed counts down 10 seconds and leaves, which q, Enter or Esc cut short and any other key stops; `never` leaves at once. Only when stdin is a terminal.",
+            description = "Whether the screen stays up once the task ends, until q, Enter, Esc or Ctrl+C: `always` (the default) stays whatever the outcome, to look at its tabs; `failure` stays when anything failed, and with nothing failed counts down 10 seconds and leaves, which q, Enter or Esc cut short and any other key stops; `never` leaves at once. Only when stdin is a terminal. While the History screen (`h`) or a past run is open, the screen stays up until you are back on the live one, and a countdown starts then.",
         ),
         "mouse": args.boolean(
             default = True,

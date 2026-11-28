@@ -17,8 +17,12 @@ This feature adds, each with its own default:
   wrote for each action, kept in the build's folder as
   `bazel/<n>/actions/[external/<repo>/]<package>/<name>/<mnemonic>-<k>.{stdout,stderr}` and
   listed, with each action's label, mnemonic, output, exit code and times, in
-  `bazel/<n>/actions.json`. `failed` keeps failed actions', which Bazel
-  reports by default; `all` keeps every action's that wrote any: those builds run
+  `bazel/<n>/actions.json`, each numbered by the build attempt it came in
+  (`build_attempt`, and the index's `build_attempts`: a build Bazel restarts
+  in place lists every attempt's) and a failed action that wrote nothing
+  listed with no log, so a build's failures match it one for one. `failed`
+  keeps failed actions', which Bazel reports by default; `all` keeps every
+  action's that wrote any: those builds run
   with `--build_event_publish_all_actions` so Bazel reports them to the CLI,
   while the BES backends it streams to and a requested BEP file get only what
   Bazel reports without it, unless your own flags or rc ask for every action.

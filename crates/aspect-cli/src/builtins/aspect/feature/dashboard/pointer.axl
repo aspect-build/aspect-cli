@@ -324,20 +324,26 @@ def _editor(state: dict) -> tuple:
 
 _KEEP_EDITOR = "to keep it, set ctx.features[Console].args.file_hyperlink_format = \"%s\" in .aspect/config.axl (or ASPECT_FILE_HYPERLINK_FORMAT=%s)"
 
-def open_in_editor(state: dict, path: str, line: int = 1) -> str:
-    """Open `path` at `line` in `_editor`'s editor; what happened, for the
-    keys row. An editor's link only: never a `file://` one, which would have
-    the system run the file."""
+def editor_link(state: dict, path: str, line: int = 1) -> str | None:
+    """The link opening `path` at `line` in `_editor`'s editor; None with no
+    editor, or one whose link is `file://`, which would have the system run
+    the file."""
     io = state.get("io")
     if io == None or not path:
-        return "no file to open"
-    alias, name = _editor(state)
+        return None
+    alias = _editor(state)[0]
     url = io.editor_url(path, line = line, format = "" if alias in ("none", "template") else alias) if alias != "none" else None
+    return None if url == None or url.startswith("file:") else url
+
+def open_in_editor(state: dict, path: str, line: int = 1) -> str:
+    """Open `path` at `line` in `_editor`'s editor (`editor_link`); what
+    happened, for the keys row."""
+    if state.get("io") == None or not path:
+        return "no file to open"
+    url = editor_link(state, path, line)
     if url == None:
         return "no editor to open it in: O picks one, or set --console:file-hyperlink-format"
-    if url.startswith("file:"):
-        return "no editor to open it in: O picks one, or set --console:file-hyperlink-format"
-    return open_link(state, url, trusted = True).replace("opened " + url, "opened in " + name)
+    return open_link(state, url, trusted = True).replace("opened " + url, "opened in " + _editor(state)[1])
 
 def next_editor(state: dict) -> str:
     """`O`: the next installed editor for `o`, this session; how to keep it."""
@@ -520,6 +526,7 @@ def mouse_key(state: dict, key: str) -> bool:
 dashboard_pointer = namespace(
     testonly_copy_text = copy_text,
     editor = _editor,
+    editor_link = editor_link,
     testonly_highlightable = highlightable,
     hover_colour = _hover_colour,
     link_at = link_at,

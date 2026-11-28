@@ -1,12 +1,15 @@
 """Tests for the Dashboard's History screen (`dashboard/history.axl`): the
-runs it lists and their keys, a past run read back from the history and
-shown in the live one's place (`past_run`), its logs the history's copies
-alone, and a build Bazel restarted in place (`take_event`).
+runs it lists, in columns and at every width, and its keys; a past run read
+back from the history and shown in the live one's place (`past_run`), its
+logs the history's copies inside its entry alone; a build Bazel restarted
+in place (`take_event`); and the feature's hooks keeping the live run apart
+from the one shown (`testonly_hooks`).
 
 Run with:
   aspect dev test-dashboard-history
 """
 
+load("@aspect//bazel.axl", "BazelTrait")
 load("@aspect//feature/dashboard/history.axl", "dashboard_history")
 load("@aspect//feature/dashboard/keys.axl", "dashboard_keys")
 load("@aspect//feature/dashboard/log.axl", "dashboard_log")
@@ -15,8 +18,11 @@ load("@aspect//feature/dashboard/render.axl", "dashboard_render")
 load("@aspect//feature/dashboard/state.axl", "dashboard_state")
 load("@aspect//feature/dashboard/testing.axl", "dashboard_testing")
 load("@aspect//feature/dashboard/view.axl", "dashboard_view")
+load("@aspect//feature/dashboard.axl", "testonly_hooks")
+load("@aspect//history.axl", "testonly_browse_refusal")
+load("@std//time.axl", "sleep")
 load("../../private/lib/failure_records.axl", "failure_records")
-load("../../private/lib/history_records.axl", "show_lines")
+load("../../private/lib/history_records.axl", "show_lines", "stamp_ms")
 load("../../private/lib/term_text.axl", "term_text")
 
 _eq = dashboard_testing.eq
@@ -27,6 +33,7 @@ CONTROLS = term_text.CONTROLS
 text_width = term_text.text_width
 log_paths = failure_records.log_paths
 ago = dashboard_history.ago
+command_cell = dashboard_history.command_cell
 history_records = dashboard_history.history_records
 history_rows = dashboard_history.history_rows
 new_browser = dashboard_history.new_browser
@@ -34,8 +41,12 @@ open_history = dashboard_history.open_history
 past_header = dashboard_history.past_header
 past_run = dashboard_history.past_run
 row_id = dashboard_history.row_id
-stamp_ms = dashboard_history.stamp_ms
+show_past = dashboard_history.show_past
+standalone_state = dashboard_history.standalone_state
+table_rows = dashboard_history.table_rows
 use_kept_logs = dashboard_history.testonly_use_kept_logs
+within = dashboard_history.testonly_within
+workspace_names = dashboard_history.workspace_names
 help_rows = dashboard_keys.help_rows
 on_key = dashboard_keys.on_key
 add_lines = dashboard_log.add_lines
@@ -43,6 +54,7 @@ new_search = dashboard_log.new_search
 say_note = dashboard_log.say_note
 view_file = dashboard_pointer.view_file
 build_row = dashboard_render.testonly_build_row
+metrics_lines = dashboard_render.testonly_metrics_lines
 page_of = dashboard_render.page_of
 render = dashboard_render.render
 end_build = dashboard_state.end_build
@@ -56,10 +68,11 @@ show_run = dashboard_state.show_run
 take_event = dashboard_state.take_event
 log_view = dashboard_view.testonly_log_view
 
-def _history(records, runs = None, unreadable = 0, without_record = 0, newer = 0):
+def _history(records, runs = None, unreadable = 0, without_record = 0, newer = 0, fails = False):
     """A `ctx.std.history` over `records`, noting each listing's filters and
     each census; its census `runs` (all of `records` by default),
-    `without_record`, `unreadable` and `newer`."""
+    `without_record`, `unreadable` and `newer`; its `read_output` failing
+    when `fails`."""
     asked = []
     censuses = []
 
@@ -79,6 +92,11 @@ def _history(records, runs = None, unreadable = 0, without_record = 0, newer = 0
         found = [r for r in records if r["task"]["id"] == id]
         return found[0] if found else None
 
+    def read_output(record, limit = 5000):
+        if fails:
+            fail("output.ansi: Is a directory")
+        return None
+
     return struct(
         list = list,
         get = get,
@@ -86,7 +104,7 @@ def _history(records, runs = None, unreadable = 0, without_record = 0, newer = 0
         census = census,
         asked = asked,
         censuses = censuses,
-        read_output = lambda record, limit = 5000: None,
+        read_output = read_output,
     )
 
 def _record(id, ended = "ok", **kw):
@@ -100,7 +118,7 @@ def _record(id, ended = "ok", **kw):
         "exit_code": 0 if ended == "ok" else 1,
         "dir": "/h/" + id,
         "workspace": "/ws",
-        "bazel": [{"command": "build"}],
+        "bazel": [{"command": "build", "patterns": ["//..."]}],
     }
     record.update(kw)
     return record
@@ -113,25 +131,39 @@ def _history_state(ctx, records, standalone = False, **kw):
     state["browser"] = new_browser(_history(records, **kw), exclude = "live", standalone = standalone, workspace = "/ws")
     return state
 
-def _fake_screen():
-    """A screen that notes whether Ctrl+C is a signal, and each
-    `interrupt()`."""
-    seen = {"interrupts": True, "interrupted": 0}
+def _fake_screen(keys = []):
+    """A screen that notes whether Ctrl+C is a signal and each `interrupt()`,
+    and gives `keys` in order, then None; one asked for keys long after it
+    has none fails, rather than hang a loop that never leaves."""
+    seen = {"interrupts": True, "interrupted": 0, "keys": list(keys), "idle": 0, "released": False}
+
+    def key(timeout_ms = None):
+        if seen["keys"]:
+            return seen["keys"].pop(0)
+        seen["idle"] += 1
+        if seen["idle"] > 40:
+            fail("the screen kept waiting for keys")
+        return None
+
     return struct(
+        held = True,
         interrupts = lambda on: seen.update(interrupts = on),
         interrupt = lambda: seen.update(interrupted = seen["interrupted"] + 1),
         size = lambda: (120, 30),
         write = lambda text: None,
         mouse = lambda on: None,
+        output = lambda: [],
+        key = key,
+        release = lambda replay_stderr = False, dump_lines = 0, older = "": seen.update(released = True) or [],
         seen = seen,
     )
 
 def _test_screen(ctx):
-    """The History screen (`h`): the live build pinned first, then this
-    workspace's builds; its filters, its count, its keys and a past run
-    shown in the live one's place."""
+    """The History screen (`h`): the live build first, in the runs' columns,
+    then this workspace's builds; its header, title, filters and keys; a
+    past run shown in the live one's place."""
     _eq("the UI's keys and the run's apart", [k for k in new_run().keys() if k in new_ui()], [])
-    live_record = _record("live", "running", argv = ["/bin/aspect", "build", "//examples:demo"])
+    live_record = _record("live", "running", argv = ["/bin/aspect", "build", "//examples:demo"], bazel = [{"command": "build", "patterns": ["//examples:demo"]}])
     records = [
         live_record,
         _record("aaaa1111", "failed"),
@@ -145,22 +177,28 @@ def _test_screen(ctx):
     state["building"] = True
     state["progress"] = ["[21 / 35] 3 actions running"]
 
-    # From the live run, `h` opens the list: the live build pinned first,
-    # then this workspace's builds; the count against the whole history.
+    # From the live run, `h` opens the list: the live build first, then
+    # this workspace's builds; the history's size in the header, the
+    # list's in its title.
     _eq("h opens the list", (on_key(state, "h", 10), state["mode"]), (False, "history"))
-    screen = _visible(render(state, 120, 20))
-    _eq("the live build pinned first, its progress in the header", ("● now running build //examples:demo (live)" in screen, "live build running 21/35" in screen), (True, True))
+    screen = _visible(render(state, 120, 20)).replace("\r", "")
+    lines = screen.split("\n")
+    _eq("the header: the runs kept, the live build in its one form", lines[0].strip(), "aspect history · 7,702 runs kept · live ⠋ 21/35")
+    _eq("the title: what is listed, where, how many", "Runs · builds · this workspace (2)" in lines[1], True)
+    live_row = [l for l in lines if "examples:demo" in l][0]
+    _eq("the live build's row in the runs' columns, live as its ID", (live_row.strip("│ ").startswith("⠋ 21/35"), live_row.rstrip(" │").endswith("live")), (True, True))
     _eq("builds in this workspace, by default", ("aaaa1111" in screen, "bbbb2222" in screen, "hhhh0000" in screen, "oooo0000" in screen), (True, True, False, False))
-    _eq("the count, of the whole history", "aspect history · 2 builds of 7,701 runs in all workspaces" in screen, True)
-    _eq("the filter and workspace keys say what is shown", ("f filter: builds" in screen, "w: this workspace" in screen, "Esc live build" in screen, "? keys" in screen), (True, True, True, True))
+    _eq("the keys, the likeliest first, ? keys kept", lines[-1].strip(), "Enter open · ↑↓ choose · Esc live build · f show: builds · w: this workspace · ? keys")
     _eq("asked for builds here", state["browser"]["history"].asked[-1], (None, True, "/ws"))
-    _eq("a row: status, when, time, command, id last", [l for l in screen.split("\n") if "aaaa1111" in l][0].strip("│ ").startswith("✗ exit 1"), True)
-    _eq("no aspect before the command", " aspect build" in [l for l in screen.split("\n") if "bbbb2222" in l][0], False)
+    _eq("a row: status, when, time, command, id last", [l for l in lines if "aaaa1111" in l][0].strip("│ ").startswith("✗ exit 1"), True)
+    _eq("no aspect before the command", " aspect build" in [l for l in lines if "bbbb2222" in l][0], False)
+    _eq("the chosen row in reverse video alone, no marker in the border", ("┃" in screen, _role("active") in render(state, 120, 20)), (False, True))
     _eq("the list pages by its height", page_of(state, 120, 20), 16)
-    _eq("e is not the hidden run's", (on_key(state, "e", 10), state["filter"]), (False, "all"))
+    _eq("Dashboard keys are not the hidden run's", (on_key(state, "z", 10), state["zoom"]), (False, False))
     on_key(state, "?", 10)
     helped = _visible(render(state, 120, 20))
-    _eq("? shows the History keys alone", ("History" in helped, "filter: builds, failed builds, all runs" in helped, "Scroll" in helped, "Actions" in help_rows(state)), (True, True, False, False))
+    _eq("? shows the History keys alone, for the live mode", ("History" in helped, "show builds, failed builds or all runs" in helped, "back to the live build" in helped, "quit" in helped, "Scroll" in helped, "Actions" in help_rows(state)), (True, True, True, False, False, False))
+    _eq("Enter and the paging keys each a row", ("Enter" in "\n".join([r for r in help_rows(state) if "open it" in r]), "K J  Home End" in helped, "u d  PgUp PgDn" in helped), (True, True, True))
     on_key(state, "x", 10)
     on_key(state, "esc", 10)
     _eq("Esc goes back to the live run", (state["mode"], state["log"], state["start_ms"]), ("run", ["INFO: live line"], 5))
@@ -172,21 +210,27 @@ def _test_screen(ctx):
     on_key(state, "enter", 10)
     _eq("Enter on the live row is the live build", (state["mode"], state.get("past")), ("run", None))
 
-    # `f` cycles builds, failed builds and all runs; `w` all workspaces.
-    # Each says what it did, as the dashboard's toggles do.
+    # `f` cycles builds, failed builds and all runs, `e` failed builds and
+    # back, `w` every workspace; each says what it did, one pattern.
     on_key(state, "h", 10)
     on_key(state, "f", 10)
-    _eq("f says what it now lists, and what it lists next", "listing failed builds · f lists all runs" in _visible(render(state, 120, 20)), True)
+    _eq("f says what it shows, and what it shows next", "failed builds · f: all runs" in _visible(render(state, 120, 20)), True)
     say_note(state, "")
     failed = _visible(render(state, 120, 20))
-    _eq("f: failed builds", ("f filter: failed builds" in failed, "aaaa1111" in failed, "bbbb2222" in failed, state["browser"]["history"].asked[-1]), (True, True, False, ("failed", True, "/ws")))
-    _eq("its count", "1 failed build of 7,701 runs in all workspaces" in failed, True)
+    _eq("f: failed builds", ("f show: failed builds" in failed, "aaaa1111" in failed, "bbbb2222" in failed, state["browser"]["history"].asked[-1]), (True, True, False, ("failed", True, "/ws")))
+    _eq("its count in the title", "Runs · failed builds · this workspace (1)" in failed, True)
+    on_key(state, "e", 10)
+    _eq("e: back to builds, and says so", (state["browser"]["filter"], "builds · e: failed builds only" in _visible(render(state, 120, 20))), ("builds", True))
+    on_key(state, "e", 10)
+    _eq("e again: failed builds", state["browser"]["filter"], "failed builds")
     on_key(state, "f", 10)
     on_key(state, "w", 10)
-    _eq("w says whose runs, and how to go back", "every workspace's runs · w lists this one's" in _visible(render(state, 120, 20)), True)
+    _eq("w says whose runs, and how to go back", "every workspace · w: this one" in _visible(render(state, 120, 20)), True)
     say_note(state, "")
     every = _visible(render(state, 120, 20))
-    _eq("f: all runs, w: every workspace", ("hhhh0000" in every, "oooo0000" in every, "w: all workspaces" in every, state["browser"]["history"].asked[-1]), (True, True, True, (None, False, None)))
+    _eq("f: all runs, w: every workspace", ("hhhh0000" in every, "oooo0000" in every, "w: every workspace" in every, state["browser"]["history"].asked[-1]), (True, True, True, (None, False, None)))
+    other = [l for l in every.split("\n") if "oooo0000" in l][0]
+    _eq("every workspace's runs, a workspace column", (" other " in other, " ws " in [l for l in every.split("\n") if "bbbb2222" in l][0]), (True, True))
     on_key(state, "f", 10)
     on_key(state, "w", 10)
 
@@ -199,9 +243,9 @@ def _test_screen(ctx):
     _eq("Enter shows it", (state["mode"], state["past"]["task"]["id"]), ("run", "bbbb2222"))
     shown = _visible(render(state, 120, 20))
     head = shown.split("\n")[0]
-    _eq("the header leads with History, the live build on the right", (head.strip().startswith("✔ History · build //... ·"), "live: " in head and "21/35" in head), (True, True))
+    _eq("the header leads with History, the run's glyph after it, the live build on the right", (head.strip().startswith("History · ✔ build //... · ok · 6.3s"), head.rstrip().endswith("live ⠋ 21/35")), (True, True))
     _eq("its status bar in the accent's colour too", (_role("status_bar") + _role("accent")) in render(state, 120, 20).split("\n")[0], True)
-    _eq("the console a replay", ("replay" in shown, "following" in shown), (True, False))
+    _eq("no console kept: no replay", (" replay ─" in shown, "following" in shown), (False, False))
     _eq("its keys: back to the list", ("q history · ? keys" in shown, "Done" in shown, "open in" in shown), (True, False, False))
     on_key(state, "?", 10)
     _eq("? on a past run: q goes back to the list", ("on a past run: back to the History list" in "\n".join(help_rows(state)), "cancel the build" in "\n".join(help_rows(state))), (True, False))
@@ -212,16 +256,22 @@ def _test_screen(ctx):
     end_build(folded, 1000)
     folded["panes"] = True
     panes = _visible(render(folded, 160, 40))
-    _eq("no action timings for a past run", ("Action timings aren't kept for past runs" in panes, "Running (0)" in panes), (True, False))
+    _eq("action timings not replayed for a past run", ("Action timings aren't replayed for past runs" in panes, "Running (0)" in panes), (True, False))
+    _eq("nor the execution log's spawns", [l for l in metrics_lines(folded) if "spawns" in l][0].endswith("not replayed for past runs"), True)
     _eq("no console kept says so", state["log"][-1], "console not kept for this run · aspect history show bbbb2222")
     stopped = past_run(state, _record("ssss0000", "cancelled", cancelled = True))
-    _eq("a cancelled run, ■", past_header(dict(state, past = stopped["past"])).startswith(" ■ History"), True)
-    long = past_header(dict(state, past = _record("llll0000", "failed", argv = ["/bin/aspect", "build"] + ["//very/long:target%d" % i for i in range(20)])), 80)
-    _eq("a long command is cut, the outcome and time kept", (long.rstrip().endswith("exit 1 · 6.3s"), text_width(long) <= 80, "//very/long:target0" in long), (True, True, True))
+    _eq("a cancelled run, ■", past_header(dict(state, past = stopped["past"])).startswith(" History · ■"), True)
+    state["browser"]["now_ms"] = stamp_ms("2026-11-21T15:41:39.143Z")
+    long = past_header(dict(state, past = _record("llll0000", "failed", argv = ["/bin/aspect", "build", "//very/long/package/path:target", "--config=<REDACTED>"] + ["--flag%d" % i for i in range(20)], bazel = [{"patterns": ["//very/long/package/path:target"]}])), 80)
+    _eq("a long command's flags go first, the outcome, time and when kept", ("exit 1 · 6.3s ·" in long, text_width(long) <= 80, "//very/long/package/path:target" in long, "<REDACTED>" in long), (True, True, True, False))
+    tight = past_header(dict(state, past = _record("llll0000", "failed", argv = ["/bin/aspect", "build", "//very/long/package/path:target"], bazel = [{"patterns": ["//very/long/package/path:target"]}])), 62)
+    _eq("then its package shortened in the middle", ("//…/path:target" in tight, text_width(tight) <= 62, tight.rstrip().endswith("exit 1 · 6.3s · 2m ago")), (True, True, True))
     elsewhere = past_run(state, _record("rrrr0000", "running"))
     _eq("one still running elsewhere, as of when", "running, as of" in past_header(dict(state, past = elsewhere["past"])), True)
-    nobuild = past_run(state, _record("nnnn0000", bazel = []))
-    _eq("a run with no build shows its record", (nobuild["log"][0], nobuild["log"][2:] == show_lines(nobuild["past"])), ("This run started no Bazel build · aspect history show nnnn0000", True))
+    nobuild = past_run(state, _record("nnnn0000", bazel = [], argv = ["/bin/aspect", "worktree", "list"]))
+    _eq("a run with no build: a line of its record", nobuild["log"], ["worktree list · ok · 6.3s · aspect history show nnnn0000", "console not kept for this run · aspect history show nnnn0000"])
+    pruned = past_run(state, _record("pppp0000", evicted = "2026-11-20T10:00:00.000Z"))
+    _eq("a pruned run: what happened, then its record", (pruned["log"][0].startswith("This run's files were removed (pruned "), pruned["log"][2:] == show_lines(pruned["past"])), (True, True))
     timed = past_run(state, _record("tttt0000", started = "2026-12-31T23:59:58.500Z", bazel = [{"ended": "2027-01-01T00:00:04.000Z"}], duration_ms = 99000))
     _eq("a past run's time, from its start to its last build's end", timed["now_ms"], 5500)
     _eq("the live run waits aside", state["live"]["log"], ["INFO: live line"])
@@ -229,26 +279,32 @@ def _test_screen(ctx):
     on_live(state, lambda s: add_lines(s, ["INFO: more"]))
     _eq("the live run goes on unseen", (state["live"]["log"], state["scroll"]), (["INFO: live line", "INFO: more"], 3))
     state["live"]["cancelling"] = True
-    _eq("a live build being cancelled says so over a past run", "live: cancelling…" in _visible(render(state, 140, 30)), True)
+    _eq("a live build being cancelled says so over a past run", "live ■ cancelling" in _visible(render(state, 140, 30)), True)
     state["live"]["cancelling"] = False
 
     # What would leave a finished screen goes back to the list, `q` never
-    # cancelling the live build.
+    # cancelling the live build; `h` does too, the run kept chosen.
     _eq("q goes back to the list", (on_key(state, "q", 10), state["mode"], state["cancelling"], state["live"]["cancelling"]), (False, "history", False, False))
     history_records(state)
     _eq("the run it showed still chosen", row_id(history_rows(state)[state["browser"]["selected"]]), "bbbb2222")
+    on_key(state, "enter", 10)
+    on_key(state, "h", 10)
+    history_records(state)
+    _eq("h on a past run: the list, the run still chosen", (state["mode"], row_id(history_rows(state)[state["browser"]["selected"]])), ("history", "bbbb2222"))
     on_key(state, "esc", 10)
     _eq("and the list's Esc to the live run", (state["mode"], state.get("past"), state["live"]), ("run", None, None))
 
-    # Ctrl+C while browsing: a key, the first saying what a second does,
-    # which interrupts the live build as its own Ctrl+C would and shows it;
-    # while it is cancelling, a second pair forces it.
+    # Ctrl+C while browsing: a key, the first saying what a second does, in
+    # the warning colour, which interrupts the live build as its own Ctrl+C
+    # would and shows it; while it is cancelling, a second pair forces it.
     state["screen"] = _fake_screen()
     seen = state["screen"].seen
     on_key(state, "h", 10)
     _eq("browsing, Ctrl+C is a key", seen["interrupts"], False)
     on_key(state, "ctrl-c", 10)
-    _eq("a first Ctrl+C only warns", (seen["interrupted"], state["mode"], "Ctrl+C again cancels the live build · Esc back to it" in _visible(render(state, 120, 20))), (0, "history", True))
+    warned = render(state, 120, 20).split("\r\n")[-1]
+    _eq("a first Ctrl+C only warns", (seen["interrupted"], state["mode"], "Ctrl+C again cancels the live build · Esc back to it" in _visible(warned)), (0, "history", True))
+    _eq("in the warning colour, Ctrl+C again bold", (_role("warning") in warned, _role("strong") + "Ctrl+C again" in warned), (True, True))
     on_key(state, "ctrl-c", 10)
     _eq("a second interrupts the live build, shown", (seen["interrupted"], state["mode"], state["cancelling"], seen["interrupts"]), (1, "run", True, True))
     on_key(state, "h", 10)
@@ -278,10 +334,11 @@ def _test_screen(ctx):
     full["browser"]["filter"] = "all runs"
     full["browser"]["records"] = None
     _eq("500 listed, not the live one", (len(history_records(full)), [r for r in full["browser"]["records"] if r["task"]["id"] == "live"]), (500, []))
-    _eq("and says they are the newest, of the runs it could list", "500 newest runs of 600 runs in all workspaces" in _visible(render(full, 120, 20)), True)
-    one = _history_state(ctx, [_record("live", "running"), _record("only0000")])
+    _eq("and says they are the newest", "Runs · all runs · this workspace (500 newest)" in _visible(render(full, 120, 20)), True)
+    one = _history_state(ctx, [_record("live", "running")])
     open_history(one)
-    _eq("one build of one run", "1 build of 1 run in all workspaces" in _visible(render(one, 120, 20)), True)
+    lone = _visible(render(one, 120, 20))
+    _eq("no earlier build: said under the live row", ("No earlier builds in this workspace." in lone, "(0)" in lone), (True, True))
 
     # The chosen run stays chosen as newer runs come above it.
     runs = [_record("aaaa1111"), _record("bbbb2222"), _record("cccc3333")]
@@ -297,10 +354,14 @@ def _test_screen(ctx):
 
     # Standalone (`aspect history browse`): q or Esc quits; Ctrl+C too.
     alone = _history_state(ctx, records, standalone = True, unreadable = 3, without_record = 749, newer = 2)
+    alone["cli_version"] = "2026.48.0"
     open_history(alone)
     listed = _visible(render(alone, 120, 20))
-    _eq("q/Esc quit, standalone, no live row", ("q/Esc quit" in listed, "(live)" in listed), (True, False))
-    _eq("damaged entries counted under the list, for what they are", "749 folders without a record · 2 records from a newer CLI · 3 records unreadable" in listed, True)
+    _eq("q quit, standalone, no live row, the version at the end", ("q quit" in listed, " live" in listed, listed.rstrip().endswith("aspect 2026.48.0")), (True, False, True))
+    _eq("what the list leaves out counted under it, and why", ("2 runs from a newer aspect, not listed (upgrade to read them)" in listed, "749 folders without a record" in listed), (True, True))
+    on_key(alone, "?", 10)
+    _eq("? standalone: q quits", ("quit" in _visible(render(alone, 120, 20)), "back to the live build" in _visible(render(alone, 120, 20))), (True, False))
+    on_key(alone, "x", 10)
     on_key(alone, "enter", 10)
     _eq("a past run's Esc goes back to the list", (on_key(alone, "esc", 10), alone["mode"]), (False, "history"))
     _eq("whose q leaves", on_key(alone, "q", 10), True)
@@ -308,7 +369,7 @@ def _test_screen(ctx):
     empty = _history_state(ctx, [], standalone = True)
     open_history(empty)
     nothing = _visible(render(empty, 120, 20))
-    _eq("an empty history says so, the path apart, only q", ("No runs yet. Builds and tests you run appear here." in nothing, "/h" in nothing, nothing.strip().endswith("q quit")), (True, True, True))
+    _eq("an empty history says so, its folder apart, only q", ("No runs yet. Builds and tests you run appear here." in nothing, "History folder: /h" in nothing, nothing.strip().endswith("q quit · ? keys")), (True, True, True))
     _eq("Enter on nothing does nothing", (on_key(empty, "enter", 10), empty["mode"]), (False, "history"))
 
     # When a run started, as the local clock tells it.
@@ -316,6 +377,106 @@ def _test_screen(ctx):
     _eq("minutes ago", ago("2026-11-21T15:39:39.143Z", now), "7m ago")
     _eq("just now", ago("2026-11-21T15:47:00.000Z", now), "just now")
     _eq("long ago, a date", ago("2024-03-02T10:00:00.000Z", now).startswith("2024-03-0"), True)
+
+def _test_layout(ctx):
+    """The list's columns at every width: a column as wide as its widest
+    value, the label the last thing cut (flags first, a redacted one before
+    the others, then the ID, then the duration), its package shortened in
+    the middle; a pruned run dimmed; workspaces told apart by their
+    ends."""
+    flags = ["--keep_going", "--config=<REDACTED>", "--action_env=X=1"]
+    long = "build //examples/dashboard:demo"
+    _eq("every flag when they fit", command_cell(long, flags, 81), "build //examples/dashboard:demo --keep_going --config=<REDACTED> --action_env=X=1")
+    _eq("a redacted flag goes first", command_cell(long, flags, 70), "build //examples/dashboard:demo --keep_going --action_env=X=1 …")
+    _eq("then the others from the end", command_cell(long, flags, 50), "build //examples/dashboard:demo --keep_going …")
+    _eq("then the label alone, whole", command_cell(long, flags, 34), long)
+    _eq("then its package in the middle", command_cell(long, flags, 24), "build //…/dashboard:demo")
+    _eq("then cut", text_width(command_cell(long, flags, 12)), 12)
+    _eq("a workspace by the end that tells it apart", workspace_names(["/a/slots/aspect-worktree-1", "/a/slots/aspect-worktree-2", "/b/repo", "/a/repo"]), {"/a/slots/aspect-worktree-1": "aspect-worktree-1", "/a/slots/aspect-worktree-2": "aspect-worktree-2", "/b/repo": "b/repo", "/a/repo": "a/repo"})
+    runs = [
+        _record("aaaa1111", "failed", argv = ["/bin/aspect", "build", "//examples/dashboard:demo"] + flags, bazel = [{"patterns": ["//examples/dashboard:demo"]}]),
+        _record("bbbb2222", evicted = "2026-11-20T10:00:00.000Z"),
+    ]
+    state = _history_state(ctx, runs, standalone = True)
+    history_records(state)
+    state["browser"]["now_ms"] = stamp_ms("2026-11-21T15:41:39.143Z")
+    wide = [_visible(r) for r in table_rows(state, history_rows(state), 116, -1)]
+    _eq("wide: every column, the ID near its command", ("aaaa1111" in wide[0], "--keep_going" in wide[0], wide[0].index("aaaa1111") < 100), (True, True, True))
+    _eq("a pruned run says so where its ID goes, dimmed", ("pruned" in wide[1], table_rows(state, history_rows(state), 116, -1)[1].startswith(_role("muted"))), (True, True))
+    for width in (116, 76, 60, 52, 44):
+        for chosen in (0, 1, -1):
+            rows = [_visible(r) for r in table_rows(state, history_rows(state), width, chosen)]
+            _eq("rows as wide as the box at %d, row %d chosen" % (width, chosen), [text_width(r) for r in rows], [width, width])
+    narrow = [_visible(r) for r in table_rows(state, history_rows(state), 60, -1)]
+    _eq("at 60: no flags, no ID, the duration and the whole label kept", ("--keep_going" in narrow[0], "aaaa1111" in narrow[0], "6.3s" in narrow[0], "build //examples/dashboard:demo" in narrow[0]), (False, False, True, True))
+    tighter = [_visible(r) for r in table_rows(state, history_rows(state), 50, -1)]
+    _eq("at 50: the duration gone too, the label whole", ("6.3s" in tighter[0], "build //examples/dashboard:demo" in tighter[0]), (False, True))
+    tightest = [_visible(r) for r in table_rows(state, history_rows(state), 42, -1)]
+    _eq("at 42: the label's package shortened", "build //…/dashboard:demo" in tightest[0], True)
+    slots = _history_state(ctx, [_record("ssss0001", workspace = "/x/slots/aspect-worktree-e943aed214d5"), _record("ssss0002", workspace = "/x/slots/aspect-worktree-9c1239a4beb3")], standalone = True)
+    slots["browser"]["here"] = False
+    history_records(slots)
+    slots["browser"]["now_ms"] = stamp_ms("2026-11-21T15:41:39.143Z")
+    drawn = [_visible(r) for r in table_rows(slots, history_rows(slots), 76, -1)]
+    _eq("every workspace's runs: each named by its end, cut from its left", ("…" in drawn[0], "e943aed214d5" in drawn[0], "9c1239a4beb3" in drawn[1]), (True, True, True))
+    _eq("and the duration and ID beside them", ("6.3s" in drawn[0], "ssss0001" in drawn[0]), (True, True))
+    for cols, rows in ((80, 24), (120, 40), (40, 12)):
+        drawn = render(state, cols, rows).split("\r\n")
+        _eq("the screen fits %dx%d" % (cols, rows), [text_width(_visible(r)) <= cols for r in drawn if r], [True for r in drawn if r])
+
+def _test_broken_runs(ctx):
+    """A run that cannot be read leaves the list up saying why, and the live
+    run as it was; a record's paths that would leave its entry are not
+    followed."""
+    state = _history_state(ctx, [_record("live", "running"), _record("bad00000")], fails = True)
+    add_lines(state, ["INFO: live line"])
+    open_history(state)
+    on_key(state, "down", 10)
+    on_key(state, "enter", 10)
+    _eq("a run that cannot be read: the list stays, saying why", (state["mode"], state.get("past"), state.get("live"), "cannot open bad00000: output.ansi: Is a directory" in _visible(render(state, 120, 20))), ("history", None, None, True))
+    _eq("the live run untouched", state["log"], ["INFO: live line"])
+    _eq("a path inside the entry", within("/h/e", "bazel/1/x.log"), "/h/e/bazel/1/x.log")
+    _eq("none climbing out, absolute or empty", [within("/h/e", p) for p in ["../outside/secret.txt", "bazel/../../x", "/etc/passwd", "", 7]], [None, None, None, None, None])
+    kept = {"fails": [{"kind": "action", "label": "//a:a", "detail": "Genrule", "success": False, "files": [("stderr", "file:///out/a")]}], "outputs": [{"kind": "action", "label": "//o:o", "detail": "Genrule", "success": True, "files": []}]}
+    use_kept_logs(kept, "/h/e", {"summary": {"failures": [{"kind": "action", "label": "//a:a", "detail": "Genrule", "logs": ["../outside/secret.txt"]}]}}, actions = [{"label": "//o:o", "mnemonic": "Genrule", "success": True, "stderr": "../../other/stderr"}], folder = "/h/e/bazel/1")
+    _eq("a summary's log outside the entry is not taken", kept["fails"][0]["files"], [("stderr", "file:///out/a")])
+    _eq("nor an index's", kept["outputs"][0]["files"], [])
+
+def _test_notes(ctx):
+    """`aspect history browse`'s state times its notes by its own clock, so
+    they go; what it says when it refuses a terminal; a past run's build
+    tabs saying why they are empty."""
+    alone = standalone_state(ctx, _fake_screen())
+    _eq("browse has a clock", alone["clock"] != None, True)
+    alone["read"] = lambda p, c: None
+    alone["browser"]["history"] = _history([])
+    open_history(alone)
+    say_note(alone, "a note", 1)
+    sleep(5)
+    _eq("its notes go", "a note" in _visible(render(alone, 120, 20)), False)
+
+    def std(stdin = True, stdout = True, vars = {}, size = (100, 30)):
+        tty = lambda on: struct(is_tty = on)
+        return struct(io = struct(stdin = tty(stdin), stdout = tty(stdout), stderr = tty(stdout)), env = struct(var = lambda name: vars.get(name)), term = struct(size = lambda: size))
+
+    _eq("no terminal", testonly_browse_refusal(std(stdout = False)), "aspect history browse needs a terminal on stdin and stdout; for a script: aspect history list --output=json")
+    _eq("stdin no terminal", testonly_browse_refusal(std(stdin = False, vars = {"TERM": "xterm"})), "aspect history browse needs a terminal on stdin and stdout; for a script: aspect history list --output=json")
+    _eq("under a coding agent", testonly_browse_refusal(std(vars = {"TERM": "xterm", "ASPECT_AGENT_KIND": "x"})), "aspect history browse is interactive and a coding agent is running this; aspect history list --output=json prints the runs")
+    _eq("a dumb terminal", testonly_browse_refusal(std(vars = {"TERM": "dumb"})), "aspect history browse: TERM is dumb; aspect history list prints the runs")
+    _eq("a tiny one", testonly_browse_refusal(std(vars = {"TERM": "xterm"}, size = (30, 10))), "aspect history browse: the terminal is 30x10, under 40x12; aspect history list prints the runs")
+    _eq("a terminal it takes", testonly_browse_refusal(std(vars = {"TERM": "xterm"})), "")
+
+    state = _history_state(ctx, [])
+    for record, want in [
+        (_record("nnnn0000", bazel = []), "This run started no build"),
+        (_record("pppp0000", evicted = "2026-11-20T10:00:00.000Z"), "Files removed (pruned "),
+        (_record("rrrr0000", "running", bazel = []), "Still running (as of "),
+    ]:
+        run = past_run(state, record)
+        shown = dict(state, search = new_search())
+        show_run(shown, run)
+        on_key(shown, "2", 10)
+        _eq("a past run's empty Failures: " + want, want in _visible(render(shown, 120, 20)), True)
 
 def _test_kept_logs(ctx):
     """A past run's failures read only the logs the history kept, each its
@@ -357,7 +518,7 @@ def _test_kept_logs(ctx):
 def _test_files(ctx):
     """A past run read back from a history entry's files: its Console the
     output as it was shown, `o` its output; a cut event stream, a run still
-    going, a pruned one."""
+    going, a pruned one, the profile it kept."""
     tmp = ctx.std.fs.mkdtemp(prefix = "aspect-dashboard-history")
     ctx.std.fs.write(tmp + "/task.json", "{}")
     ctx.std.fs.write(tmp + "/output.ansi", "▸ Build\n\x1b[31m\x1b[1mERROR: \x1b[0mtwo\n")
@@ -371,6 +532,9 @@ def _test_files(ctx):
     shown = dict(files, search = new_search())
     show_run(shown, built_run)
     _eq("ended, its output the file o opens", (built_run["ended"], view_file(shown)), (True, (tmp + "/output.log", 1)))
+    _eq("the Console a replay", " replay ─" in _visible(render(shown, 120, 20)), True)
+    nobuild = past_run(files, _record("nnnn0001", dir = tmp, bazel = [], argv = ["/bin/aspect", "worktree", "list"]))
+    _eq("a run with no build: a line of its record, then its output", nobuild["log"], ["worktree list · ok · 6.3s · aspect history show nnnn0001", "▸ Build", "ERROR: two"])
     ctx.std.fs.write(tmp + "/output.ansi", "".join(["line %d\n" % i for i in range(20000 + 5)]))
     long_run = past_run(files, _record("ffff0000", "failed", dir = tmp))
     _eq("older lines left out, said first", long_run["log"][0], "2,006 older lines: aspect history show ffff0000")
@@ -381,6 +545,7 @@ def _test_files(ctx):
     ctx.std.fs.write(tmp + "/bazel/1/build_events.binpb", "\x05ab")
     ctx.std.fs.write(tmp + "/bazel/1/actions.json", json.encode({"actions": [{"label": 3, "build_attempt": "2", "stderr": 7}, "x", {"build_attempt": [1]}], "build_attempts": "2"}))
     ctx.std.fs.write(tmp + "/bazel/1/console.log", "ERROR: no such package 'x'\n")
+    ctx.std.fs.write(tmp + "/bazel/1/command.profile.gz", "x")
     cut = past_run(files, _record("cccc0001", "failed", dir = tmp, bazel = [{
         "command": "build",
         "exit_code": 1,
@@ -394,8 +559,12 @@ def _test_files(ctx):
     cut_state["panes"] = True
     cut_screen = _visible(render(cut_state, 160, 40))
     _eq("said in the header and the Results pane", (cut_screen.split("\n")[0].count("event stream ended early"), cut_screen.count("event stream ended early") >= 2), (1, True))
+    profile_row = [l for l in cut_screen.split("\n") if "Bazel's profile: " in l]
+    _eq("the profile it kept, named in the timings pane, its file's name kept", (len(profile_row), "/bazel/1/command.profile.gz " in profile_row[0] if profile_row else False), (1, True))
     on_key(cut_state, "2", 10)
     _eq("a summary's failure is the Failures list's", "//a:b" in _visible(render(cut_state, 160, 40)), True)
+    on_key(cut_state, "enter", 10)
+    _eq("a kept log's view is no replay", " replay ─" in _visible(render(cut_state, 160, 40)), False)
     evicted = past_run(files, _record("eeee0001", dir = tmp, evicted = "2026-11-20T10:00:00.000Z"))
     running = past_run(files, _record("rrrr0001", "running", dir = tmp, bazel = [{"command": "build", "build_events": tmp + "/bazel/1/build_events.binpb"}]))
     _eq("a run still going is in progress, not cut short", ([b["outcome"] for b in running["builds"]], running.get("stream_cut")), (["in progress"], False))
@@ -408,7 +577,7 @@ def _test_files(ctx):
     _eq("a run pruned before the list says when", evicted["log"][0].startswith("This run's files were removed (pruned "), True)
     ctx.std.fs.remove_dir_all(tmp)
     pruned = past_run(files, _record("gggg0000", dir = tmp))
-    _eq("a run whose files went since the list says so", pruned["log"], ["This run's files were removed since the list was read · aspect history show gggg0000"])
+    _eq("a run whose files went since the list says so", pruned["log"][0], "This run's files were removed since the list was read · aspect history show gggg0000")
 
 def _test_restart(ctx):
     """Bazel restarting a build in place starts its events over, live and
@@ -429,30 +598,95 @@ def _test_restart(ctx):
     new_build(live, 7)
     live["building"] = True
     add_lines(live, ["ERROR: lost inputs, restarting"])
+    live["selected"] = 3
+    live["focus"] = "failures"
     for event in attempt("u2"):
         take_event(live, event)
     _eq("watched live, a start before the first frame counts, and the restart starts over", (live["bazel_uuid"], live["counts"]["failures"], live["build_start_ms"]), ("u2", ["//u2:t"], 7))
-    _eq("its console going on", live["log"], ["ERROR: lost inputs, restarting"])
+    _eq("its console going on, the emptied list's choice and focus back", (live["log"], live["selected"], live["focus"]), (["ERROR: lost inputs, restarting"], 0, "console"))
     live["fresh"] = True
     for event in attempt("u3"):
         take_event(live, event)
     _eq("a retried attempt's start is its own, not a restart", live["started_early"], True)
 
-    # While a past run is shown, the live one's events change it where it
-    # waits, and nothing of the screen the user is looking at.
-    shown = _history_state(ctx, [])
-    shown["live"] = on_run(shown, new_run(task = "build", building = True), lambda s: None)
-    shown["past"] = {}
-    shown["selected"] = 4
-    for event in attempt("u4"):
-        on_live(shown, lambda s: take_event(s, event))
-    _eq("the live run took the events, the shown one none", (shown["live"]["counts"]["failures"], shown["counts"]["failures"], shown["selected"]), (["//u4:t"], [], 4))
+def _ctx_of(written = None):
+    """A task context for the feature's hooks: its stdin a terminal, its
+    stderr written to `written`, no output kept to dump."""
+    return struct(
+        cancellation = struct(root = struct(cancelled = False)),
+        std = struct(
+            io = struct(stdin = struct(is_tty = True), stderr = struct(is_tty = False, write = lambda text, copy = True: (written if written != None else []).append(text)), linked = None),
+            term = struct(dump_output = lambda max_lines = 0, older = "": False),
+            excerpt = None,
+        ),
+        task = struct(id = "live", kind = "build"),
+        traits = {BazelTrait: struct(failure_summary_max = None)},
+    )
+
+def _browsing_state(ctx, screen):
+    """A state whose live run, `live ok` in its console, waits aside while
+    a past run, `past` in its, is shown on `screen`."""
+    state = _history_state(ctx, [_record("live", "running"), _record("pppp1111")])
+    state["screen"] = screen
+    state["stay"] = "always"
+    add_lines(state, ["live ok"])
+    open_history(state)
+    on_key(state, "down", 10)
+    on_key(state, "enter", 10)
+    state["log"] = ["past"]
+    if state.get("past") == None or state.get("live") == None:
+        fail("no past run shown")
+    return state
+
+def _test_routing(ctx):
+    """While a past run is shown, the feature's hooks change the live run
+    where it waits, never the one shown; a task that ends keeps the screen
+    up until the user is back on the live one, whatever `stay` says, and
+    Ctrl+C there is a key; what the scrollback gets is the live run's."""
+    state = _browsing_state(ctx, _fake_screen())
+    testonly_hooks.event(state, None, struct(kind = "target_completed", id = struct(label = "//x:x"), payload = struct(success = False)))
+    _eq("a build event goes to the live run", (state["live"]["counts"]["failures"], state["counts"]["failures"]), (["//x:x"], []))
+    testonly_hooks.spawn(state, None, struct(type = struct(cache_hit = False, runner = "darwin-sandbox", outputs = []), id = 0))
+    _eq("so does an execution log's spawn", (state["live"]["counts"]["spawns"], state["counts"]["spawns"]), (1, 0))
+
+    # `stay=never` while browsing: the screen waits until the user is back
+    # on the live one; `q` on the past run goes to the list, Esc to the live.
+    state = _browsing_state(ctx, _fake_screen([None, "q", "esc"]))
+    state["stay"] = "never"
+    seen = state["screen"].seen
+    testonly_hooks.post(state, _ctx_of(), struct(exit_code = 0))
+    _eq("stay=never waits while browsing, until back on the live screen", (seen["keys"], seen["released"], state.get("past")), ([], True, None))
+
+    # Ctrl+C while browsing the finished screen is a key: back to the live
+    # run, then `q` leaves.
+    state = _browsing_state(ctx, _fake_screen([None, "ctrl-c", "q"]))
+    state["live"]["ended"] = True
+    state["holding"] = True
+    seen = state["screen"].seen
+    testonly_hooks.hold(state, _ctx_of(), state["screen"], 0)
+    _eq("Ctrl+C browsing the finished screen goes back to the live run", (seen["keys"], state.get("past")), ([], None))
+    state = _browsing_state(ctx, _fake_screen([None, "j", "ctrl-c", "q"]))
+    state["live"]["ended"] = True
+    state["holding"] = True
+    seen = state["screen"].seen
+    testonly_hooks.hold(state, _ctx_of(), state["screen"], 0)
+    _eq("and so behind another key", (seen["keys"], state.get("past")), ([], None))
+
+    # The scrollback is the live run's, a past run shown or not.
+    state = _browsing_state(ctx, _fake_screen())
+    written = []
+    testonly_hooks.report(state, _ctx_of(written))
+    _eq("the scrollback gets the live run's console", ("live ok\n" in written, "past\n" in written), (True, False))
 
 def _impl(ctx: TaskContext) -> int:
     _test_screen(ctx)
+    _test_layout(ctx)
+    _test_broken_runs(ctx)
+    _test_notes(ctx)
     _test_kept_logs(ctx)
     _test_files(ctx)
     _test_restart(ctx)
+    _test_routing(ctx)
     print("history_test.axl: OK")
     return 0
 

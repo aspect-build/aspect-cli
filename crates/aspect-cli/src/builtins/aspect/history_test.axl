@@ -6,7 +6,7 @@ Run with:
   aspect dev test-history
 """
 
-load("./private/lib/history_records.axl", "command", "list_lines", "outcome", "show_lines", "took", "when")
+load("./private/lib/history_records.axl", "command", "command_parts", "list_lines", "outcome", "show_lines", "took", "when")
 
 def _eq(label, got, want):
     if got != want:
@@ -38,14 +38,21 @@ def _test_outcome(_ctx):
         _eq("outcome " + want, outcome(record), want)
 
 def _test_formats(_ctx):
-    _eq("when", when("2026-11-21T15:39:39.143Z"), "2026-11-21 15:39:39Z")
+    _eq("when, in local time with its offset", when("2026-11-21T15:39:39.143Z", -8 * 3600), "2026-11-21 07:39:39 -08:00")
+    _eq("across midnight, east of UTC", when("2026-12-31T22:30:00.000Z", 5 * 3600 + 1800), "2027-01-01 04:00:00 +05:30")
+    _eq("a stamp that does not read, as it is", when("soon", 0), "soon")
     for ms, want in [(850, "850ms"), (12345, "12.3s"), (245000, "4m05s"), (None, "")]:
         _eq("took %r" % ms, took({"duration_ms": ms} if ms != None else {}), want)
     _eq("the program is aspect", command(_record()), "aspect build //...")
+    split = command_parts(_record(argv = ["aspect", "build", "--keep_going", "//a:b", "--config=ci", "//c"], bazel = [{"patterns": ["//a:b", "//c"]}, {"patterns": ["//c"]}]))
+    _eq("the task and its patterns, then the flags", split, ("build //a:b //c", ["--keep_going", "--config=ci"]))
+    _eq("a run with no build is all label", command_parts(_record(argv = ["aspect", "worktree", "list", "--all"])), ("worktree list --all", []))
 
 def _test_list_lines(_ctx):
     lines = list_lines([_record(), _record(task = {"id": "fedcba98", "kind": "list", "group": ["worktree"]}, argv = ["aspect", "worktree", "list"], exit_code = 1)])
     _eq("columns line up", lines[0].index("ok"), lines[1].index("exit 1"))
+    escaped = list_lines([_record(task = {"id": "a\x1b[0m", "kind": "build", "group": []}), _record(task = {"id": "bbbbbbbb", "kind": "build", "group": []})], 0)
+    _eq("columns line up past an escaped cell", escaped[0].index("2026"), escaped[1].index("2026"))
     _eq("the id's start", lines[1][:8], "fedcba98")
     _eq("the task, as typed", "worktree list" in lines[1], True)
     hostile = list_lines([_record(argv = ["aspect", "run", "//t", "--", "--msg=one\ntwo\x1b[2J\u009b"])])[0]
@@ -67,7 +74,11 @@ def _test_show_lines(_ctx):
                 "summary": {
                     "targets_built": 3,
                     "targets_failed": 1,
-                    "failures": [{"kind": "action", "label": "//a:b", "detail": "Genrule", "logs": ["bazel/1/actions/a/b/Genrule-1.stderr"]}],
+                    "failures": [
+                        {"kind": "action", "label": "//a:b", "detail": "Genrule", "logs": ["bazel/1/actions/a/b/Genrule-1.stderr"]},
+                        {"kind": "test", "label": "//t:flaky", "detail": "attempt 1", "flaky": True, "logs": ["bazel/1/testlogs/t/flaky/test.log"]},
+                        {"kind": "test", "label": "//t:fail", "detail": "attempt 1"},
+                    ],
                     "failures_not_listed": 0,
                 },
             },
@@ -76,13 +87,17 @@ def _test_show_lines(_ctx):
             {"command": "build", "patterns": [], "ended": "z", "error": "could not bind a stream"},
         ],
     )
-    text = "\n".join(show_lines(record))
+    text = "\n".join(show_lines(record, 0))
     for want in [
         "main@a01a395e90ed (dirty)",
         "Link      Build Results: https://app.example.com/i/1",
         "Bazel 1   build //... · exit 1",
         "targets 3 built, 1 failed",
         "✗ //a:b  Genrule",
+        "~ //t:flaky  attempt 1  flaky, passed on a later attempt",
+        "✗ //t:fail  attempt 1",
+        "test log not kept (--history:test-logs=failed keeps them)",
+        "Started   2026-11-21 15:39:39 +00:00",
         "/h/20261121T153939143Z-0123/bazel/1/actions/a/b/Genrule-1.stderr",
         "Bazel 2   test · ended by a signal",
         "Bazel 3   test · not waited for",
@@ -91,8 +106,8 @@ def _test_show_lines(_ctx):
     ]:
         if want not in text:
             fail("show_lines: %r missing from:\n%s" % (want, text))
-    evicted = "\n".join(show_lines(_record(evicted = "2026-11-22T00:00:00.000Z")))
-    if "Files     removed 2026-11-22 00:00:00Z" not in evicted:
+    evicted = "\n".join(show_lines(_record(evicted = "2026-11-22T00:00:00.000Z"), 0))
+    if "Files     removed 2026-11-22 00:00:00 +00:00" not in evicted:
         fail("show_lines: an evicted run should say its files are gone:\n" + evicted)
 
 _UNIT_TESTS = [
@@ -105,7 +120,7 @@ _UNIT_TESTS = [
 def _test_impl(ctx):
     for t in _UNIT_TESTS:
         t(ctx)
-    print("history.axl: OK (%d tests)" % len(_UNIT_TESTS))
+    print("history_test.axl: OK (%d tests)" % len(_UNIT_TESTS))
     return 0
 
 history_tests = task(

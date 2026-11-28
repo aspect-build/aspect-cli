@@ -9,7 +9,8 @@ the scroll, the search, the mouse, what the task's context gives,
 `use_context`) and the shown run's (`new_run`, every other key: one task
 invocation's builds, console and failures). While a past run from the task
 history is shown (dashboard/history.axl), the live one waits in `live`,
-and every hook changes it there (`on_live`), out of sight.
+and every hook changes it there (`on_live`; a build event straight into it,
+`take_live_event`), out of sight.
 """
 
 load("@aspect//feature/dashboard/actions.axl", "dashboard_actions")
@@ -144,42 +145,58 @@ _BUILD_KEYS = ["counts", "inv", "slowest", "spawn_slowest", "critical", "pages",
 # What of a build its events told, which Bazel restarting it in place
 # starts over; its console and what came of it (the closing block, the
 # slowest actions, the critical path) are the stream's, as Bazel wrote it.
-_PER_ATTEMPT = ["fails", "outputs", "selected", "picked", "last_attempts", "spread", "test_counts", "counts", "inv", "bazel_uuid", "bep_done_total", "excerpts"]
+_PER_ATTEMPT = ["fails", "outputs", "last_attempts", "spread", "test_counts", "counts", "inv", "bazel_uuid", "bep_done_total", "excerpts"]
 
-def restart_attempt(state: dict) -> None:
-    """Bazel restarting the build in place (a second `build_started` in one
-    stream, as after a remote cache eviction): what its events told starts
-    over (`_PER_ATTEMPT`: counts, failures, outputs, the invocation), as
-    its summary does; its console, Bazel's errors, its start and what is
-    open go on. Focus on the list it empties goes back to the console."""
-    fresh = attempt_state(0)
-    for key in _PER_ATTEMPT:
-        state[key] = fresh[key]
-    _clear_build(state)
-    if state.get("focus") == "failures":
-        state["focus"] = "console"
-
-def take_event(state: dict, event) -> None:
-    """One build event, live or read back from the history: the
+def _run_event(run: dict, event) -> bool:
+    """One build event into a run (its keys alone, never the UI's): the
     invocation's id and `--bes_results_url` for its results pages, then
-    what the failure summary and the Failures list read (`collect_event`)
-    and a test's open log shown anew (`refresh_test_view`). A second
-    `build_started` in the build, Bazel restarting it in place, starts its
-    events over (`restart_attempt`); one that comes before the build's
+    what the failure summary and the Failures list read (`collect_event`).
+    A second `build_started` in the build, Bazel restarting it in place
+    (as after a remote cache eviction), starts what its events told over
+    (`_PER_ATTEMPT`), as its summary does, and says so (True); its console,
+    Bazel's errors and its start go on. One that comes before the build's
     first frame counts for it (`new_build`)."""
     kind = event.kind
+    restarted = False
     if kind == "build_started":
-        if state.get("building") and not state["fresh"]:
-            if state.get("started_seen"):
-                restart_attempt(state)
-            state["started_seen"] = True
+        if run.get("building") and not run["fresh"]:
+            if run.get("started_seen"):
+                fresh = attempt_state(0)
+                for key in _PER_ATTEMPT:
+                    run[key] = fresh[key]
+                _clear_build(run)
+                restarted = True
+            run["started_seen"] = True
         else:
-            state["started_early"] = True
-        state["bazel_uuid"] = str(bes_get(event.payload, "uuid", "") or "")
+            run["started_early"] = True
+        run["bazel_uuid"] = str(bes_get(event.payload, "uuid", "") or "")
     elif kind == "options_parsed":
-        state["bes_base"] = bes_results_url(event) or state["bes_base"]
-    _collect_event(state, event)
+        run["bes_base"] = bes_results_url(event) or run["bes_base"]
+    _collect_event(run, event)
+    return restarted
+
+def take_event(state: dict, event) -> None:
+    """One build event into the run shown, live or read back from the
+    history (`_run_event`), and what it changes on the screen: a restart in
+    place empties the lists, so their choice goes back to the top and focus
+    on the Failures list to the console; a test's open log is shown anew
+    (`refresh_test_view`)."""
+    if _run_event(state, event):
+        state["selected"] = 0
+        state["picked"] = 0
+        if state.get("focus") == "failures":
+            state["focus"] = "console"
     _refresh_test_view(state, event)
+
+def take_live_event(state: dict, event) -> None:
+    """One build event of the live run: shown, as `take_event` takes it;
+    aside while a past run is shown, written straight into it (`live`),
+    since an event changes nothing of the screen the user is looking at,
+    with no copy of the state per event (`on_live`'s)."""
+    if state.get("live") != None:
+        _run_event(state["live"], event)
+    else:
+        take_event(state, event)
 
 def new_ui(**fields) -> dict:
     """The UI's keys of a dashboard's state before its task starts: nothing
@@ -374,5 +391,6 @@ dashboard_state = namespace(
     run_of = run_of,
     show_run = show_run,
     take_event = take_event,
+    take_live_event = take_live_event,
     use_context = use_context,
 )
