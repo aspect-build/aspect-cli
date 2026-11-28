@@ -15,7 +15,7 @@ Run with:
   aspect dev test-fix-patch
 """
 
-load("./fix_patch.axl", "apply_fix_patch", "patch_available", "testonly_ignored", "testonly_scan")
+load("./fix_patch.axl", "apply_fix_patch", "fix_step_ready", "testonly_ignored", "testonly_scan")
 
 def _eq(label, got, want):
     if got != want:
@@ -299,16 +299,20 @@ printf 'caf\\352\\n' > tree/src/l1.txt
     _eq("a creation named by its prefix", apply_fix_patch(ctx, root + "/prefix.patch", cwd = tree, program = shim, say = _noted(said)), None)
     _eq("is refused, patch not run", (said, fs.exists(ran)), (["a header with no name"], False))
 
-    # No `patch` to run: found out up front, and a patch it can't run is
-    # refused rather than ending the task.
+    # No `patch` to run: lint's fix step finds out up front, says so in one
+    # ERROR and is skipped, and a patch it can't run is refused rather than
+    # ending the task.
     env = ctx.std.env
     before = {"PATH": env.var("PATH")}
     ctx.defer(_restore, env, before)
     fs.create_dir_all(root + "/empty-bin")
     env.set_var("PATH", root + "/empty-bin")
-    found = patch_available(ctx)
+    lines = []
+    ready = fix_step_ready(ctx, say = lambda label, text: lines.append((label, text)))
     _restore(env, before)
-    _eq("no patch on PATH", (found, patch_available(ctx)), (False, True))
+    _eq("no patch on PATH: the fix step is skipped", (ready, lines), (False, [("ERROR", "aspect lint --fix needs patch(1) on PATH: no auto-fix patch was applied")]))
+    lines = []
+    _eq("with patch on PATH: it runs, saying nothing", (fix_step_ready(ctx, say = lambda label, text: lines.append((label, text))), lines), (True, []))
     said = []
     _eq("a patch it can't run", apply_fix_patch(ctx, root + "/padded.patch", cwd = tree, program = root + "/no-such-patch", say = _noted(said)), None)
     _eq("is refused as such", [l.startswith("'%s/no-such-patch' can't be run: " % root) for l in said], [True])

@@ -37,7 +37,7 @@ where:
   warning names the path).
 """
 
-load("./environment.axl", "info", "warn")
+load("./environment.axl", "error", "info", "warn")
 load("./patch.axl", "PATCH_CAP", "Section", "scan", "section_ranges")
 load("./text.axl", "ascii_escaped")
 
@@ -572,6 +572,20 @@ def patch_available(ctx: TaskContext, program: str = "patch") -> bool:
         return False
     child.wait()
     return True
+
+def fix_step_ready(ctx: TaskContext, program: str = "patch", say: typing.Callable[[str, str], None] | None = None) -> bool:
+    """Whether `aspect lint --fix` can apply patches: `program` can run
+    (`patch_available`). Where it can't, one ERROR line says so, through
+    `say(label, text)` for a test (`error` unless given), and nothing of
+    lint's exit code changes: its findings still decide that."""
+    if patch_available(ctx, program):
+        return True
+    text = "aspect lint --fix needs patch(1) on PATH: no auto-fix patch was applied"
+    if say != None:
+        say("ERROR", text)
+    else:
+        error(ctx.std, text)
+    return False
 
 def apply_fix_patch(
         ctx: TaskContext,
