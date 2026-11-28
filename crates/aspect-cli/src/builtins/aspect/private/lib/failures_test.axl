@@ -148,6 +148,22 @@ def _test_restated_traceback(ctx):
     state = _ended(ctx, [_aborted("configured_label", "@@ext+//mf:m", description)], _error("package contains errors: @@ext+//mf: " + traceback) + body)
     _eq("an external repository's package, as Bazel names it", failure_ties.console_ties(state)["others"], [])
 
+def _test_bzl_traceback(ctx):
+    # A Starlark error loading a `.bzl` file has no frame at a BUILD file:
+    # under Other errors, its innermost frame and that frame's code line
+    # after the line Bazel wrote, the frames before them a gap.
+    body = "\tFile \"/ws/m/a.bzl\", line 2, column 11, in <toplevel>\n\t\tX = helper()\n\tFile \"/ws/m/b.bzl\", line 2, column 9, in helper\n\t\tfail(\"bzl refuses at load\")\nError in fail: bzl refuses at load\n"
+    state = _ended(ctx, [], _error("Traceback (most recent call last):") + body)
+    got = failures.failure_summary(state, "t-1", False, excerpt = ctx.std.excerpt)
+    at = got.index("── Other errors from Bazel ──")
+    _eq("a .bzl traceback: its gap, its innermost frame", got[at + 1:at + 6], [
+        "ERROR: Traceback (most recent call last):",
+        "  │ …",
+        "  │         File \"/ws/m/b.bzl\", line 2, column 9, in helper",
+        "  │                 fail(\"bzl refuses at load\")",
+        "  │ Error in fail: bzl refuses at load",
+    ])
+
 def _test_an_unclaimed_error_is_listed(ctx):
     # A BUILD file's error, which no event has: under Other errors, a
     # passing build's too.
@@ -323,6 +339,7 @@ def _impl(ctx: TaskContext) -> int:
     _test_missing_source(ctx)
     _test_package_errors_claim(ctx)
     _test_restated_traceback(ctx)
+    _test_bzl_traceback(ctx)
     _test_an_unclaimed_error_is_listed(ctx)
     _test_timestamps(ctx)
     _test_relay_cap(ctx)

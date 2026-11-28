@@ -115,9 +115,11 @@ const TRACEBACK: &str = "Traceback (most recent call last):";
 /// hold one that starts on the first line or the next (after a line saying
 /// what failed, `in r rule //rf:x: `) and has an `Error in …:` line after
 /// that: the lines up to its start, its first frame at a BUILD file (`File
-/// "nm/BUILD.bazel", line 2`) and that frame's code line, and its last
-/// `Error in` line. None for any other lines. The console's recap and
-/// `std.excerpt(traceback = True)` both cut a traceback so.
+/// "nm/BUILD.bazel", line 2`) and that frame's code line, or with no frame
+/// at a BUILD file (an error loading a `.bzl` file, a rule's
+/// implementation) its innermost frame, the last, and its code line, and
+/// its last `Error in` line. None for any other lines. The console's recap
+/// and `std.excerpt(traceback = True)` both cut a traceback so.
 pub fn traceback<S: AsRef<str>>(lines: &[S]) -> Option<Vec<usize>> {
     let start = lines
         .iter()
@@ -130,7 +132,10 @@ pub fn traceback<S: AsRef<str>>(lines: &[S]) -> Option<Vec<usize>> {
         return None;
     }
     let mut kept: Vec<usize> = (0..=start).collect();
-    if let Some(b) = (start..error).find(|&k| is_build_frame(lines[k].as_ref())) {
+    let frame = (start..error)
+        .find(|&k| is_build_frame(lines[k].as_ref()))
+        .or_else(|| (start..error).rev().find(|&k| is_frame(lines[k].as_ref())));
+    if let Some(b) = frame {
         kept.push(b);
         if b + 1 < error {
             kept.push(b + 1);
@@ -141,10 +146,15 @@ pub fn traceback<S: AsRef<str>>(lines: &[S]) -> Option<Vec<usize>> {
     Some(kept)
 }
 
+/// Whether `line` is a traceback's frame: `File "<path>", line …`.
+fn is_frame(line: &str) -> bool {
+    line.trim_start().starts_with("File \"")
+}
+
 /// Whether `line` is a traceback's frame at a BUILD file.
 fn is_build_frame(line: &str) -> bool {
     let t = line.trim_start();
-    t.starts_with("File \"")
+    is_frame(line)
         && (t.contains("/BUILD\"") || t.contains("/BUILD.bazel\"") || t.starts_with("File \"BUILD"))
 }
 
@@ -249,8 +259,9 @@ mod tests {
     }
 
     /// The recorded tracebacks' excerpts: a frame line at a BUILD file and
-    /// its code line kept, the start's line with what it says before it,
-    /// and a line saying what failed before the start.
+    /// its code line kept, else the innermost frame and its code line, the
+    /// start's line with what it says before it, and a line saying what
+    /// failed before the start.
     #[test]
     fn a_traceback_keeps_its_start_build_frame_and_error() {
         let nm = [
@@ -270,7 +281,16 @@ mod tests {
             "Error in fail: impl refuses x",
             "after",
         ];
-        assert_eq!(traceback(&rf), Some(vec![0, 1, 4]));
+        assert_eq!(traceback(&rf), Some(vec![0, 1, 2, 3, 4]));
+        let bzl = [
+            "Traceback (most recent call last):",
+            "\tFile \"/ws/m/a.bzl\", line 2, column 11, in <toplevel>",
+            "\t\tX = helper()",
+            "\tFile \"/ws/m/b.bzl\", line 2, column 9, in helper",
+            "\t\tfail(\"bzl refuses at load\")",
+            "Error in fail: bzl refuses at load",
+        ];
+        assert_eq!(traceback(&bzl), Some(vec![0, 3, 4, 5]));
     }
 
     /// No traceback: none at the start, or no `Error in` line after it.

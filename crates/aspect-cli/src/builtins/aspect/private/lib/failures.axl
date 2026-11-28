@@ -187,7 +187,7 @@ def _picked(got: dict) -> tuple:
             lines.append(line)
     return (lines, gaps)
 
-def excerpt_rows(lines: list, gaps: list = []) -> tuple:
+def excerpt_rows(lines: list, gaps: list = [], after_shown: bool = False) -> tuple:
     """`(rows, more)` of an excerpt's `lines` as the summary and the
     Failures list show them: at most `_EXCERPT_LINES` rows, the lines left
     out between two shown ones (`gaps`, `_picked`'s) a `_GAP_ROW` among
@@ -195,7 +195,9 @@ def excerpt_rows(lines: list, gaps: list = []) -> tuple:
     lines just before a gap go into it first, so the output's last lines
     stay), and `more`, the lines left out after the last row shown: those
     past the rows' cap, and a gap after the last line. Lines left out
-    before the first are in neither."""
+    before the first are in neither, unless `lines` go on from a line
+    shown already (`after_shown`: Other errors' `ERROR:` line), where they
+    are a gap between two shown ones too."""
     left = {}
     for i, n in gaps:
         left[i] = left.get(i, 0) + n
@@ -203,8 +205,8 @@ def excerpt_rows(lines: list, gaps: list = []) -> tuple:
     # Each row with the lines it stands for: a line one, a gap its own.
     rows = []
     for i in range(len(lines) + 1):
-        if i in left and rows:
-            if rows[-1][0] == _GAP_ROW:
+        if i in left and (rows or after_shown):
+            if rows and rows[-1][0] == _GAP_ROW:
                 rows[-1] = (_GAP_ROW, rows[-1][1] + left[i])
             else:
                 rows.append((_GAP_ROW, left[i]))
@@ -320,9 +322,9 @@ _NO_REASON = "Bazel's events give no reason; its error is in the console"
 def _traceback_lines(state: dict, lines: list) -> tuple:
     """`(lines, gaps)`: `lines` with a Starlark `Traceback` in them cut as
     the console's recap cuts one (`std.excerpt(traceback = True)`: what
-    comes before it, its first frame at a BUILD file and that frame's code
-    line, and its last `Error in` line, the rest gaps, `_picked`); any
-    other text's lines as they are."""
+    comes before it, its first frame at a BUILD file, else its innermost,
+    and that frame's code line, and its last `Error in` line, the rest
+    gaps, `_picked`); any other text's lines as they are."""
     excerpt = state.get("excerpt")
     if excerpt == None or not lines:
         return (lines, [])
@@ -627,7 +629,7 @@ def failure_summary(state: dict, task_id: str, tty: bool, log_path: str = "", li
             for j, row in enumerate(quoted_rows(lines[0], max(_MIN_QUOTE, width - _OTHER_GUTTER))):
                 out.append((red + "ERROR:" + reset + " " if not j else "         ") + row)
             if i < _EXCERPTED:
-                quote(*excerpt_rows(lines[1:], [(max(0, k - 1), n) for k, n in gaps]))
+                quote(*excerpt_rows(lines[1:], [(max(0, k - 1), n) for k, n in gaps], after_shown = True))
         if len(others) > max_entries:
             out.append(_counts("… and %d more", len(others) - max_entries) + " · aspect history show %s" % task_id)
     not_kept = _console_ties(state)["not_kept"]

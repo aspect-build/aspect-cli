@@ -143,8 +143,9 @@ pub(crate) fn std_methods(registry: &mut MethodsBuilder) {
     /// `traceback = True`, a Starlark traceback in it (one starting on its
     /// first line or the next, with an `Error in …:` line after) is cut as
     /// the recap cuts one instead, whatever `max_lines` says: the lines up to
-    /// its start, its first frame at a BUILD file and that frame's code line,
-    /// and its last `Error in` line, every other run of lines a gap.
+    /// its start, its first frame at a BUILD file (else its innermost frame)
+    /// and that frame's code line, and its last `Error in` line, every other
+    /// run of lines a gap.
     ///
     /// Returns `{"lines": [...], "gaps": [[index, n], ...], "cut_head":
     /// bool, "cut_tail": bool, "cut_between": bool}`: the lines shown, with a

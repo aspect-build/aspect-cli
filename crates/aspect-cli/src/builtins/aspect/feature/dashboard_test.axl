@@ -1438,6 +1438,7 @@ def _impl(ctx: TaskContext) -> int:
     _eq("no gap first or last, the one after the last counted", excerpt_rows(["a"], [(0, 2), (1, 1)]), (["a"], 1))
     _eq("five rows, the gap one of them, the end kept", excerpt_rows(["a", "b", "c", "d", "z"], [(4, 9)]), (["a", "b", "c", "\x00gap", "z"], 0))
     _eq("past the cap: the lines after the last row", excerpt_rows(["a", "b", "c", "d", "e", "f", "g"], [(1, 2)]), (["a", "\x00gap", "b", "c", "d"], 3))
+    _eq("after a line shown already, a gap before the first is drawn", excerpt_rows(["Error in fail: x"], [(0, 4)], after_shown = True), (["\x00gap", "Error in fail: x"], 0))
     _eq("a line going into a gap after another: one gap", excerpt_rows(["a", "b", "c", "d", "e", "f"], [(1, 2), (4, 7)]), (["a", "\x00gap", "e", "f"], 0))
     _eq("a line saying it is a gap is a line", excerpt_rows(["a", "… 4 more lines"]), (["a", "… 4 more lines"], 0))
     _eq("its byte cap", quoted_rows("y" * 400, 1000), ["y" * 300 + "…"])

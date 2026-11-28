@@ -3,7 +3,8 @@ exit 1
 ✗ //asp:x  analysis · asp/BUILD.bazel:1:8
   │ in //asp:defs.bzl%bad_aspect aspect on genrule rule //asp:x: 
   │ Traceback (most recent call last):
-  │ …
+  │         File "asp/defs.bzl", line 2, column 9, in _a
+  │                 fail("aspect refuses " + str(target.label))
   │ Error in fail: aspect refuses @@//asp:x
 1 built, 1 failed · 0 tests passed, 0 failed · Bazel's raw log: ${FIXTURE}/7.7.3.console
 All of it: aspect history show t-replay
@@ -11,5 +12,6 @@ All of it: aspect history show t-replay
 ✗ //asp:x  analysis · asp/BUILD.bazel:1:8
   │ in //asp:defs.bzl%bad_aspect aspect on genrule rule //asp:x:
   │ Traceback (most recent call last):
-  │ …
+  │         File "asp/defs.bzl", line 2, column 9, in _a
+  │                 fail("aspect refuses " + str(target.label))
   │ Error in fail: aspect refuses @@//asp:x

@@ -2070,7 +2070,8 @@ mod tests {
             feed(&mut p, &records),
             "── Error recap (1) ──\n  \
              ERROR: Traceback (most recent call last):\n    \
-             … 5 more lines\n    Error in fail: the real reason\n"
+             … 4 more lines\n    \tFile \"/ws/e.bzl\", line 5\n    \
+             Error in fail: the real reason\n"
         );
     }
 
