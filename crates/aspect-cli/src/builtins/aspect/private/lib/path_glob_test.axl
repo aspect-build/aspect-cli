@@ -26,6 +26,8 @@ def _test_segments(_ctx):
         ("*b", "aaaaaaaaaab", True),
         ("a*b?c", "aXbYc", True),
         ("*.axl", ".axl", True),
+        ("a//b", "a//b", True),
+        ("a//b", "a/b", False),
     ]:
         _eq("%r ~ %r" % (pattern, path), match_path(pattern, path), want)
 
@@ -44,6 +46,10 @@ def _test_double_star(_ctx):
         ("a/**/b/*.c", "a/q/b/d/c.c", False),
         ("**/x/**/y", "q/x/r/s/y", True),
         ("**/x/**/y", "q/y", False),
+        ("**/x/**/y", "x/y", True),
+        ("**/x/**/x", "x", False),
+        ("**/x/**/x", "q/x/x", True),
+        ("/a/**", "/a/b", True),
         ("**/testdata/**/*.golden", "crates/c/tests/testdata/failures/uni/9.3.3.golden", True),
     ]:
         _eq("%r ~ %r" % (pattern, path), match_path(pattern, path), want)
