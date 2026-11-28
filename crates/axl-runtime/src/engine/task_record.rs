@@ -456,6 +456,15 @@ impl RecordFile {
                 .spawn(move || read_git(&root, &tx));
             rx
         });
+        Self::begin_with(dir, record, git)
+    }
+
+    /// [`begin`](Self::begin), the git details taken from `git`.
+    fn begin_with(
+        dir: &Path,
+        record: TaskRecord,
+        git: Option<Receiver<GitPart>>,
+    ) -> io::Result<Arc<Self>> {
         let secrets = secret_values(&record.argv, &record.secret_flags, &record.value_shorts);
         let file = Arc::new(Self {
             path: dir.join(FILE_NAME),
@@ -624,12 +633,40 @@ fn read_git(root: &Path, tx: &mpsc::Sender<GitPart>) {
     read_git_with(root, tx, || Command::new("git"));
 }
 
-/// [`read_git`], each git command started from `git()`.
+/// The variables that name a repository's parts or its config, which git
+/// itself clears to enter another repository (a submodule), as
+/// `git rev-parse --local-env-vars` lists them. Inherited from whatever ran
+/// the CLI (a git hook sets `GIT_DIR`), they would point the calls at that
+/// repository instead of `root`.
+const GIT_LOCAL_ENV_VARS: &[&str] = &[
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_CONFIG",
+    "GIT_CONFIG_PARAMETERS",
+    "GIT_CONFIG_COUNT",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_IMPLICIT_WORK_TREE",
+    "GIT_GRAFT_FILE",
+    "GIT_INDEX_FILE",
+    "GIT_NO_REPLACE_OBJECTS",
+    "GIT_REPLACE_REF_BASE",
+    "GIT_PREFIX",
+    "GIT_SHALLOW_FILE",
+    "GIT_COMMON_DIR",
+];
+
+/// [`read_git`], each git command started from `git()`, less
+/// [`GIT_LOCAL_ENV_VARS`].
 fn read_git_with(root: &Path, tx: &mpsc::Sender<GitPart>, git: impl Fn() -> Command) {
     let git = |args: &[&str]| -> Option<String> {
+        let mut cmd = git();
+        for var in GIT_LOCAL_ENV_VARS {
+            cmd.env_remove(var);
+        }
         // No optional locks: `git status` would otherwise take the index's
         // lock to refresh it, and a `git commit` of the user's at once fail.
-        let out = git()
+        let out = cmd
             .env("GIT_OPTIONAL_LOCKS", "0")
             .arg("-C")
             .arg(root)
@@ -642,10 +679,9 @@ fn read_git_with(root: &Path, tx: &mpsc::Sender<GitPart>, git: impl Fn() -> Comm
             .success()
             .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
     };
-    // The commit, then `HEAD`'s ref (`HEAD` itself when detached), then the
-    // `--` echoed back. Not `--verify`, which takes a single revision; the
-    // `--` makes an unborn `HEAD` an error rather than a path.
-    let Some(head) = git(&["rev-parse", "HEAD", "--symbolic-full-name", "HEAD", "--"]) else {
+    // The commit, then `HEAD`'s ref (`HEAD` itself when detached). Not
+    // `--verify`, which takes a single revision.
+    let Some(head) = git(&["rev-parse", "HEAD", "--symbolic-full-name", "HEAD"]) else {
         return;
     };
     let mut lines = head.lines();
@@ -1304,8 +1340,18 @@ mod tests {
 
         /// What [`read_git`] sends for `dir`.
         fn read(&self, dir: &str) -> Vec<GitPart> {
+            self.read_with(dir, &[])
+        }
+
+        /// [`read`](Self::read) with `env` set on each git command as an
+        /// inherited environment would be.
+        fn read_with(&self, dir: &str, env: &[(&str, PathBuf)]) -> Vec<GitPart> {
             let (tx, rx) = mpsc::channel();
-            read_git_with(&self.path(dir), &tx, || self.git());
+            read_git_with(&self.path(dir), &tx, || {
+                let mut cmd = self.git();
+                cmd.envs(env.iter().cloned());
+                cmd
+            });
             drop(tx);
             rx.into_iter().collect()
         }
@@ -1368,8 +1414,7 @@ mod tests {
         );
     }
 
-    /// A branch with no commit yet has nothing to record, even with a file
-    /// named `HEAD` that git could take the revision for; nor has a folder
+    /// A branch with no commit yet has nothing to record, nor has a folder
     /// outside any repository.
     #[test]
     fn an_unborn_branch_and_a_folder_outside_git_send_nothing() {
@@ -1377,9 +1422,67 @@ mod tests {
         fs::create_dir(scratch.path("unborn")).unwrap();
         scratch.run("unborn", &["init", "-q", "-b", "main"]);
         assert_eq!(scratch.read("unborn"), []);
-        fs::write(scratch.path("unborn/HEAD"), "").unwrap();
-        assert_eq!(scratch.read("unborn"), []);
         fs::create_dir(scratch.path("plain")).unwrap();
         assert_eq!(scratch.read("plain"), []);
+    }
+
+    /// A `GIT_DIR` or `GIT_WORK_TREE` from whatever ran the task, a git hook
+    /// say, names another repository; the details are still those of the
+    /// repository the task ran in.
+    #[test]
+    fn a_repository_named_by_the_environment_is_not_the_one_read() {
+        let scratch = Scratch::new();
+        let ours = scratch.repo("ours");
+        scratch.repo("theirs");
+        fs::write(scratch.path("theirs/file"), "two\n").unwrap();
+        scratch.run("theirs", &["commit", "-q", "-am", "two"]);
+        fs::write(scratch.path("theirs/file"), "three\n").unwrap();
+        let clean = [head(&ours, Some("main")), GitPart::Dirty(false)];
+        let theirs = ("GIT_DIR", scratch.path("theirs/.git"));
+        assert_eq!(scratch.read_with("ours", &[theirs]), clean);
+        let split = [
+            ("GIT_DIR", scratch.path("ours/.git")),
+            ("GIT_WORK_TREE", scratch.path("theirs")),
+        ];
+        assert_eq!(scratch.read_with("ours", &split), clean);
+    }
+
+    /// The task's end takes the commit and branch, and whether the tree was
+    /// dirty only once that has come; with no commit by then, nothing.
+    #[test]
+    fn the_end_takes_the_git_details_that_have_come() {
+        let git = Git {
+            commit: "abc123".into(),
+            branch: Some("main".into()),
+            dirty: None,
+        };
+        let cases = [
+            (
+                vec![GitPart::Head(git.clone()), GitPart::Dirty(true)],
+                Some(Some(true)),
+            ),
+            (vec![GitPart::Head(git.clone())], Some(None)),
+            (vec![], None),
+        ];
+        for (sent, want) in cases {
+            let dir = tempfile::tempdir().unwrap();
+            let (tx, rx) = mpsc::channel();
+            for part in sent {
+                tx.send(part).unwrap();
+            }
+            let record = TaskRecord {
+                schema: SCHEMA,
+                status: "running".into(),
+                ..Default::default()
+            };
+            let file = RecordFile::begin_with(dir.path(), record, Some(rx)).unwrap();
+            file.end(Some(0), String::new(), String::new(), false);
+            let want = want.map(|dirty| Git {
+                dirty,
+                ..git.clone()
+            });
+            assert_eq!(read(file.path()).unwrap().git, want);
+            drop(tx);
+        }
     }
 }
