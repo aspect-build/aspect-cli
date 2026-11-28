@@ -536,7 +536,8 @@ def action_split(state: dict) -> dict:
     still valid), `disk` and `remote` (a cache served every spawn of it),
     `internal` (no spawn), `other` (what of Bazel's counts fits no kind,
     rare), `skipped` (counted done without being run or checked against a
-    cache, `_SKIPPED_KINDS`) and `unreported` (done, its
+    cache, `up to date` or `skipped` by the outcome: `remainder`,
+    `remainder_words`) and `unreported` (done, its
     kind not said yet); `disk_on` and `remote_on` say which caches the
     build was given.
 
@@ -556,7 +557,7 @@ def action_split(state: dict) -> dict:
     summary = bes_get(inv.get("build_metrics"), "action_summary")
     executed = bes_get(summary, "actions_executed")
     caches = cache_kinds(inv)
-    split = dict(done = max(0, done), total = max(0, total, done), more = more, counted = done >= 0, known = False, final = False, estimated = False, ran = 0, local = 0, disk = 0, remote = 0, internal = 0, other = 0, failed = 0, skipped = 0, unreported = 0, failed_build = False, running = bool(state.get("building")), running_now = running_count(state), disk_on = caches[0], remote_on = caches[1])
+    split = dict(done = max(0, done), total = max(0, total, done), more = more, counted = done >= 0, known = False, final = False, estimated = False, ran = 0, local = 0, disk = 0, remote = 0, internal = 0, other = 0, failed = 0, skipped = 0, unreported = 0, failed_build = False, running = bool(state.get("building")), running_now = running_count(state), disk_on = caches[0], remote_on = caches[1], remainder = remainder_words(state))
     kinds = c.get("log_kinds") or {}
     logged = state.get("exec_log_read") and not own_execution_log(inv) and (kinds.get("ran", 0) + kinds.get("disk", 0) + kinds.get("remote", 0)) > 0
     if not state.get("building") and type(executed) == "int":
@@ -747,12 +748,6 @@ def actions_text(split: dict) -> list:
     share = " (%d%%)" % pct if pct != None else ""
     return ["%s · %s cache hits%s" % (actions, hits, share), "%s · %s hits%s" % (n, hits, share), actions, n]
 
-# What the actions Bazel counted done without running them or checking a
-# cache (`action_split`'s `skipped`) can be, read in Bazel's source:
-# `ExecutionProgressReceiver` counts done every action key its graph
-# evaluates, one whose inputs are unchanged too, which no metric counts.
-_SKIPPED_KINDS = "already up to date in Bazel's memory (a warm server found nothing they depend on changed), made by an identical action of another target, or an input failed; on Bazel 7 and 8 also internal actions, which their runner counts leave out where spawns outnumber actions"
-
 # One part of the Actions rows: what it counts (`key`, a kind's key in
 # `action_split`, else `done`, `running`, `pending` or `hits`, the cache
 # hits' total), its glyph, count, words and role, and how it is drawn
@@ -785,11 +780,51 @@ _ACTION_KINDS = [
 
 _KIND = {key: (glyph, role, words) for key, glyph, role, words in _ACTION_KINDS}
 
-def _part(key: str, n: int, how: str = "", glyph: str | None = None) -> ActionPart:
+# What the `skipped` part says, the actions Bazel counted done without
+# running them or checking a cache (`ExecutionProgressReceiver` counts done
+# every action key its graph evaluates, one whose inputs are unchanged too,
+# which no metric counts), by the build's outcome (`remainder_words`), and
+# what the `?` legend says each holds: where nothing but tests failed,
+# actions already up to date in Bazel's memory or made by an identical
+# action of another target; once anything else failed, actions whose input
+# failed too, which nothing Bazel publishes tells apart.
+_UP_TO_DATE = "up to date"
+
+_SKIPPED = "skipped"
+
+_REMAINDER_LEGEND = [
+    (_UP_TO_DATE, "Bazel counted these done without running them or checking a cache: already up to date in its memory, or made by an identical action of another target."),
+    (_SKIPPED, "as above, or not run because an input failed."),
+]
+
+_REMAINDER_NOTE = "On Bazel 7 and 8, a few internal actions those versions don't count as internal can also be here."
+
+# The outcomes of a build that failed nothing but its tests, by its
+# `BuildFinished` exit code's name.
+_ONLY_TESTS_FAILED = ["SUCCESS", "TESTS_FAILED", "NO_TESTS_FOUND"]
+
+def remainder_words(state: dict) -> str:
+    """What the `skipped` part says (`_UP_TO_DATE` or `_SKIPPED`): once the
+    build has finished, by its outcome, `up to date` where it succeeded or
+    failed only its tests (`_ONLY_TESTS_FAILED`), else `skipped`; while it
+    runs, or where it ended without a result, by what failed so far,
+    `skipped` once a target or an action other than a test's own
+    (`TestRunner`) has, else `up to date`. Once a failure is seen it stays
+    seen, so the words change at most once while the build runs."""
+    finished = (state.get("inv") or {}).get("build_finished")
+    if finished != None and not state.get("building"):
+        name = str(bes_get(bes_get(finished, "exit_code"), "name", "") or "")
+        return _UP_TO_DATE if name in _ONLY_TESTS_FAILED else _SKIPPED
+    c = state.get("counts") or {}
+    failed = c.get("failed", 0) or [f for f in c.get("action_failures") or [] if f.mnemonic != "TestRunner"]
+    return _SKIPPED if failed else _UP_TO_DATE
+
+def _part(key: str, n: int, how: str = "", glyph: str | None = None, words: str | None = None) -> ActionPart:
     """An Actions row part of kind `key` (`_ACTION_KINDS`) counting `n`;
-    `glyph` where it shares its kind's with the part before it ("")."""
-    kind_glyph, role, words = _KIND[key]
-    return ActionPart(key = key, glyph = kind_glyph if glyph == None else glyph, count = n, words = words, role = role, how = how)
+    `glyph` where it shares its kind's with the part before it (""), and
+    `words` where they are not its kind's."""
+    kind_glyph, role, kind_words = _KIND[key]
+    return ActionPart(key = key, glyph = kind_glyph if glyph == None else glyph, count = n, words = words or kind_words, role = role, how = how)
 
 # The bar's segments, in order: glyph, role, and the keys in
 # `action_split` they sum; `unreported` the done count no event or log says
@@ -884,7 +919,8 @@ def action_parts(split: dict) -> list:
     the rest add up to the actions: what ran (`ok`, `failed`) and the
     cache hits (the local action cache, always at the end; disk and remote
     where the build was given that cache, or hit it, live only once they
-    have a hit, `▓` once before the first); then skipped, internal,
+    have a hit, `▓` once before the first); then the remainder (`up to
+    date` or `skipped`, the split's `remainder`), internal,
     `other` (at the end, what of Bazel's counts fits no kind) and what
     Bazel counted done without saying how (`? 3 unreported`); with nothing
     to tell them apart, the done count; while it runs, what is not done
@@ -914,7 +950,7 @@ def action_parts(split: dict) -> list:
         if split[key] or (final and on):
             parts.append(_part(key, split[key], "" if split[key] else "dim", glyph))
             glyph = ""
-    parts.append(_part("skipped", split.get("skipped", 0)))
+    parts.append(_part("skipped", split.get("skipped", 0), words = split.get("remainder")))
     parts.append(_part("internal", split["internal"]))
     parts.append(_part("other", split["other"]))
     parts.append(ActionPart(key = "unreported", glyph = "?", count = split["unreported"], words = "unreported", role = "", how = "muted"))
@@ -1349,7 +1385,9 @@ def action_lines(state: dict) -> list:
     return out
 
 dashboard_actions = namespace(
-    SKIPPED_KINDS = _SKIPPED_KINDS,
+    REMAINDER_LEGEND = _REMAINDER_LEGEND,
+    REMAINDER_NOTE = _REMAINDER_NOTE,
+    testonly_remainder_words = remainder_words,
     testonly_action_bar = action_bar,
     action_counts = action_counts,
     action_lines = action_lines,

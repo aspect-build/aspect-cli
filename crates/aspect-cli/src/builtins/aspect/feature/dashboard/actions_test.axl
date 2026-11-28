@@ -42,6 +42,7 @@ status_row = dashboard_actions.testonly_status_row
 target_rows = dashboard_actions.target_rows
 text_width = term_text.text_width
 _ActionFailure = failure_records.ActionFailure
+remainder_words = dashboard_actions.testonly_remainder_words
 _visible = dashboard_testing.visible
 _eq = dashboard_testing.eq
 _screen = dashboard_testing.screen
@@ -309,6 +310,31 @@ def _actions_tests(ctx):
         ("undeclared inclusion", dict(done = 7, total = 7, ran = 3, internal = 2, failed = 1, skipped = 1)),
     ]:
         _eq("real: " + name, _split_of(action_split(_real(ctx, name))), want)
+
+    # The remainder's words follow the build's outcome: a passing warm
+    # rebuild's are up to date (Bazel 9.3.3, `[4 / 4]`: one ran, one
+    # action cache hit, one internal, one counted done alone), a build that
+    # failed only its tests too; once an action failed, skipped.
+    warm_incr = _screen(ctx, ["x"], building = False, ended = True, done_total = (4, 4, False), inv = {"build_finished": _SUCCESS, "build_metrics": struct(action_summary = struct(
+        actions_executed = 2,
+        runner_count = [struct(name = "total", count = 2), struct(name = "internal", count = 1), struct(name = "darwin-sandbox", count = 1)],
+        action_cache_statistics = struct(hits = 1, misses = 2),
+    ))})
+    rows = " ".join([_visible(r) for r in action_results(action_split(warm_incr), 200)])
+    _eq("a passing warm rebuild: up to date", ("○ 1 up to date" in rows, "skipped" in rows), (True, False))
+    rows = " ".join([_visible(r) for r in action_results(action_split(_real(ctx, "cc failure")), 200)])
+    _eq("a failed build: skipped", ("○ 1 skipped" in rows, "up to date" in rows), (True, False))
+    _eq("a build that failed only its tests: up to date", action_split(_real(ctx, "failing test"))["remainder"], "up to date")
+    _eq("an analysis failure: skipped", action_split(_real(ctx, "analysis failure"))["remainder"], "skipped")
+
+    # While a build runs, by what has failed so far: a test's own action
+    # failing is no build failure; once another has, skipped.
+    live = _screen(ctx, ["x"], building = True)
+    _eq("live, nothing failed: up to date", remainder_words(live), "up to date")
+    count_event(live["counts"], "action_completed", struct(label = "//t:t", primary_output = "bazel-out/k8/testlogs/t/t/test.log", configuration = None), struct(success = False, type = "TestRunner"))
+    _eq("live, a test's own action failed: up to date", remainder_words(live), "up to date")
+    count_event(live["counts"], "action_completed", struct(label = "//a:g", primary_output = "bazel-out/k8/bin/a/g.out", configuration = None), struct(success = False, type = "Genrule"))
+    _eq("live, a genrule failed: skipped", remainder_words(live), "skipped")
 
     # The parts sum to Bazel's count, ╳ is the stream's failed actions, as
     # decoded; and the label's count and % agree with them.
@@ -622,7 +648,7 @@ def _actions_tests(ctx):
     # goes first, then a cache with no hits, then counts in thousands, then
     # whole parts; ran, failed, skipped, the hits' total and what is not
     # done stay, and nothing is cut in half.
-    jammed = dict(measured, ran = 30, local = 0, disk = 0, remote = 0, failed = 5, skipped = 10, internal = 1, done = 46, total = 46)
+    jammed = dict(measured, ran = 30, local = 0, disk = 0, remote = 0, failed = 5, skipped = 10, internal = 1, done = 46, total = 46, remainder = "skipped")
     got = [_visible(r) for r in action_results(jammed, 17, 5, short = True)]
 
     # Short terminals: the drop order, failed last.
@@ -772,7 +798,7 @@ def _actions_tests(ctx):
         key = rows[rows.index("Actions"):]
         _eq("the key at %d" % width, [text_width(r) <= width for r in key if r not in ("Actions", "Tests")], [True for r in key if r not in ("Actions", "Tests")])
     keyed = " ".join([" ".join(r.split()) for r in help_rows(greg_screen, 300)])
-    for want in ["ran: ok + failed: actions executed this build", "█ ok: executed this build and succeeded", "▒ local: outputs Bazel's action cache on this machine said were still valid", "▓ disk / remote:", "cache hits: local + disk + remote: actions whose results were reused", "○ skipped: Bazel counted these done without running them or checking a cache: already up to date in Bazel's memory", "╳ failed: executed this build and failed (test failures are under Tests)", "░ internal: Bazel bookkeeping", "▌ other: what Bazel's own counts leave out", "─ not done: running or pending", "The groups and parts don't overlap: they add up to the total actions.", "actions: what Bazel checked this build", "%: cache hits ÷ actions; skipped ones are no hits, so a warm and a fresh server aren't comparable"]:
+    for want in ["ran: ok + failed: actions executed this build", "█ ok: executed this build and succeeded", "▒ local: outputs Bazel's action cache on this machine said were still valid", "▓ disk / remote:", "cache hits: local + disk + remote: actions whose results were reused", "○ up to date: Bazel counted these done without running them or checking a cache: already up to date in its memory, or made by an identical action of another target.", "○ skipped: as above, or not run because an input failed.", "On Bazel 7 and 8, a few internal actions those versions don't count as internal can also be here.", "╳ failed: executed this build and failed (test failures are under Tests)", "░ internal: Bazel bookkeeping", "▌ other: what Bazel's own counts leave out", "─ not done: running or pending", "The groups and parts don't overlap: they add up to the total actions.", "actions: what Bazel checked this build", "%: cache hits ÷ actions; up to date and skipped ones are no hits, so a warm and a fresh server aren't comparable"]:
         _eq("keyed: %r" % want, want in keyed, True)
     _eq("the Tests row keyed", help_rows(greg_screen, 100)[-2:], ["Tests", "  ─ running · pending: test targets · (N cached): every run from a cache"])
 

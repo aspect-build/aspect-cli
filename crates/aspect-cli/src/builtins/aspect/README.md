@@ -335,9 +335,11 @@ What it shows:
     the slowest once the build has ended;
   - Results: targets, tests (`7 passed (5 cached)`, running and pending),
     the actions by kind (`ran N: █ ok · ╳ failed`, `cache hits N: ▒
-    local · ▓ disk · remote`, `○ skipped`, `░ internal`), adding up to
-    Bazel's own count, the critical path and the failures. `?` explains
-    every glyph and what `skipped` can hold.
+    local · ▓ disk · remote`, `○ up to date` or `○ skipped`, `░
+    internal`), adding up to Bazel's own count, the critical path and the
+    failures. The `○` actions are `up to date` where the build succeeded or
+    failed only its tests, `skipped` once anything else failed, since they
+    can then hold actions whose input failed. `?` explains every glyph.
 - **Tabs**, numbered: Console (the task's whole output, colours kept, each
   successful action's output folded to a count), Failures (one row per
   entry of the failure summary, its excerpt under it; Enter opens its log,
