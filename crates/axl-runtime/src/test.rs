@@ -451,13 +451,14 @@ const BASIL_BUILD_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 ///   - **Cargo**: `cargo test -p axl-runtime` doesn't build sibling
 ///     workspace binaries, so we shell out once to `cargo build -p basil`
 ///     and locate the resulting binary alongside our own test exe. Same
-///     recursive-cargo pattern that `assert_cmd`/`escargot` use — by the
+///     recursive-cargo pattern that `assert_cmd`/`escargot` use: by the
 ///     time test binaries are running, the parent cargo's build lock is
 ///     released, so the inner `cargo build` succeeds.
+///
+/// The outcome is cached, a failure too: every test that needs basil panics
+/// with the same message, and a build that failed or wedged is never run
+/// again by the next thread waiting on it.
 pub fn basil_bin() -> &'static str {
-    // The outcome is cached, a failure too: every test that needs basil
-    // panics with the same message, and a build that failed or wedged is
-    // never run again by the next thread waiting on it.
     static BIN: OnceLock<Result<String, String>> = OnceLock::new();
     match BIN.get_or_init(find_basil) {
         Ok(path) => path,
