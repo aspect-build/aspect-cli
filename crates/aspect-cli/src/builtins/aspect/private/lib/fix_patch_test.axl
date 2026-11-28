@@ -15,7 +15,7 @@ Run with:
   aspect dev test-fix-patch
 """
 
-load("./fix_patch.axl", "apply_fix_patch", "testonly_ignored", "testonly_scan")
+load("./fix_patch.axl", "apply_fix_patch", "patch_available", "testonly_ignored", "testonly_scan")
 
 def _eq(label, got, want):
     if got != want:
@@ -238,6 +238,10 @@ printf 'caf\\352\\n' > tree/src/l1.txt
     fs.write(root + "/padded-missing.patch", "--- a/src/gone \n+++ b/src/gone \n@@ -1 +1 @@\n-a\n+b\n")
     apply_fix_patch(ctx, root + "/padded-missing.patch", cwd = tree, say = _noted(said))
     _eq("a name in a message is quoted", [l.rpartition(" changes ")[2].partition(",")[0] for l in said], ["'src/gone'"])
+    said = []
+    fs.write(root + "/quote.patch", "--- a/src/it's.txt\n+++ b/src/it's.txt\n@@ -1 +1 @@\n-a\n+b\n")
+    apply_fix_patch(ctx, root + "/quote.patch", cwd = tree, say = _noted(said))
+    _eq("and a quote in it escaped", [l.rpartition(" changes ")[2].partition(",")[0] for l in said], ["'src/it\\'s.txt'"])
 
     # A header naming only its prefix is refused before patch runs, which
     # would be handed `./` (GNU patch refuses it, BSD exits with trouble).
@@ -247,6 +251,20 @@ printf 'caf\\352\\n' > tree/src/l1.txt
     fs.write(root + "/prefix.patch", "--- /dev/null\n+++ b/\n@@ -0,0 +1 @@\n+x\n")
     _eq("a creation named by its prefix", apply_fix_patch(ctx, root + "/prefix.patch", cwd = tree, program = shim, say = _noted(said)), None)
     _eq("is refused, patch not run", (said, fs.exists(ran)), (["a header with no name"], False))
+
+    # No `patch` to run: found out up front, and a patch it can't run is
+    # refused rather than ending the task.
+    env = ctx.std.env
+    before = {"PATH": env.var("PATH")}
+    ctx.defer(_restore, env, before)
+    fs.create_dir_all(root + "/empty-bin")
+    env.set_var("PATH", root + "/empty-bin")
+    found = patch_available(ctx)
+    _restore(env, before)
+    _eq("no patch on PATH", (found, patch_available(ctx)), (False, True))
+    said = []
+    _eq("a patch it can't run", apply_fix_patch(ctx, root + "/padded.patch", cwd = tree, program = root + "/no-such-patch", say = _noted(said)), None)
+    _eq("is refused as such", [l.startswith("'%s/no-such-patch' can't be run: " % root) for l in said], [True])
 
     # An I/O failure nothing below handles (a path longer than any host
     # takes) refuses the patch, and the run goes on.
@@ -603,6 +621,24 @@ printf 'l\\n' > back/src/target.txt && ln -s target.txt back/src/lnk.txt
         _eq("refuses, naming it", [l.startswith("'src/b.txt': ") for l in said], [True])
         _eq("nothing written", fs.read_to_string(tree + "/src/a.txt"), "a\n")
         fs.set_permissions(tree + "/src/b.txt", 0o644)
+    if unreadable != None:
+        # A reject it can't copy: refused naming it, the partly filled
+        # rejects directory gone (temporary directories go where TMPDIR
+        # says, here one this test watches).
+        fs.write(tree + "/src/c.txt", "c\n")
+        shim = _stand_in(fs, root, "locked-reject-patch", 'eval "last=\\${$#}"\npatch "$@"\nrc=$?\n[ -f "$last.rej" ] && chmod 000 "$last.rej"\nexit $rc\n')
+        watched = root + "/tmp-rejects"
+        fs.create_dir_all(watched)
+        before = {"TMPDIR": ctx.std.env.var("TMPDIR")}
+        ctx.defer(_restore, ctx.std.env, before)
+        ctx.std.env.set_var("TMPDIR", watched)
+        said.clear()
+        fs.write(root + "/reject.patch", fix("src/c.txt", "nope", "C"))
+        got = apply_fix_patch(ctx, root + "/reject.patch", cwd = tree, program = shim, say = _noted(said))
+        _restore(ctx.std.env, before)
+        _eq("a reject it can't copy", got, None)
+        _eq("is refused, naming it", [l.startswith("'src/c.txt.rej': ") for l in said], [True])
+        _eq("the rejects directory gone, the copies' and patch's own left for the task's end", len(_names(fs, watched)), 2)
     if unwritable != None:
         said.clear()
         fs.write(root + "/ro.patch", "--- /dev/null\n+++ b/src/ro/new.txt\n@@ -0,0 +1 @@\n+n\n" + fix("src/ok.txt", "A", "B"))

@@ -33,7 +33,7 @@ load("./private/lib/artifacts.axl", "artifacts")
 load("./private/lib/bazel_results.axl", "BES_DRAIN_TICK_MS", "MIN_HEARTBEAT_INTERVAL_MS", "bb_clientd_root", "bes_get", "local_output_path", "now_ms", "process_event", "usable_bb_clientd_root")
 load("./private/lib/change_detection.axl", "BASE_REF_DESCRIPTION_TAIL")
 load("./private/lib/environment.axl", "detect_ci", "error", "warn")
-load("./private/lib/fix_patch.axl", "apply_fix_patch")
+load("./private/lib/fix_patch.axl", "apply_fix_patch", "patch_available")
 load("./private/lib/github.axl", "detect_changed_files", "detect_ci_base_ref", "print_changed_files_listing")
 load("./private/lib/lifecycle.axl", "phases")
 load("./private/lib/lint_results.axl", "detect_lint_tool", lint_accumulate = "accumulate", lint_conclusion = "conclusion", lint_init_data = "init_data", lint_strategy_label = "strategy_label")
@@ -1116,7 +1116,12 @@ def _impl(ctx: TaskContext) -> int | TaskConclusion:
     # subset. Applying auto-fixes against a broken build risks compounding the
     # breakage. Skipping the phase emit also keeps current_phase() on `lint` so
     # the breakdown tags the right phase and no zero-work `Apply` row appears.
-    if not build_failed and fix_apply and scoped_patches:
+    # With no `patch` to run, one ERROR line says so and none is applied.
+    apply_fixes = not build_failed and fix_apply and scoped_patches
+    if apply_fixes and not patch_available(ctx):
+        error(ctx.std, "aspect lint --fix needs patch(1) on PATH: no auto-fix patch was applied")
+        apply_fixes = False
+    if apply_fixes:
         patches_label = pluralize(len(scoped_patches), "auto-fix patch", plural = "auto-fix patches")
         status = _pick_status(data, had_failure = False, terminal = False)
         ph.update(

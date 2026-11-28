@@ -31,8 +31,8 @@ where:
   names a symlink;
 - two of its files are one in the copies' directory, once copied or once
   patched;
-- patch exits with trouble, or leaves a copy that isn't a regular file, or
-  takes one away unasked;
+- patch can't be run or exits with trouble, or leaves a copy that isn't a
+  regular file, or takes one away unasked;
 - reading, copying or comparing fails before anything is written (the
   warning names the path).
 """
@@ -51,9 +51,10 @@ _File = record(
 )
 
 def _q(path: str) -> str:
-    """`path` quoted for a message and escaped (`ascii_escaped`), so space
-    at either end of it shows."""
-    return "'%s'" % ascii_escaped(path)
+    """`path` quoted for a message and escaped (`ascii_escaped`, and `'` as
+    `\\'`), so space at either end of it shows and a quote in it can't end
+    the quoting."""
+    return "'%s'" % ascii_escaped(path).replace("'", "\\'")
 
 def _days_from_civil(year: int, month: int, day: int) -> int:
     """Days from 1970-01-01 to a date of the proleptic Gregorian calendar."""
@@ -351,6 +352,16 @@ def _replace(fs, src: str, dst: str) -> None:
     if err != None:
         fail(err)
 
+def _keep_rejects(fs, work: str, kept: str, rejects: list, at: list) -> None:
+    """Copy each of `rejects`, paths in the copies' directory `work`, to the
+    same path in `kept`, noting in `at[0]` the one it is on."""
+    for rej in rejects:
+        at[0] = rej
+        parent = rej.rpartition("/")[0]
+        if parent:
+            fs.create_dir_all(kept + "/" + parent)
+        fs.copy(work + "/" + rej, kept + "/" + rej)
+
 def _same_bytes(fs, a: str, b: str) -> bool:
     """Whether files `a` and `b` hold the same bytes, whatever their text:
     their sizes first, then a chunk at a time."""
@@ -471,11 +482,17 @@ def _apply(
         # Backups as patch makes them by default, files only from the copies
         # (no version control checkout), names quoted its default way and
         # messages in English, which `_ignored` reads.
-        out = ctx.std.process.command(program).args(["--forward", "--batch", "--input=" + section, "./" + target]) \
+        command = ctx.std.process.command(program).args(["--forward", "--batch", "--input=" + section, "./" + target]) \
             .current_dir(work).env("TMPDIR", scratch).env("LC_ALL", "C").env("LANGUAGE", None) \
             .env("VERSION_CONTROL", None).env("PATCH_VERSION_CONTROL", None).env("SIMPLE_BACKUP_SUFFIX", None) \
             .env("PATCH_GET", None).env("POSIXLY_CORRECT", None).env("QUOTING_STYLE", None) \
-            .stdin("null").stdout("piped").stderr("piped").spawn().wait_with_output()
+            .stdin("null").stdout("piped").stderr("piped")
+
+        # A spawn failure is no typed error; this catches the spawn alone.
+        err, child = catch(command.spawn)
+        if err != None:
+            return refuse("%s can't be run: %s" % (_q(program), err.message))
+        out = child.wait_with_output()
         said = out.stdout + out.stderr
         if said:
             ctx.std.io.stderr.write(said if said.endswith("\n") else said + "\n")
@@ -521,13 +538,12 @@ def _apply(
             writes.append((target, patched, mine))
     kept = None
     if rejects:
+        at[0] = ""
         kept = fs.mkdtemp()
-        for rej in rejects:
-            at[0] = rej
-            parent = rej.rpartition("/")[0]
-            if parent:
-                fs.create_dir_all(kept + "/" + parent)
-            fs.copy(work + "/" + rej, kept + "/" + rej)
+        err, _ = catch(_keep_rejects, fs, work, kept, rejects, at, types = [std.io.Error])
+        if err != None:
+            catch(fs.remove_dir_all, kept, types = [std.io.Error])
+            fail(err)
     at[0] = ""
 
     for target, mine in removals:
@@ -541,6 +557,16 @@ def _apply(
     if kept != None:
         tell("INFO", "%s did not apply in full; its rejected hunks are in %s" % (_q(patch), _q(kept)))
     return kept
+
+def patch_available(ctx: TaskContext, program: str = "patch") -> bool:
+    """Whether `program`, the `patch` `apply_fix_patch` runs, can be run
+    here: `--version` spawns, whatever it says or exits with."""
+    command = ctx.std.process.command(program).arg("--version").stdin("null").stdout("null").stderr("null")
+    err, child = catch(command.spawn)
+    if err != None:
+        return False
+    child.wait()
+    return True
 
 def apply_fix_patch(
         ctx: TaskContext,
@@ -581,6 +607,7 @@ def apply_fix_patch(
       after is named in a WARNING, and the rest still happen.
     - Rejects for hunks that failed are kept in a directory an INFO line
       names. The copies go when the task ends, however it ends.
+    - `patch_available` says up front whether `program` can be run at all.
     - For a test to stand in for them: `program` is the `patch` run, `say`
       prints each WARNING and INFO line (`warn` and `info` unless given),
       and `mkdtemp` makes the copies' directory (`fs.mkdtemp` unless
