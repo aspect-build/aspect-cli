@@ -26,6 +26,19 @@
 //! ([`super::ansi::is_neutral`]) are left out, as they would only clutter the
 //! next line.
 //!
+//! # Stage order
+//!
+//! A stage that reads raw ([`LineProcessor::reads_raw`], the error
+//! collector) is given each of Bazel's records as Bazel wrote it, classified,
+//! before any other stage runs and before a rendering makes rows of it; what
+//! it returns is not used. The others then run in the chain's order on what
+//! the stages before them passed. The CLI's own notes between Bazel's lines
+//! ([`Notes`]: where the history kept a log) are written where nothing
+//! redraws (after a message Bazel ended, before its progress area or the
+//! next output's header, and at the end), each classified on its own and
+//! marked [`super::line::Line::note`], through the chain alone: a raw reader
+//! never sees one.
+//!
 //! # Rendered lines
 //!
 //! Given [`Shape::lines`], each record is classified, then fed with its
@@ -59,7 +72,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use super::ansi;
-use super::feed::Feed;
+use super::feed::{Feed, Source};
 use super::line::{Classifier, Line};
 use super::log::RawLog;
 use super::render::{Row, Screen};
@@ -105,6 +118,20 @@ pub trait LineProcessor: Send {
     fn report(&mut self) -> Option<Vec<u8>> {
         None
     }
+
+    /// Whether this stage only reads Bazel's records as Bazel wrote them:
+    /// it is given each one as it comes, before any stage runs and before a
+    /// rendering of curses into lines makes rows of them, and its
+    /// [`LineProcessor::process`] result is not used. Not given the CLI's
+    /// own notes.
+    fn reads_raw(&self) -> bool {
+        false
+    }
+
+    /// For a stage that [`LineProcessor::reads_raw`]: the last record, given
+    /// as ending in a bare `\r` at the end of a read, ended in `\r\n`, whose
+    /// `\n` the next read brought.
+    fn crlf_after_cr(&mut self) {}
 }
 
 /// The running reader thread. Joined after the child has exited.
@@ -167,9 +194,12 @@ impl Forwarder {
                     processors,
                     Destination::new(forward, shape.strip_colour)
                         .feeding(shape.feed.clone(), shape.hidden)
-                        .copying(shape.copy),
+                        .copying(shape.copy)
+                        .holding(shape.hold)
+                        .gating(shape.gate.clone()),
                     screen,
-                );
+                )
+                .with_notes(shape.notes.clone());
                 let mut buf = [0u8; READ_BUF_SIZE];
                 let result = loop {
                     if reports {
@@ -192,7 +222,7 @@ impl Forwarder {
                 };
                 splitter.finish();
                 if let Some(feed) = &shape.feed {
-                    feed.finish();
+                    feed.finish(Source::Stderr);
                 }
                 state.done();
                 result
@@ -233,9 +263,17 @@ impl Forwarder {
     pub fn ordered_after(&self, inner: Box<dyn Write + Send>, fd: std::os::fd::OwnedFd) -> After {
         After {
             inner,
+            gate: self.gate(fd),
+        }
+    }
+
+    /// [`Forwarder::ordered_after`]'s wait on its own, for a forwarder to run
+    /// before it takes what it holds across a write ([`Shape::gate`]).
+    pub fn gate(&self, fd: std::os::fd::OwnedFd) -> Gate {
+        Gate {
             other: self.activity.clone(),
             fd,
-            skip_until: None,
+            skip_until: std::sync::Mutex::new(None),
         }
     }
 
@@ -261,18 +299,30 @@ const AFTER_WAIT: Duration = Duration::from_millis(200);
 /// See [`Forwarder::ordered_after`].
 pub struct After {
     inner: Box<dyn Write + Send>,
+    gate: Gate,
+}
+
+/// See [`Forwarder::gate`].
+pub struct Gate {
     other: Activity,
     fd: std::os::fd::OwnedFd,
     /// No waiting until then: see [`AFTER_BACKOFF`].
-    skip_until: Option<Instant>,
+    skip_until: std::sync::Mutex<Option<Instant>>,
 }
 
-impl After {
+impl std::fmt::Debug for Gate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Gate").finish_non_exhaustive()
+    }
+}
+
+impl Gate {
     /// Until the other forwarder is waiting with nothing left to read, or has
     /// ended, for at most [`AFTER_WAIT`]: a stalled one must not stall this
     /// stream. A wait that runs out pauses waiting for [`AFTER_BACKOFF`].
-    fn wait(&mut self) {
-        if self.skip_until.is_some_and(|t| Instant::now() < t) {
+    pub fn wait(&self) {
+        let mut skip_until = self.skip_until.lock().unwrap_or_else(|p| p.into_inner());
+        if skip_until.is_some_and(|t| Instant::now() < t) {
             return;
         }
         let deadline = Instant::now() + AFTER_WAIT;
@@ -286,7 +336,7 @@ impl After {
                 return;
             }
             if Instant::now() >= deadline {
-                self.skip_until = Some(Instant::now() + AFTER_BACKOFF);
+                *skip_until = Some(Instant::now() + AFTER_BACKOFF);
                 return;
             }
             thread::sleep(AFTER_POLL);
@@ -301,7 +351,7 @@ fn readable(fd: &impl std::os::fd::AsRawFd) -> bool {
 
 impl Write for After {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.wait();
+        self.gate.wait();
         self.inner.write(buf)
     }
 
@@ -342,6 +392,11 @@ struct Splitter {
     screen: Option<Screen>,
     /// Classifies a settled row no record was classified for.
     row_lines: Classifier,
+    /// Lines to write between Bazel's ([`Notes`]).
+    notes: Option<Notes>,
+    /// Whether the last record could be in Bazel's progress area
+    /// ([`super::line::Line::drawn`]): no note is written after one.
+    last_drawn: bool,
 }
 
 impl Splitter {
@@ -359,6 +414,33 @@ impl Splitter {
             held_cr: false,
             screen,
             row_lines: Classifier::default(),
+            notes: None,
+            last_drawn: true,
+        }
+    }
+
+    /// Also write the lines `notes` has, between Bazel's.
+    fn with_notes(mut self, notes: Option<Notes>) -> Self {
+        self.notes = notes;
+        self
+    }
+
+    /// Write the queued notes, each as a line the stages run on.
+    fn write_notes(&mut self) {
+        let Some(notes) = self.notes.as_ref().map(Notes::take) else {
+            return;
+        };
+        for note in notes {
+            // Its own classifier: Bazel's knows where its progress area is.
+            let mut line = Classifier::default().classify(&note);
+            line.note = true;
+            if self.screen.is_some() {
+                let mut bytes = note;
+                bytes.push(b'\n');
+                self.render(&bytes, Some(&line));
+            } else {
+                self.chain(&note, b"\n", line);
+            }
         }
     }
 
@@ -379,6 +461,9 @@ impl Splitter {
         while i < carry.len() {
             let b = carry[i];
             if b == b'\n' && start == i && self.after_cr.is_some() {
+                for p in self.processors.iter_mut().filter(|p| p.reads_raw()) {
+                    p.crlf_after_cr();
+                }
                 if self.after_cr.take() == Some(false) {
                     if self.screen.is_some() {
                         self.render(b"\n", None);
@@ -414,13 +499,19 @@ impl Splitter {
     }
 
     /// End of stream: the trailing partial record, then, when rendering, the
-    /// rows the screen still held, then each stage's
+    /// rows the screen still held, then the notes still queued, then each stage's
     /// [`LineProcessor::finish`], then each one's [`LineProcessor::report`].
     fn finish(&mut self) {
         self.flush_carry();
         if let Some(mut screen) = self.screen.take() {
             let rows = screen.finish();
             self.run_rows(rows);
+        }
+        if self.notes.as_ref().is_some_and(|n| !n.is_empty()) {
+            if !self.out.at_line_start {
+                self.out.write(b"\n");
+            }
+            self.write_notes();
         }
         for p in self.processors.iter_mut() {
             if let Some(bytes) = p.finish() {
@@ -458,6 +549,18 @@ impl Splitter {
     /// destination has failed, so observers still see every line.
     fn emit(&mut self, record: &[u8], boundary: &[u8]) -> bool {
         let mut line = self.lines.classify(record);
+        // Between a message Bazel ended and its progress area, or the next
+        // output's header: a note there is where nothing redraws.
+        if !self.last_drawn && (line.drawn || line.opens_output) {
+            self.write_notes();
+        }
+        line.returns = boundary == b"\r";
+        line.crlf = boundary == b"\r\n";
+        for p in self.processors.iter_mut().filter(|p| p.reads_raw()) {
+            p.see(&line);
+            p.process(record);
+        }
+        self.last_drawn = line.drawn || boundary != b"\n" && boundary != b"\r\n";
         if self.screen.is_some() {
             let mut bytes = record.to_vec();
             bytes.extend_from_slice(boundary);
@@ -465,7 +568,6 @@ impl Splitter {
             // Kept: a `\n` that follows a `\r` across reads goes to the screen.
             return true;
         }
-        line.returns = boundary == b"\r";
         self.chain(record, boundary, line)
     }
 
@@ -497,6 +599,9 @@ impl Splitter {
         let mut current = record.to_vec();
         for i in 0..self.processors.len() {
             let p = &mut self.processors[i];
+            if p.reads_raw() {
+                continue;
+            }
             p.see(&line);
             match p.process(&current) {
                 Some(bytes) => current = bytes,
@@ -536,9 +641,68 @@ pub struct Shape {
     pub feed: Option<Arc<Feed>>,
     /// Write nothing to the destination: what is shown goes to `feed` only.
     pub hidden: bool,
+    /// Lines another thread has for the console ([`Notes`]), written as
+    /// Bazel's own are, where Bazel is not drawing its progress area.
+    pub notes: Option<Notes>,
     /// Also given every settled line written, shown or hidden: the task
     /// history's copy of its output.
     pub copy: Option<fn(&[u8])>,
+    /// Held across each write's copy and the write itself (the CLI's
+    /// terminal write lock), so nothing comes between the two.
+    pub hold: Option<fn() -> Box<dyn std::any::Any>>,
+    /// Waited on before each write, ahead of `hold` ([`Forwarder::gate`]):
+    /// the wait for the other forwarder holds nothing.
+    pub gate: Option<Arc<Gate>>,
+}
+
+/// Lines for the console from another thread (the history's note of where
+/// it kept a failed action's log). The forwarder writes each, as a line the
+/// stages run on, once Bazel has ended a message and before it draws its
+/// progress area again, so a line never lands inside what curses redraws;
+/// the rest when the console ends.
+#[derive(Debug, Clone, Default)]
+pub struct Notes {
+    queue: Arc<std::sync::Mutex<std::collections::VecDeque<Vec<u8>>>>,
+    /// The `INFO` label's style, the CLI's own (`report::Style::info`):
+    /// a note is the CLI's line, so it looks as `diag::info`'s do. Empty
+    /// leaves it plain.
+    info: String,
+}
+
+impl Notes {
+    /// Notes whose `INFO` label is drawn in `info` ([`aspect_theme::label_line`]).
+    pub fn styled(info: String) -> Notes {
+        Notes {
+            info,
+            ..Notes::default()
+        }
+    }
+
+    /// Queue `line`, without its newline.
+    pub fn push(&self, line: Vec<u8>) {
+        self.queue.lock().unwrap().push_back(line);
+    }
+
+    fn is_empty(&self) -> bool {
+        self.queue.lock().unwrap().is_empty()
+    }
+
+    /// The queued notes, each as the CLI writes its own lines.
+    pub fn take(&self) -> Vec<Vec<u8>> {
+        let notes: Vec<Vec<u8>> = self.queue.lock().unwrap().drain(..).collect();
+        notes.into_iter().map(|note| self.style(note)).collect()
+    }
+
+    /// `note` with its `INFO` label styled as the CLI's own are.
+    fn style(&self, note: Vec<u8>) -> Vec<u8> {
+        match note.strip_prefix(b"INFO:") {
+            Some(rest) if !self.info.is_empty() => {
+                aspect_theme::label_line(&self.info, "INFO", &String::from_utf8_lossy(rest))
+                    .into_bytes()
+            }
+            _ => note,
+        }
+    }
 }
 
 /// The destination. A write that would block (stderr left nonblocking by
@@ -549,6 +713,10 @@ struct Destination {
     copy: Option<fn(&[u8])>,
     /// Whether what is being written is a settled line, for `copy`.
     settled: bool,
+    /// Held across a write's copy and the write ([`Shape::hold`]).
+    hold: Option<fn() -> Box<dyn std::any::Any>>,
+    /// Waited on before a write, ahead of `hold` ([`Shape::gate`]).
+    gate: Option<Arc<Gate>>,
     strip_colour: bool,
     feed: Option<Arc<Feed>>,
     hidden: bool,
@@ -563,6 +731,8 @@ impl Destination {
             inner,
             copy: None,
             settled: true,
+            hold: None,
+            gate: None,
             strip_colour,
             feed: None,
             hidden: false,
@@ -577,6 +747,18 @@ impl Destination {
         self
     }
 
+    /// Hold `hold`'s guard across each write's copy and the write.
+    fn holding(mut self, hold: Option<fn() -> Box<dyn std::any::Any>>) -> Self {
+        self.hold = hold;
+        self
+    }
+
+    /// Wait on `gate` before each write, ahead of the hold.
+    fn gating(mut self, gate: Option<Arc<Gate>>) -> Self {
+        self.gate = gate;
+        self
+    }
+
     /// Also write to `feed`, and with `hidden` only there.
     fn feeding(mut self, feed: Option<Arc<Feed>>, hidden: bool) -> Self {
         self.feed = feed;
@@ -585,11 +767,17 @@ impl Destination {
     }
 
     fn write(&mut self, bytes: &[u8]) {
+        // Only a write that reaches the destination waits its turn behind the
+        // other forwarder: a hidden one is fed and copied, never shown.
+        if let Some(gate) = self.gate.as_ref().filter(|_| !self.hidden) {
+            gate.wait();
+        }
+        let _held = self.hold.map(|hold| hold());
         if let Some(&last) = ansi::strip(bytes).last() {
             self.at_line_start = last == b'\n' || last == b'\r';
         }
         if let Some(feed) = &self.feed {
-            feed.write(bytes);
+            feed.write(Source::Stderr, bytes);
         }
         if let (Some(copy), true) = (self.copy, self.settled) {
             copy(bytes);
@@ -609,6 +797,8 @@ impl Destination {
     }
 
     fn flush(&mut self) {
+        // Held as a write is: what the flush writes is a write.
+        let _held = self.hold.map(|hold| hold());
         while !self.failed {
             match self.inner.flush() {
                 Ok(()) => return,
@@ -800,6 +990,75 @@ mod tests {
         assert_eq!(sink.bytes(), b"WARNING: x\ny\n");
     }
 
+    /// A note queued before the console ends is written as a line, after
+    /// Bazel's; one queued while Bazel writes a message lands after it,
+    /// before the progress area.
+    #[test]
+    fn notes_are_written_between_bazels_lines() {
+        let sink = SharedSink::default();
+        let notes = Notes::default();
+        notes.push(b"INFO: //a:b Genrule stderr: /h/x.stderr".to_vec());
+        let mut forwarder = Forwarder::spawn_logged(
+            Box::new(std::io::Cursor::new(b"ERROR: x failed\n  why\n".to_vec())),
+            Box::new(sink.clone()),
+            vec![],
+            None,
+            Shape {
+                notes: Some(notes.clone()),
+                ..Shape::default()
+            },
+        )
+        .unwrap();
+        forwarder.join().unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&sink.bytes()),
+            "ERROR: x failed\n  why\nINFO: //a:b Genrule stderr: /h/x.stderr\n"
+        );
+    }
+
+    /// Under curses, a note waits for the end of a message Bazel wrote and
+    /// goes before its progress area, never inside the area Bazel erases
+    /// and redraws; and the error collector, which reads Bazel's records
+    /// raw, never sees it.
+    #[test]
+    fn notes_under_a_pty_go_before_the_progress_area_and_past_the_collector() {
+        let sink = SharedSink::default();
+        let notes = Notes::default();
+        notes.push(b"INFO: //a:b Genrule stderr: /h/x.stderr".to_vec());
+        let observations = Arc::new(super::super::processors::Observations::default());
+        let collector = super::super::report::ErrorCollector::new(true, observations.clone());
+        let console = concat!(
+            "\x1b[31m\x1b[1mERROR: \x1b[0ma/BUILD:1:1: Executing genrule //a:b failed: (Exit 1)\r\n",
+            "  why\r\n",
+            "\x1b[32m[1 / 2]\x1b[0m 1 action running\r\n",
+            "\x1b[1A\x1b[K\x1b[32mINFO: \x1b[0mBuild completed\r\n",
+        );
+        let mut forwarder = Forwarder::spawn_logged(
+            Box::new(std::io::Cursor::new(console.as_bytes().to_vec())),
+            Box::new(sink.clone()),
+            vec![Box::new(collector)],
+            None,
+            Shape {
+                notes: Some(notes.clone()),
+                ..Shape::default()
+            },
+        )
+        .unwrap();
+        forwarder.join().unwrap();
+        let out = String::from_utf8_lossy(&sink.bytes()).into_owned();
+        let note = out.find("INFO: //a:b Genrule stderr").expect(&out);
+        assert!(out.find("  why").unwrap() < note, "{out:?}");
+        assert!(note < out.find("[1 / 2]").unwrap(), "{out:?}");
+        let kept = observations.collected_errors().expect("collected");
+        assert!(
+            kept.blocks
+                .iter()
+                .all(|b| !b.text.contains("Genrule stderr")),
+            "{:?}",
+            kept.blocks
+        );
+    }
+
     /// Hidden, nothing reaches the destination and the feed gets the lines.
     #[test]
     fn a_hidden_destination_gets_nothing_and_the_feed_every_line() {
@@ -816,6 +1075,7 @@ mod tests {
                 lines: Some(None),
                 feed: Some(feed.clone()),
                 hidden: true,
+                notes: None,
                 ..Shape::default()
             },
         )

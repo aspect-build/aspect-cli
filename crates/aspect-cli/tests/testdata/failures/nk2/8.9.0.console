@@ -1,0 +1,29 @@
+[32mComputing main repo mapping:[0m 
+[1A[K[32mLoading:[0m 
+[1A[K[32mLoading:[0m 0 packages loaded
+[1A[K[32mAnalyzing:[0m 3 targets (0 packages loaded, 0 targets configured)
+[1A[K[32mAnalyzing:[0m 3 targets (0 packages loaded, 0 targets configured)
+
+[1A[K[1A[K[32mINFO: [0mAnalyzed 3 targets (0 packages loaded, 0 targets configured).
+[32m[0 / 3][0m [Prepa] BazelWorkspaceStatusAction stable-status.txt
+[1A[K[31m[1mERROR: [0m${WORKSPACE}/nk2/BUILD.bazel:1:8: Executing genrule //nk2:m1 failed: missing input file '//nk2:gone1.txt'
+[32m[1 / 4][0m Executing genrule //nk2:boom; 0s darwin-sandbox
+[1A[K[31m[1mERROR: [0m${WORKSPACE}/nk2/BUILD.bazel:2:8: Executing genrule //nk2:m2 failed: missing input file '//nk2:gone2.txt'
+[32m[1 / 4][0m Executing genrule //nk2:boom; 0s darwin-sandbox
+[1A[K[31m[1mERROR: [0m${WORKSPACE}/nk2/BUILD.bazel:1:8: Executing genrule //nk2:m1 failed: 1 input file(s) do not exist
+[32m[1 / 4][0m Executing genrule //nk2:boom; 0s darwin-sandbox
+[1A[K[31m[1mERROR: [0m${WORKSPACE}/nk2/BUILD.bazel:2:8: Executing genrule //nk2:m2 failed: 1 input file(s) do not exist
+[32m[1 / 4][0m Executing genrule //nk2:boom; 0s darwin-sandbox
+[1A[KUse --verbose_failures to see the command lines of failed build steps.
+[32m[3 / 4][0m checking cached actions
+[1A[K[31m[1mERROR: [0m${WORKSPACE}/nk2/BUILD.bazel:1:8 Executing genrule //nk2:m1 failed: 1 input file(s) do not exist
+[32m[3 / 4][0m checking cached actions
+[1A[K[32mINFO: [0mElapsed time: 0.055s, Critical Path: 0.01s
+[32m[3 / 4][0m checking cached actions
+[1A[K[32mINFO: [0m2 processes: 2 internal.
+[32m[3 / 4][0m checking cached actions
+[1A[K[31m[1mERROR: [0mBuild did NOT complete successfully
+[31m[1mFAILED:[0m 
+[1A[K[31m[1mFAILED:[0m 
+[1A[K[32mINFO: [0mBuild Event Protocol files produced successfully.
+[0m

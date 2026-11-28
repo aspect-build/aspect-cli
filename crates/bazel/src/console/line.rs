@@ -17,8 +17,11 @@
 //! * bazel's colour marks it: a coloured severity immediately followed by a
 //!   reset, as bazel writes `ESC[35mWARNING: ESC[0m` ([`Line::coloured`]). A
 //!   capture asks bazel for colour for this reason, unless a processor says
-//!   not to (the user's `--color` only decides what is shown); a console
-//!   without colour has no headers, and nothing in it is hidden;
+//!   not to (the user's `--color` only decides what is shown). In a console
+//!   without colour, only the plain lines shaped like a header before
+//!   Bazel's first line that is not one (its `INFO:` lines at the start)
+//!   are headers, and none after: in such a console a stage can tell
+//!   little of Bazel's from a tool's;
 //! * and it is not in an action's output. That output runs from its header
 //!   (`INFO: From …`, or an `ERROR:` about an action rather than the build
 //!   graph) until bazel itself ends it: under curses by moving the cursor up
@@ -33,7 +36,8 @@
 //! Right after bazel ends an action's output, the next line may still be
 //! the output's: a last line without a newline, which bazel flushes only
 //! before its next event. So that line is a message only if it opens more
-//! action output. Under `--noshow_progress` nothing ends an action's output,
+//! action output or is an `ERROR:` only bazel writes (at a BUILD or `.bzl`
+//! file's location, or `package contains errors`). Under `--noshow_progress` nothing ends an action's output,
 //! and nothing after the first is hidden.
 //!
 //! Each errs on the side of a line staying visible. Two cases are beyond
@@ -148,10 +152,35 @@ static GRAPH_ERROR: LazyLock<Regex> = LazyLock::new(|| {
     .unwrap()
 });
 
-/// A header whose body is an action's or a test's output.
+/// Whether `text` (escapes stripped) is a status row's label and nothing
+/// after it (`FAILED:`), as Bazel's own colon-inside status row always is
+/// (curses draws the label, then erases it): never part of an error's body.
+pub fn is_bare_status(text: &str) -> bool {
+    text.trim_end()
+        .strip_suffix(':')
+        .is_some_and(|label| !label.is_empty() && label.bytes().all(|b| b.is_ascii_uppercase()))
+}
+
+/// An `ERROR:` only bazel writes: at a BUILD or `.bzl` file's location (its
+/// line and column, or the file alone: `le/BUILD.bazel: no such target`), or
+/// that a package contains errors. A tool's held last line in bazel's
+/// colours (a nested bazel's `ERROR: the build failed`) is not one.
+static OWN_ERROR: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"^ERROR: (?:(?:\S*/)?(?:BUILD(?:\.bazel)?|[^\s/:]+\.bzl)(?::\d+(?::\d+)?)?: |package contains errors)",
+    )
+    .unwrap()
+});
+
+/// A header whose body is an action's or a test's output: `INFO: From …`,
+/// or an `ERROR:` at a BUILD file's location or saying what failed. One with
+/// neither (`ERROR: Couldn't start the build. Unable to run tests`) is about
+/// the build, and what follows it is Bazel's (its `FAILED:` status row).
 static ACTION_OUTPUT: LazyLock<Regex> =
     // A cached test's `INFO: From Testing //:t` has no trailing colon.
-    LazyLock::new(|| Regex::new(r"^(?:INFO: From |ERROR: )").unwrap());
+    LazyLock::new(|| {
+        Regex::new(r"^(?:INFO: From |ERROR: \S+:\d+(?::\d+)?: |ERROR: .* failed: )").unwrap()
+    });
 
 /// `text` (escapes already stripped) without a `--show_timestamps` prefix.
 pub fn message(text: &str) -> &str {
@@ -216,6 +245,12 @@ pub struct Line {
     /// next writes over it (a tool's spinner). Set by the splitter, which
     /// sees the boundary.
     pub returns: bool,
+    /// Whether the record ended in `\r\n`. Set by the splitter, as
+    /// [`Line::returns`] is.
+    pub crlf: bool,
+    /// Whether it is a line of the CLI's own the forwarder wrote between
+    /// Bazel's ([`super::forward::Notes`]), not Bazel's.
+    pub note: bool,
     /// Whether it came while an action's or a test's output was open, or
     /// after streamed test output was announced: a tool's, whatever its
     /// shape.
@@ -281,6 +316,12 @@ pub struct Classifier {
     /// bazel holds until it ends with a newline and flushes only after
     /// drawing its progress, before its next event.
     maybe_tail: bool,
+    /// The console's leading run of messages without colour (`ERROR:`,
+    /// `INFO:`) is over: those are bazel's own (Bazel 7 parses its flags
+    /// before it colours anything: `ERROR: --nosuch_flag :: Unrecognized
+    /// option`, then `INFO: Invocation ID: …`); the first other line, or
+    /// one in bazel's colours, ends it.
+    coloured_yet: bool,
 }
 
 impl Classifier {
@@ -304,8 +345,14 @@ impl Classifier {
         let text = message_of(record);
         let inside = self.in_action_output || self.streamed;
         let mut was_tail = false;
-        let label = BAZEL_LABEL.is_match(record);
+        let label = BAZEL_LABEL.is_match(record)
+            || (!self.coloured_yet && !inside && !record.contains(&0x1b) && HEADER.is_match(&text));
+        // Only the leading run of them: the first other line ends it.
+        if !label || BAZEL_LABEL.is_match(record) {
+            self.coloured_yet = true;
+        }
         let count = BAZEL_COUNT.is_match(record);
+        self.coloured_yet |= BAZEL_LABEL.is_match(record) || count || BAZEL_PHASE.is_match(record);
         let phase = !self.in_action_output && BAZEL_PHASE.is_match(record);
         let indented = text.starts_with([' ', '\t']);
         let wrapped = std::mem::take(&mut self.wrapped);
@@ -330,12 +377,13 @@ impl Classifier {
             let tail = std::mem::take(&mut self.maybe_tail);
             was_tail = tail;
             let opens = ACTION_OUTPUT.is_match(&text) && !GRAPH_ERROR.is_match(&text);
-            // A possible tail is taken for a message only if it opens more
-            // output, as bazel's next `INFO: From …` does.
+            // A possible tail is a message only if it opens more output, as
+            // bazel's next `INFO: From …` does, or reads as bazel's own
+            // error (`ERROR: package contains errors` after a redraw).
             if label
                 && !self.in_action_output
                 && !self.streamed
-                && (opens || !tail)
+                && (opens || !tail || OWN_ERROR.is_match(&text))
                 && HEADER.is_match(&text)
             {
                 opens_output = opens;
@@ -346,7 +394,13 @@ impl Classifier {
                 Kind::Other
             }
         };
-        let status = BAZEL_STATUS.is_match(record);
+        // A tool's own line coloured as Bazel colours its status line (the
+        // colon inside, the space after) is the tool's: never drawn inside
+        // an action's output. Streamed test output never ends, so there
+        // only a bare row, as Bazel's own always is, is its status line.
+        let status = !self.in_action_output
+            && BAZEL_STATUS.is_match(record)
+            && (!self.streamed || is_bare_status(&text));
         let after_status = std::mem::replace(&mut self.after_status, status);
         let drawn = kind.is_progress()
             || count
@@ -377,6 +431,8 @@ impl Classifier {
             opens_output,
             drawn,
             returns: false,
+            crlf: false,
+            note: false,
             in_output: inside,
             streamed: self.streamed && !announces,
             tail: was_tail && label && !self.streamed,
@@ -489,6 +545,50 @@ pub(crate) mod tests {
             .collect()
     }
 
+    /// A tool's line coloured as Bazel colours its status line, inside an
+    /// action's output, is the tool's; Bazel's own status rows, after
+    /// streamed test output too, are still drawn.
+    #[test]
+    fn a_tools_line_coloured_as_bazels_status_is_not_drawn() {
+        for label in ["INFO", "WARNING", "ERROR", "DEBUG", "FAILED"] {
+            let mut c = Classifier::default();
+            c.classify(bazel("INFO: From Executing genrule //:g:").as_bytes());
+            let shaped = format!("\x1b[32m{label}:\x1b[0m two");
+            for tool in ["one", shaped.as_str(), "three", "four"] {
+                assert!(!c.classify(tool.as_bytes()).drawn, "{label}: {tool:?}");
+            }
+        }
+        let mut c = Classifier::default();
+        assert!(
+            c.classify(b"\x1b[32mINFO:\x1b[0m Build completed successfully")
+                .drawn
+        );
+    }
+
+    #[test]
+    fn bazels_status_rows_after_streamed_test_output_are_drawn() {
+        let mut c = Classifier::default();
+        c.classify(bazel("INFO: Streamed test output requested.").as_bytes());
+        assert!(
+            c.classify(b"\x1b[1;32mINFO:\x1b[0m ").drawn,
+            "a bare status row"
+        );
+        assert!(
+            c.classify(b"\x1b[31m\x1b[1mFAILED:\x1b[0m ").drawn,
+            "a bare failure row"
+        );
+        for line in [
+            &b"\x1b[32mINFO:\x1b[0m two"[..],
+            b"\x1b[32mINFO:\x1b[0m Build completed successfully, 12 total actions",
+            b"\x1b[32mINFO:\x1b[0m Elapsed time: 1.2s, Critical Path: 1.0s",
+            b"\x1b[31m\x1b[1mFAILED:\x1b[0m Build did NOT complete successfully",
+        ] {
+            let mut c = Classifier::default();
+            c.classify(bazel("INFO: Streamed test output requested.").as_bytes());
+            assert!(!c.classify(line).drawn, "a test's own line: {line:?}");
+        }
+    }
+
     /// A tool's own "Waiting for" line is its output, not bazel's BES wait.
     #[test]
     fn a_tools_waiting_line_is_not_drawn() {
@@ -516,15 +616,38 @@ pub(crate) mod tests {
         );
     }
 
+    /// Bazel 7.7.3 refuses an unknown flag before it colours anything: that
+    /// `ERROR:` is its own; one without colour after Bazel's first coloured
+    /// line is a tool's.
+    #[test]
+    fn an_error_before_bazels_first_colour_is_its_own() {
+        assert_eq!(
+            kinds(&["~ERROR: --nosuch_flag_here :: Unrecognized option: --nosuch_flag_here"]),
+            [Kind::Header]
+        );
+        assert_eq!(
+            kinds(&["INFO: x", "~ERROR: a tool's"]),
+            [Kind::Header, Kind::Other]
+        );
+        assert_eq!(
+            kinds(&[
+                "~ERROR: --nosuch_flag_here :: Unrecognized option: --nosuch_flag_here",
+                "~INFO: Invocation ID: 3f2"
+            ]),
+            [Kind::Header, Kind::Header]
+        );
+    }
+
     #[test]
     fn without_colour_nothing_is_a_message() {
         assert_eq!(
             kinds(&[
+                "~Starting local Bazel server and connecting to it...",
                 "~WARNING: plain",
                 "~INFO: plain",
                 "~\x1b[0mERROR: a reset is not a colour"
             ]),
-            [Kind::Other, Kind::Other, Kind::Other]
+            [Kind::Other, Kind::Other, Kind::Other, Kind::Other]
         );
     }
 

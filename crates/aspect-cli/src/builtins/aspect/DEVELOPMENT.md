@@ -490,7 +490,10 @@ flag, and unless the user's own flags or rc ask for it, the BES backends the
 CLI streams to, its file sinks and a requested `--build_event_binary_file` get
 the stream as Bazel sends it without the flag, while hooks and iterators see
 every action. A `--bes_backend` or `--build_event_json_file` Bazel serves
-itself is not trimmed.
+itself is not trimmed. A feature that can do without every action when Bazel
+sends the events out itself (a `--bes_backend`, or a remote cache it uploads
+the events' files to, whose outage stops the stream at the first successful
+action) asks through `publish_all_actions_unless_sent_out` instead.
 
 The mpsc channel between the broadcaster and the iterator is unbounded; iterate promptly to keep memory in check, or call `events.drain()` to stop accumulating events.
 
@@ -744,7 +747,7 @@ def config(ctx: ConfigContext):
     ))
 ```
 
-**Name your kinds.** A log carries one entry per spawn *plus* one per file, directory, input set and runfiles tree — 10k-50k entries on a medium build, where only a few hundred are spawns. `ExecLogHook.kinds` becomes `bazel.execution_log.iterator(kinds = ...)`, which filters by payload tag **in Rust**, before an entry is turned into a Starlark value. `kinds = []` means every kind and should be rare. When several hooks are registered the runtime is given the union, and dispatch re-checks each entry's kind in AXL only when the hooks disagree.
+**Name your kinds.** A log carries one entry per spawn *plus* one per file, directory, input set and runfiles tree: 10k-50k entries on a medium build, where only a few hundred are spawns. `ExecLogHook.kinds` becomes the `kinds` of the hooks' handle (`bazel.execution_log._hook_iterator(kinds = ...)`, `iterator`'s private twin, which beside the caller's own execution log ends without the warning a task's own iterator gets), which filters by payload tag **in Rust**, before an entry is turned into a Starlark value. `kinds = []` means every kind and should be rare. `ExecLogHook.file_paths` narrows the `file` entries the same way, to those whose path contains one of its strings (the Dashboard asks for `/testlogs/`). When several hooks are registered the runtime is given the union, and dispatch re-checks each entry's kind in AXL only when the hooks disagree.
 
 **A raw entry is not usable on its own.** Entries reference each other by id: a spawn says `input_set_id = 42`, and only a `file` entry carries a digest. [private/lib/execlog.axl](private/lib/execlog.axl) has the resolver that turns ids back into paths, digests, spawn keys and action-key fingerprints. Resolution needs the id-carrying kinds, so a hook that resolves must ask for `execlog.RESOLVER_KINDS`, not just `["spawn"]`.
 

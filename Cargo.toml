@@ -34,3 +34,18 @@ opt-level = 3
 panic = "abort"
 debug = "line-tables-only"
 strip = false
+
+# The AXL interpreter, optimized in debug builds too: a full-screen feature
+# runs per key and per frame in it, too slowly unoptimized.
+[profile.dev.package.starlark]
+opt-level = 2
+
+[profile.dev.package.starlark_map]
+opt-level = 2
+
+# And the highlighter a peek runs, on a whole file.
+[profile.dev.package.syntect]
+opt-level = 2
+
+[profile.dev.package.fancy-regex]
+opt-level = 2

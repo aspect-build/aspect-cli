@@ -1,0 +1,1 @@
+genrule(name = "u", srcs = ["//at2:ok"], outs = ["u.txt"], cmd = "true")

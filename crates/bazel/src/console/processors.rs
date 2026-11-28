@@ -342,9 +342,197 @@ pub struct Observations {
     seen: Mutex<std::collections::HashSet<String>>,
     /// One per aggregate stage, in the order the stages were made.
     tallies: Mutex<Vec<Tally>>,
+    /// The errors the console's [`crate::console::report::ErrorCollector`]
+    /// collected, for the task's failure summary.
+    collected: Mutex<Option<std::sync::Arc<CollectedErrors>>>,
+    /// Whether the console's stream carried Bazel's stdout too (a terminal
+    /// both share), so an action's stdout is among its output there.
+    stdout_shared: std::sync::atomic::AtomicBool,
+}
+
+/// What [`crate::console::report::ErrorCollector`] kept of the console, in
+/// the order Bazel wrote it: each of Bazel's own `ERROR:` messages with
+/// what followed it before Bazel's next message or redraw, each `INFO:
+/// From …:` header of an action's output with its body's length and last
+/// line, and each record that may be an output's held last line
+/// ([`BlockKind::Tail`]); how many bytes of Bazel's own its caps left out
+/// (`not_kept`), and how many `INFO: From` blocks (`froms_not_kept`).
+#[derive(Debug, Clone, Default)]
+pub struct CollectedErrors {
+    pub blocks: Vec<Block>,
+    pub not_kept: u64,
+    pub froms_not_kept: u64,
+    /// Whether Bazel coloured its console: a line in its colours came, so
+    /// it was not run with `--color=no`.
+    pub color: bool,
+    /// The most of an action's stdout or stderr Bazel relayed to the
+    /// console ([`crate::console::report::relay_cap`]); None for all of it.
+    pub relay_cap: Option<u64>,
+}
+
+/// One kept block: what starts it ([`BlockKind`]), and its text: its
+/// records as Bazel wrote them (escape sequences kept), each with its line
+/// ending (`\n`; a bare `\r` as is; `\r\n` as written, but for a PTY's,
+/// which is its `\n`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Block {
+    pub kind: BlockKind,
+    /// For an `INFO: From`, its header alone.
+    pub text: String,
+    /// For an `INFO: From`, its body's length in bytes and its last line
+    /// (with its ending): what telling a held last line needs.
+    pub body_len: u64,
+    pub last_line: String,
+}
+
+/// What a block's first line says when it is an `ERROR:`: an
+/// [`BlockKind::Error`] block's header, or a [`BlockKind::Tail`] that is
+/// Bazel's next message. Read from the line with escape sequences, what a
+/// carriage return wrote over and a `--show_timestamps` prefix left out.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ErrorHeader {
+    /// Where the error is, as Bazel wrote it: what comes before the first
+    /// `: ` after `ERROR: ` when it has no space and reads as a place
+    /// (`/ws/pkg/BUILD.bazel:3:8`, a path then a line number; or a path
+    /// ending in `/BUILD` or `/BUILD.bazel`); empty for none.
+    pub location: String,
+    /// The header's text after `ERROR: ` and its location.
+    pub message: String,
+    /// Whether Bazel coloured the `ERROR: ` (`ESC[31mESC[1mERROR: `), as it
+    /// does its own unless `--color=no`: one uncoloured in a coloured
+    /// console is a tool's.
+    pub coloured: bool,
+    /// Whether it is one of Bazel's closing lines, which say only that the
+    /// build failed ([`super::report::is_boilerplate`]).
+    pub boilerplate: bool,
+    /// The lines Bazel wrote with it, as an error quotes them (a
+    /// `Traceback`'s frames): the block's next lines, escape sequences left
+    /// out, up to the first that is blank, starts with an escape sequence
+    /// or a carriage return (one in Bazel's colours, a redraw), or is
+    /// Bazel's own (after a `--show_timestamps` prefix, one starting as
+    /// Bazel's do, [`super::feed::starts_as_bazels`], or its `FAILED:` and
+    /// `Use --…` lines); at most [`MAX_BODY_LINES`].
+    pub body: Vec<String>,
+}
+
+/// The most lines an [`ErrorHeader`]'s body quotes.
+pub const MAX_BODY_LINES: usize = 200;
+
+/// How Bazel colours its own `ERROR: `.
+const BAZEL_ERROR: &str = "\x1b[31m\x1b[1mERROR: ";
+
+impl Block {
+    /// What this block's first line says, for an `error` or `tail` block
+    /// whose first line is an `ERROR: `; None for any other.
+    pub fn error_header(&self) -> Option<ErrorHeader> {
+        if self.kind == BlockKind::From {
+            return None;
+        }
+        let line = self.text.split('\n').next().unwrap_or_default();
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        let plain = ansi::text(line.as_bytes());
+        let plain = plain.rsplit('\r').next().unwrap_or_default();
+        let said = super::line::message(plain).strip_prefix("ERROR: ")?;
+        let (location, message) = match said.split_once(": ") {
+            Some((head, rest)) if is_location(head) => (head, rest),
+            _ => ("", said),
+        };
+        Some(ErrorHeader {
+            location: location.to_string(),
+            message: message.to_string(),
+            coloured: line.contains(BAZEL_ERROR),
+            boilerplate: super::report::is_boilerplate(said),
+            body: error_body(&self.text),
+        })
+    }
+}
+
+/// The lines after a block's first that its `ERROR:` header quotes
+/// ([`ErrorHeader::body`]).
+fn error_body(text: &str) -> Vec<String> {
+    let mut out = vec![];
+    for raw in text.split('\n').skip(1).take(MAX_BODY_LINES) {
+        let raw = raw.strip_suffix('\r').unwrap_or(raw);
+        if raw.starts_with(['\x1b', '\r']) {
+            break;
+        }
+        let plain = ansi::text(raw.as_bytes());
+        let said = line::message(&plain);
+        if said.trim().is_empty()
+            || super::feed::starts_as_bazels(said)
+            || said.starts_with("FAILED:")
+            || said.starts_with("Use --")
+        {
+            break;
+        }
+        out.push(plain);
+    }
+    out
+}
+
+/// Whether `head`, what an `ERROR: ` says before its first `: `, is where
+/// the error is: no space in it, and a line number after its first `:`
+/// (`pkg/BUILD.bazel:3:8`) or a BUILD file's path.
+fn is_location(head: &str) -> bool {
+    let line = head.split(':').nth(1).unwrap_or_default();
+    !head.contains(' ')
+        && ((!line.is_empty() && line.bytes().all(|b| b.is_ascii_digit()))
+            || head.ends_with("/BUILD")
+            || head.ends_with("/BUILD.bazel"))
+}
+
+/// What starts a [`Block`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlockKind {
+    /// One of Bazel's own `ERROR:` messages.
+    Error,
+    /// An action's output, under Bazel's `INFO: From …:`.
+    From,
+    /// A record that may be an action output's held last line: the first
+    /// past Bazel's progress area once a block ended, written after Bazel's
+    /// redraw, or one the classifier calls a held last line (the first after
+    /// an action's output ended that starts in Bazel's colours for a
+    /// severity, a coloured `ERROR:` say). It is Bazel's next message or
+    /// that held line, which Bazel writes after its next redraw; the bytes
+    /// cannot tell them apart (see [`crate::console::line`]), and the
+    /// summary tells them by the action's own output. A tail that is an
+    /// `ERROR:` has its header read too ([`Block::error_header`]).
+    Tail,
+}
+
+impl BlockKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            BlockKind::Error => "error",
+            BlockKind::From => "from",
+            BlockKind::Tail => "tail",
+        }
+    }
 }
 
 impl Observations {
+    /// Keep the console's collected errors for the failure summary.
+    pub fn set_collected_errors(&self, collected: CollectedErrors) {
+        *self.collected.lock().unwrap() = Some(std::sync::Arc::new(collected));
+    }
+
+    /// The console's collected errors once it has ended, when a stage kept
+    /// them: shared, never copied.
+    pub fn collected_errors(&self) -> Option<std::sync::Arc<CollectedErrors>> {
+        self.collected.lock().unwrap().clone()
+    }
+
+    /// Note whether the console's stream carries Bazel's stdout too.
+    pub fn set_stdout_shared(&self, shared: bool) {
+        self.stdout_shared
+            .store(shared, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Whether the console's stream carries Bazel's stdout too.
+    pub fn stdout_shared(&self) -> bool {
+        self.stdout_shared.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
     /// Latch `fatal`; the first line wins.
     pub fn set_fatal(&self, line: &str) {
         self.fatal_line

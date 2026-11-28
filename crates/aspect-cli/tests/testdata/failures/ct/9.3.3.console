@@ -1,0 +1,61 @@
+[32mComputing main repo mapping:[0m 
+[1A[K[32mLoading:[0m 
+[1A[K[32mLoading:[0m 0 packages loaded
+[1A[K[35mWARNING: [0mBuild option --action_env has changed, discarding analysis cache (this can be expensive, see https://bazel.build/advanced/performance/iteration-speed).
+[32mAnalyzing:[0m 5 targets (0 packages loaded)
+[1A[K[32mAnalyzing:[0m 5 targets (0 packages loaded, 0 targets configured)
+[1A[K[32mAnalyzing:[0m 5 targets (0 packages loaded, 0 targets configured)
+
+[1A[K[1A[K[32mINFO: [0mAnalyzed 5 targets (0 packages loaded, 5 targets configured).
+[32m[1 / 5][0m 4 actions running
+    Executing genrule //ct:nl3; 0s darwin-sandbox
+    Executing genrule //ct:nlfail; 0s darwin-sandbox
+    Executing genrule //ct:slow; 0s darwin-sandbox
+    Executing genrule //ct:nl2; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[1A[K[1A[K[32mINFO: [0mFrom Executing genrule //ct:nl3:
+unique out
+[32m[1 / 6][0m 5 actions running
+    Executing genrule //ct:nl3; 0s darwin-sandbox
+    Executing genrule //ct:nlfail; 0s darwin-sandbox
+    Executing genrule //ct:slow; 0s darwin-sandbox
+    Executing genrule //ct:nl2; 0s darwin-sandbox
+    Executing genrule //ct:nl1; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0mheld unique
+[31m[1mERROR: [0m${WORKSPACE}/ct/BUILD.bazel:4:8: Executing genrule //ct:nlfail failed: (Exit 2): bash failed: error executing Genrule command (from genrule rule target //ct:nlfail) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo '\''fail out'\'' >&2; printf '\''\033[31m\033[1mERROR: \033[0mheld in failure'\'' >&2; exit 2'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+fail out
+[32m[2 / 6][0m 4 actions running
+    Executing genrule //ct:nlfail; 0s darwin-sandbox
+    Executing genrule //ct:slow; 0s darwin-sandbox
+    Executing genrule //ct:nl2; 0s darwin-sandbox
+    Executing genrule //ct:nl1; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0mheld in failure
+[32mINFO: [0mFrom Executing genrule //ct:nl2:
+same out
+[32m[3 / 6][0m 3 actions running
+    Executing genrule //ct:slow; 0s darwin-sandbox
+    Executing genrule //ct:nl2; 0s darwin-sandbox
+    Executing genrule //ct:nl1; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0mheld same
+[32mINFO: [0mFrom Executing genrule //ct:nl1:
+same out
+[32m[4 / 6][0m 2 actions running
+    Executing genrule //ct:slow; 0s darwin-sandbox
+    Executing genrule //ct:nl1; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[32m[5 / 6][0m Executing genrule //ct:slow; 0s darwin-sandbox
+[1A[K[32m[5 / 6][0m Executing genrule //ct:slow; 1s darwin-sandbox
+[1A[K[31m[1mERROR: [0mheld same
+[32mINFO: [0mBuild succeeded for only 4 of 5 top-level targets
+[32m[6 / 6][0m no actions running
+[1A[K[32mINFO: [0mFound 5 targets...
+[32m[6 / 6][0m no actions running
+[1A[K[32mINFO: [0mElapsed time: 2.102s, Critical Path: 2.05s
+[32m[6 / 6][0m no actions running
+[1A[K[32mINFO: [0m6 processes: 2 internal, 4 darwin-sandbox.
+[32m[6 / 6][0m no actions running
+[1A[K[31m[1mERROR: [0mBuild did NOT complete successfully
+[31m[1mFAILED:[0m 
+[1A[K[31m[1mFAILED:[0m 
+[1A[K[32mINFO: [0mBuild Event Protocol files produced successfully.
+[0m

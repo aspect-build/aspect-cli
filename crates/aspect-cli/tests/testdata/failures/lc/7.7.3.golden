@@ -1,0 +1,35 @@
+exit 1
+── Failures (6) ──
+✗ //lc:n2  Check · exit 3 · lc/BUILD.bazel:2:5
+  │ n2 broke
+  log ${OUTPUT_BASE}/execroot/_main/bazel-out/_tmp/actions/stderr-3
+
+✗ //lc:n4  Check · exit 5 · lc/BUILD.bazel:2:5
+  │ n4 broke
+  log ${OUTPUT_BASE}/execroot/_main/bazel-out/_tmp/actions/stderr-5
+
+✗ //lc:n1  Check · lc/BUILD.bazel:2:5
+  │ output 'lc/n1.out' was not created
+
+✗ //lc:n3  Check · lc/BUILD.bazel:2:5
+  │ output 'lc/n3.out' was not created
+
+✗ //lc:n5  Check · lc/BUILD.bazel:2:5
+  │ output 'lc/n5.out' was not created
+
+✗ //lc:n0  Check · exit 1 · lc/BUILD.bazel:2:5
+0 built, 6 failed · 0 tests passed, 0 failed · Bazel's raw log: ${FIXTURE}/7.7.3.console
+All of it: aspect history show t-replay
+--- Failures tab
+✗ //lc:n2  Check · exit 3 · lc/BUILD.bazel:2:5
+  │ n2 broke
+✗ //lc:n4  Check · exit 5 · lc/BUILD.bazel:2:5
+  │ n4 broke
+✗ //lc:n1  Check · lc/BUILD.bazel:2:5
+  │ output 'lc/n1.out' was not created
+✗ //lc:n3  Check · lc/BUILD.bazel:2:5
+  │ output 'lc/n3.out' was not created
+✗ //lc:n5  Check · lc/BUILD.bazel:2:5
+  │ output 'lc/n5.out' was not created
+✗ //lc:n0  Check · exit 1 · lc/BUILD.bazel:2:5
+  │ n0 broke

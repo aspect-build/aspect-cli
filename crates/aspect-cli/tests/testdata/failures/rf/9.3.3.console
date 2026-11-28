@@ -1,0 +1,32 @@
+[32mComputing main repo mapping:[0m 
+[1A[K[32mLoading:[0m 
+[1A[K[32mLoading:[0m 0 packages loaded
+[1A[K[32mAnalyzing:[0m 2 targets (0 packages loaded, 0 targets configured)
+[1A[K[32mINFO: [0mAnalyzed 2 targets (0 packages loaded, 0 targets configured).
+
+[1A[K[31m[1mERROR: [0m${WORKSPACE}/rf/BUILD.bazel:2:2: in r rule //rf:x: 
+Traceback (most recent call last):
+	File "${WORKSPACE}/rf/defs.bzl", line 2, column 9, in _impl
+		fail("impl refuses " + ctx.label.name)
+Error in fail: impl refuses x
+
+[1A[K[31m[1mERROR: [0m${WORKSPACE}/rf/BUILD.bazel:2:2: Analysis of target '//rf:x' (config: 2d89340) failed
+
+[1A[K[35mWARNING: [0merrors encountered while analyzing target '//rf:x', it will not be built.
+
+[1A[K[35mWARNING: [0merrors encountered while analyzing target '//rf:dep', it will not be built.
+Analysis failed
+
+[1A[K[32mINFO: [0mFound 0 targets...
+
+[1A[K[31m[1mERROR: [0mcommand succeeded, but not all targets were analyzed
+
+[1A[K[32mINFO: [0mElapsed time: 0.045s, Critical Path: 0.00s
+
+[1A[K[32mINFO: [0m1 process: 1 internal.
+
+[1A[K[31m[1mERROR: [0mBuild did NOT complete successfully
+[31m[1mFAILED:[0m 
+[1A[K[31m[1mFAILED:[0m 
+[1A[K[32mINFO: [0mBuild Event Protocol files produced successfully.
+[0m

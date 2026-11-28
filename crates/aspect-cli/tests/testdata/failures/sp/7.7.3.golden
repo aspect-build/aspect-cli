@@ -1,0 +1,26 @@
+exit 1
+── Failures (4) ──
+✗ //sp:api  Check · exit 2 · sp/BUILD.bazel:3:4
+  │ api broke
+  log ${OUTPUT_BASE}/execroot/_main/bazel-out/_tmp/actions/stderr-2
+
+✗ //sp:gen  Genrule · exit 3 · sp/BUILD.bazel:4:8
+  │ gen broke
+  log ${OUTPUT_BASE}/execroot/_main/bazel-out/_tmp/actions/stderr-4
+
+✗ //sp:after  Check · sp/BUILD.bazel:5:4
+  │ output 'sp/after.out' was not created
+
+✗ //sp:docs  Check · sp/BUILD.bazel:2:4
+  │ output 'sp/docs.out' was not created
+0 built, 4 failed · 0 tests passed, 0 failed · Bazel's raw log: ${FIXTURE}/7.7.3.console
+All of it: aspect history show t-replay
+--- Failures tab
+✗ //sp:api  Check · exit 2 · sp/BUILD.bazel:3:4
+  │ api broke
+✗ //sp:gen  Genrule · exit 3 · sp/BUILD.bazel:4:8
+  │ gen broke
+✗ //sp:after  Check · sp/BUILD.bazel:5:4
+  │ output 'sp/after.out' was not created
+✗ //sp:docs  Check · sp/BUILD.bazel:2:4
+  │ output 'sp/docs.out' was not created

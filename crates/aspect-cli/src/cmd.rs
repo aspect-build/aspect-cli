@@ -2498,7 +2498,7 @@ fn claimed_by_task(task: &dyn TaskLike<'_>) -> HashSet<String> {
 /// that shows its task options. Empty when neither applies.
 fn help_footer(task: &dyn TaskLike<'_>) -> String {
     const FEATURES: &str = "Features add CI reporting and artifact integrations \
-         (GitHub, Buildkite, GitLab, CircleCI, telemetry). Their flags are accepted here \
+         (GitHub, Buildkite, GitLab, CircleCI, telemetry) and the dashboard. Their flags are accepted here \
          but hidden; run `aspect feature` to list them.";
     passthrough_notes(task)
         .into_iter()

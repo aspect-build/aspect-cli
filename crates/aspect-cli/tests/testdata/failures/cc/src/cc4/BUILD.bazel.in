@@ -1,0 +1,7 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
+# a.h fails parse_headers, a.cc includes it (same stem), b.cc fails on its own.
+cc_library(name = "ph", hdrs = ["a.h"], srcs = ["a.cc", "b.cc"], features = ["parse_headers"])
+# Two targets compiling one source.
+cc_library(name = "s1", srcs = ["shared.cc"])
+cc_library(name = "s2", srcs = ["shared.cc"])
+cc_library(name = "subz", srcs = ["sub/z.cc"])

@@ -1,0 +1,48 @@
+[32mComputing main repo mapping:[0m 
+[1A[K[32mLoading:[0m 
+[1A[K[32mLoading:[0m 0 packages loaded
+[1A[K[32mAnalyzing:[0m 6 targets (0 packages loaded, 0 targets configured)
+[1A[K[31m[1mERROR: [0m${WORKSPACE}/other/BUILD.bazel: no such target '//other:file.txt': target 'file.txt' not declared in package 'other' defined by ${WORKSPACE}/other/BUILD.bazel (did you mean here.txt?)
+[32mAnalyzing:[0m 6 targets (0 packages loaded, 0 targets configured)
+
+[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/ms2/BUILD.bazel:3:8: no such target '//other:file.txt': target 'file.txt' not declared in package 'other' defined by ${WORKSPACE}/other/BUILD.bazel (did you mean here.txt?) and referenced by '//ms2:c'
+[32mAnalyzing:[0m 6 targets (0 packages loaded, 0 targets configured)
+
+[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/ms2/BUILD.bazel:4:8: Executing genrule //ms2:d failed: missing input file '//ms2:mine_missing.txt'
+[32mAnalyzing:[0m 6 targets (0 packages loaded, 0 targets configured)
+[32m[0 / 4][0m [Prepa] BazelWorkspaceStatusAction stable-status.txt
+[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/ms2/BUILD.bazel:2:8: Executing genrule //ms2:b failed: missing input file '//ms2:shared_missing.txt'
+[32mAnalyzing:[0m 6 targets (0 packages loaded, 0 targets configured)
+[32m[0 / 5][0m [Prepa] BazelWorkspaceStatusAction stable-status.txt
+[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/ms2/BUILD.bazel:1:8: Executing genrule //ms2:a failed: missing input file '//ms2:shared_missing.txt'
+[32mAnalyzing:[0m 6 targets (0 packages loaded, 0 targets configured)
+[32m[0 / 5][0m [Prepa] BazelWorkspaceStatusAction stable-status.txt
+[1A[K[1A[K[32mINFO: [0mAnalyzed 6 targets (0 packages loaded, 0 targets configured).
+[32m[1 / 5][0m checking cached actions
+[1A[K[31m[1mERROR: [0m${WORKSPACE}/ms2/BUILD.bazel:4:8: Executing genrule //ms2:d failed: 1 input file(s) do not exist
+[32m[1 / 5][0m checking cached actions
+[1A[K[31m[1mERROR: [0m${WORKSPACE}/ms2/BUILD.bazel:2:8: Executing genrule //ms2:b failed: 1 input file(s) do not exist
+[32m[1 / 5][0m checking cached actions
+[1A[K[31m[1mERROR: [0m${WORKSPACE}/ms2/BUILD.bazel:1:8: Executing genrule //ms2:a failed: 1 input file(s) do not exist
+[32m[3 / 5][0m checking cached actions
+[1A[K[31m[1mERROR: [0m${WORKSPACE}/ms2/BUILD.bazel:5:8: Executing genrule //ms2:e failed: (Exit 3): bash failed: error executing Genrule command (from target //ms2:e) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo '\''e broke'\'' >&2; exit 3'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+e broke
+[32m[5 / 6][0m Executing genrule //ms2:e; 0s darwin-sandbox
+[1A[K[35mWARNING: [0merrors encountered while analyzing target '//ms2:c', it will not be built.
+Analysis failed
+[32m[6 / 6][0m no actions running
+[1A[K[32mINFO: [0mFound 5 targets...
+[32m[6 / 6][0m no actions running
+[1A[KUse --verbose_failures to see the command lines of failed build steps.
+[32m[6 / 6][0m no actions running
+[1A[K[32mINFO: [0mElapsed time: 0.060s, Critical Path: 0.02s
+[32m[6 / 6][0m no actions running
+[1A[K[32mINFO: [0m2 processes: 2 internal.
+[32m[6 / 6][0m no actions running
+[1A[K[31m[1mERROR: [0mBuild did NOT complete successfully
+[31m[1mFAILED:[0m 
+[1A[K[31m[1mFAILED:[0m 
+[1A[K[32mINFO: [0mBuild Event Protocol files produced successfully.
+[0m

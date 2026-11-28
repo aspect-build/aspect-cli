@@ -1,0 +1,2 @@
+genrule(name = "on_le", srcs = ["//le:x"], outs = ["e.txt"], cmd = "true")
+genrule(name = "on_sub", srcs = ["//le/sub:nothere"], outs = ["f.txt"], cmd = "true")

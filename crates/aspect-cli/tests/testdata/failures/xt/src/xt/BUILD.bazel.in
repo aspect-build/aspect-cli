@@ -1,0 +1,8 @@
+load(":defs.bzl", "proc")
+proc(name = "a", cmd = "echo 'proc 1.0 starting' >&2; echo 'error: AAA broke in a.dat' >&2; exit 3")
+proc(name = "b", cmd = "echo 'proc 1.0 starting' >&2; echo 'error: BBB broke in b.dat' >&2; exit 4")
+load(":defs.bzl", "two")
+two(name = "c", cmds = [
+    "echo 'proc 1.0 starting' >&2; echo 'error: CCC0 broke in c0.dat' >&2; exit 3",
+    "echo 'proc 1.0 starting' >&2; echo 'error: CCC1 broke in c1.dat' >&2; exit 4",
+])

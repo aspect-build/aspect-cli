@@ -1,0 +1,13 @@
+exit 1
+── Failures (2) ──
+✗ //sl:s  W · exit 1 · sl/BUILD.bazel:2:3
+
+✗ //sl:s  W · exit 1 · sl/BUILD.bazel:2:3
+  │ loud one broke
+  log ${OUTPUT_BASE}/execroot/_main/bazel-out/_tmp/actions/stderr-2
+0 built, 1 failed · 0 tests passed, 0 failed · Bazel's raw log: ${FIXTURE}/7.7.3.console
+All of it: aspect history show t-replay
+--- Failures tab
+✗ //sl:s  W · exit 1 · sl/BUILD.bazel:2:3
+✗ //sl:s  W · exit 1 · sl/BUILD.bazel:2:3
+  │ loud one broke

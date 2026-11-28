@@ -1,0 +1,1 @@
+genrule(name = "on_lm", srcs = ["//lm:x"], outs = ["b.txt"], cmd = "true")

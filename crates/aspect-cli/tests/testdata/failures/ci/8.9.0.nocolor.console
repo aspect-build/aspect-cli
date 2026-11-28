@@ -1,0 +1,24 @@
+Computing main repo mapping: 
+Loading: 
+Loading: 0 packages loaded
+Analyzing: 2 targets (0 packages loaded, 0 targets configured)
+Analyzing: 2 targets (0 packages loaded, 0 targets configured)
+
+INFO: Analyzed 2 targets (0 packages loaded, 0 targets configured).
+ERROR: ${WORKSPACE}/ci/BUILD.bazel:2:8: Executing genrule //ci:plain failed: (Exit 2): bash failed: error executing Genrule command (from target //ci:plain) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo '\''plain broke'\'' >&2; exit 2'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+plain broke
+ERROR: ${WORKSPACE}/ci/BUILD.bazel:1:8: Executing genrule //ci:info failed: (Exit 1): bash failed: error executing Genrule command (from target //ci:info) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo '\''INFO: tool says hello'\'' >&2; echo '\''ERROR: tool says it broke'\'' >&2; echo '\''detail line'\'' >&2; exit 1'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+INFO: tool says hello
+ERROR: tool says it broke
+detail line
+INFO: Found 2 targets...
+Use --verbose_failures to see the command lines of failed build steps.
+INFO: Elapsed time: 0.057s, Critical Path: 0.02s
+INFO: 3 processes: 3 internal.
+ERROR: Build did NOT complete successfully
+FAILED: 
+INFO: Build Event Protocol files produced successfully.

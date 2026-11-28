@@ -1,0 +1,5 @@
+genrule(name = "nl1", outs = ["a"], cmd = "echo 'same out' >&2; printf '\\033[31m\\033[1mERROR: \\033[0mheld same' >&2; touch $@")
+genrule(name = "nl2", outs = ["b"], cmd = "echo 'same out' >&2; printf '\\033[31m\\033[1mERROR: \\033[0mheld same' >&2; touch $@")
+genrule(name = "nl3", outs = ["c"], cmd = "echo 'unique out' >&2; printf '\\033[31m\\033[1mERROR: \\033[0mheld unique' >&2; touch $@")
+genrule(name = "nlfail", outs = ["d"], cmd = "echo 'fail out' >&2; printf '\\033[31m\\033[1mERROR: \\033[0mheld in failure' >&2; exit 2")
+genrule(name = "slow", outs = ["e"], cmd = "sleep 2; touch $@")

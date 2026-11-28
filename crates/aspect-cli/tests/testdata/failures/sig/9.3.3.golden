@@ -1,0 +1,46 @@
+exit 1
+── Failures (8) ──
+✗ //sig:s11  Genrule · segmentation fault · sig/BUILD.bazel:1:9
+  │ dying by 11
+  log ${OUTPUT_BASE}/execroot/_main/bazel-out/_tmp/actions/stderr-3
+
+✗ //sig:s10  Genrule · user defined signal 1 · sig/BUILD.bazel:1:9
+  │ dying by 10
+  log ${OUTPUT_BASE}/execroot/_main/bazel-out/_tmp/actions/stderr-5
+
+✗ //sig:s31  Genrule · bad system call · sig/BUILD.bazel:1:9
+  │ dying by 31
+  log ${OUTPUT_BASE}/execroot/_main/bazel-out/_tmp/actions/stderr-8
+
+✗ //sig:s24  Genrule · cpu time limit exceeded · sig/BUILD.bazel:1:9
+  │ dying by 24
+  log ${OUTPUT_BASE}/execroot/_main/bazel-out/_tmp/actions/stderr-7
+
+✗ //sig:s5  Genrule · trace/breakpoint trap · sig/BUILD.bazel:1:9
+  │ dying by 5
+  log ${OUTPUT_BASE}/execroot/_main/bazel-out/_tmp/actions/stderr-2
+
+✗ //sig:s30  Genrule · power failure · sig/BUILD.bazel:1:9
+
+✗ //sig:s9  Genrule · killed · sig/BUILD.bazel:1:9
+
+✗ //sig:s6  Genrule · aborted · sig/BUILD.bazel:1:9
+0 built, 8 failed · 0 tests passed, 0 failed · Bazel's raw log: ${FIXTURE}/9.3.3.console
+All of it: aspect history show t-replay
+--- Failures tab
+✗ //sig:s11  Genrule · segmentation fault · sig/BUILD.bazel:1:9
+  │ dying by 11
+✗ //sig:s10  Genrule · user defined signal 1 · sig/BUILD.bazel:1:9
+  │ dying by 10
+✗ //sig:s31  Genrule · bad system call · sig/BUILD.bazel:1:9
+  │ dying by 31
+✗ //sig:s24  Genrule · cpu time limit exceeded · sig/BUILD.bazel:1:9
+  │ dying by 24
+✗ //sig:s5  Genrule · trace/breakpoint trap · sig/BUILD.bazel:1:9
+  │ dying by 5
+✗ //sig:s30  Genrule · power failure · sig/BUILD.bazel:1:9
+  │ dying by 30
+✗ //sig:s9  Genrule · killed · sig/BUILD.bazel:1:9
+  │ dying by 9
+✗ //sig:s6  Genrule · aborted · sig/BUILD.bazel:1:9
+  │ dying by 6

@@ -1,0 +1,9 @@
+exit 38
+── Other errors from Bazel ──
+ERROR: The Build Event Protocol upload timed out.
+         com.google.common.util.concurrent.TimeoutFuture$TimeoutFutureException: Timed out:
+         NonCancellationPropagatingFuture@54cfbda0[status=PENDING,…
+1 built, 0 failed · 0 tests passed, 0 failed · Bazel's raw log: ${FIXTURE}/8.9.0.console
+All of it: aspect history show t-replay
+--- Failures tab
+! The Build Event Protocol upload timed out. com.google.common.util.concurrent.…ttableFuture@5a085949[status=PENDING]]]]

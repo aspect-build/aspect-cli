@@ -1,0 +1,47 @@
+[32mComputing main repo mapping:[0m 
+[1A[K[32mLoading:[0m 
+[1A[K[32mLoading:[0m 0 packages loaded
+[1A[K[32mAnalyzing:[0m 4 targets (0 packages loaded, 0 targets configured)
+[1A[K[32mAnalyzing:[0m 4 targets (0 packages loaded, 0 targets configured)
+[32m[0 / 1][0m checking cached actions
+[1A[K[1A[K[32mINFO: [0mAnalyzed 4 targets (0 packages loaded, 0 targets configured).
+[32m[0 / 1][0m checking cached actions
+[1A[K[32mINFO: [0mFrom Doing some work:
+nolabel out
+[32m[1 / 5][0m 4 actions running
+    Work lp/deflt.out; 0s darwin-sandbox
+    Working on //lp:withlabel; 0s darwin-sandbox
+    Working on //lp:двое and //lp:nolabel; 0s darwin-sandbox
+    Doing some work; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0mheld nolabel
+[32mINFO: [0mFrom Working on //lp:двое and //lp:nolabel:
+two out
+[32m[1 / 5][0m 4 actions running
+    Work lp/deflt.out; 0s darwin-sandbox
+    Working on //lp:withlabel; 0s darwin-sandbox
+    Working on //lp:двое and //lp:nolabel; 0s darwin-sandbox
+    Doing some work; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0mheld twolabels
+[32mINFO: [0mFrom Working on //lp:withlabel:
+label out
+[32m[2 / 5][0m 2 actions running
+    Work lp/deflt.out; 0s darwin-sandbox
+    Working on //lp:withlabel; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[31m[1mERROR: [0mheld withlabel
+[32mINFO: [0mFrom Work lp/deflt.out:
+default out
+[32m[3 / 5][0m 2 actions running
+    Work lp/deflt.out; 0s darwin-sandbox
+    Working on //lp:withlabel; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[31m[1mERROR: [0mheld default
+[32mINFO: [0mFound 4 targets...
+[32m[5 / 5][0m no actions running
+[1A[K[32mINFO: [0mElapsed time: 0.155s, Critical Path: 0.04s
+[32m[5 / 5][0m no actions running
+[1A[K[32mINFO: [0m5 processes: 1 internal, 4 darwin-sandbox.
+[32m[5 / 5][0m no actions running
+[1A[K[32mINFO: [0mBuild completed successfully, 5 total actions
+[32mINFO:[0m 
+[1A[K[32mINFO:[0m 
+[1A[K[32mINFO: [0mBuild Event Protocol files produced successfully.
+[0m

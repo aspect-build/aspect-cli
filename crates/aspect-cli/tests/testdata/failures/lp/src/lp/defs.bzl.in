@@ -1,0 +1,6 @@
+def _impl(ctx):
+    o = ctx.actions.declare_file(ctx.label.name + ".out")
+    kw = {"progress_message": ctx.attr.msg} if ctx.attr.msg else {}
+    ctx.actions.run_shell(outputs = [o], command = ctx.attr.cmd + " && touch " + o.path, mnemonic = "Work", **kw)
+    return [DefaultInfo(files = depset([o]))]
+work = rule(implementation = _impl, attrs = {"cmd": attr.string(), "msg": attr.string()})

@@ -1460,7 +1460,9 @@ def _test_testlogs_dir(ctx):
     _eq("package target", testlogs_dir(root, "k8-fastbuild", "//a/b:t"), root + "/bazel-out/k8-fastbuild/testlogs/a/b/t")
     _eq("root package", testlogs_dir(root, "k8-fastbuild", "//:t"), root + "/bazel-out/k8-fastbuild/testlogs/t")
     _eq("canonical main repo", testlogs_dir(root, "k8-fastbuild", "@@//a:t"), root + "/bazel-out/k8-fastbuild/testlogs/a/t")
-    _eq("external repo", testlogs_dir(root, "k8-fastbuild", "@@rules_x+//a:t"), "")
+    _eq("external repo", testlogs_dir(root, "k8-fastbuild", "@@rules_x+//a:t"), root + "/bazel-out/k8-fastbuild/testlogs/external/rules_x+/a/t")
+    _eq("apparent external repo", testlogs_dir(root, "k8-fastbuild", "@x//:t"), root + "/bazel-out/k8-fastbuild/testlogs/external/x/t")
+    _eq("no target", testlogs_dir(root, "k8-fastbuild", "//a"), "")
     _eq("no exec root", testlogs_dir("", "k8-fastbuild", "//a:t"), "")
     _eq("no output dir", testlogs_dir(root, "", "//a:t"), "")
 

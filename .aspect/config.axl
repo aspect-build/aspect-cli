@@ -10,7 +10,10 @@ load("@aspect//delivery_state.axl", "DeliveryState", "delivery_api", "deliveryd"
 load("@aspect//feature/artifacts.axl", "ArtifactUpload")
 load("@aspect//feature/buildkite_annotations.axl", "BuildkiteAnnotations")
 load("@aspect//feature/circleci_test_results.axl", "CircleCITestResults")
+load("@aspect//feature/dashboard/actions_test.axl", "dashboard_actions_tests")
+load("@aspect//feature/dashboard_test.axl", "dashboard_tests")
 load("@aspect//feature/deployment.axl", "Deployment")
+load("@aspect//feature/failure_replay_test.axl", "failure_replay_tests")
 load("@aspect//feature/github_status_checks.axl", "GithubStatusChecks")
 load("@aspect//format.axl", "format")
 load("@aspect//gc_test.axl", "gc_tests")
@@ -46,6 +49,7 @@ load("@aspect//private/lib/duration_test.axl", "duration_tests")
 load("@aspect//private/lib/environment.axl", "info")
 load("@aspect//private/lib/errors_test.axl", "errors_tests")
 load("@aspect//private/lib/execlog_test.axl", "execlog_tests")
+load("@aspect//private/lib/failures_test.axl", "failures_tests")
 load("@aspect//private/lib/format_results_test.axl", "format_default_preset_snapshot_tests", "format_template_snapshot_tests")
 load("@aspect//private/lib/format_spawn_test.axl", "format_spawn_tests")
 load("@aspect//private/lib/gazelle_results_test.axl", "gazelle_default_preset_snapshot_tests", "gazelle_template_snapshot_tests")
@@ -67,6 +71,7 @@ load("@aspect//private/lib/lifecycle_test.axl", "lifecycle_tests")
 load("@aspect//private/lib/lint_comments_test.axl", "lint_comments_tests")
 load("@aspect//private/lib/lint_results_test.axl", "detect_lint_tool_tests", "lint_annotation_plan_tests", "lint_default_preset_snapshot_tests", "lint_template_snapshot_tests", "linter_rows_tests")
 load("@aspect//private/lib/log_snippet_test.axl", "log_snippet_tests")
+load("@aspect//private/lib/path_glob_test.axl", "path_glob_tests")
 load("@aspect//private/lib/path_utils_test.axl", "path_utils_tests")
 load("@aspect//private/lib/process_info_test.axl", "process_info_tests")
 load("@aspect//private/lib/random_test.axl", "random_tests")
@@ -77,6 +82,7 @@ load("@aspect//private/lib/redis_test.axl", "redis_tests")
 load("@aspect//private/lib/remote_executor_test.axl", "remote_executor_tests")
 load("@aspect//private/lib/repro_commands_test.axl", "repro_commands_tests")
 load("@aspect//private/lib/resp_test.axl", "resp_tests")
+load("@aspect//private/lib/results_pages_test.axl", "results_pages_tests")
 load("@aspect//private/lib/runnable_test.axl", "runnable_tests")
 load("@aspect//private/lib/runner_job_history_test.axl", "runner_job_history_tests")
 load("@aspect//private/lib/sandbox_recovery_test.axl", "sandbox_recovery_tests")
@@ -571,6 +577,7 @@ def config(ctx: ConfigContext):
 
     # Path utilities: normalization, cwd rebasing, and traversal.
     # Run with: aspect dev test-path-utils
+    ctx.tasks.add(path_glob_tests)
     ctx.tasks.add(path_utils_tests)
 
     # Shared text helpers (padding, pluralize, number formatting).
@@ -626,6 +633,26 @@ def config(ctx: ConfigContext):
     # .aspect/plugins: the console plugins' parsing.
     # Run with: aspect dev test-console-plugins
     ctx.tasks.add(console_plugins_tests)
+
+    # Run with: aspect dev test-dashboard
+    ctx.tasks.add(dashboard_tests)
+
+    # The Dashboard's actions: the bar, the Actions rows and Metrics.
+    # Run with: aspect dev test-dashboard-actions
+    ctx.tasks.add(dashboard_actions_tests)
+
+    # Recorded Bazel failures through the failure summary and the Failures tab.
+    # Run with: aspect dev test-failure-replay
+    ctx.tasks.add(failure_replay_tests)
+
+    # failure_records.axl, failure_ties.axl and failures.axl: one synthetic
+    # case per rule.
+    # Run with: aspect dev test-failures
+    ctx.tasks.add(failures_tests)
+
+    # results_pages.axl: the results pages an invocation has.
+    # Run with: aspect dev test-results-pages
+    ctx.tasks.add(results_pages_tests)
 
     # aspect_endpoint_auth.axl: host parsing, suffix matching, credential gate.
     # Run with: aspect dev test-aspect-endpoint-auth

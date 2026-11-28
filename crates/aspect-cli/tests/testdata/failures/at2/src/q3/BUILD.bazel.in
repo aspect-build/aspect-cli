@@ -1,0 +1,3 @@
+genrule(name = "u1", srcs = ["//at2:ok"], outs = ["u1.txt"], cmd = "true")
+genrule(name = "u2", srcs = ["//at2:t2"], outs = ["u2.txt"], cmd = "true")
+genrule(name = "u3", srcs = ["//at2:ok2"], outs = ["u3.txt"], cmd = "true")

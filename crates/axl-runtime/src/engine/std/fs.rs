@@ -933,6 +933,52 @@ pub(crate) fn filesystem_methods(registry: &mut MethodsBuilder) {
         })
     }
 
+    /// Lines `first` (from 1) to `first + count - 1` of a text file, as
+    /// `(lines, more)`, `more` whether the file goes on past them, or None on
+    /// any I/O error. A window, for a screen showing where a file is
+    /// pointed at: only as far as its last line is read, and no further
+    /// than `max_bytes` in (a file whose window lies past that gives no
+    /// lines); each line is cut at 4096 characters.
+    fn try_read_lines<'v>(
+        #[allow(unused)] this: values::Value<'v>,
+        #[starlark(require = pos)] path: values::StringValue,
+        #[starlark(require = pos)] first: u32,
+        #[starlark(require = pos)] count: u32,
+        #[starlark(require = named, default = 16 * 1024 * 1024)] max_bytes: u32,
+    ) -> anyhow::Result<NoneOr<(Vec<String>, bool)>> {
+        Ok(
+            match read_lines(
+                std::path::Path::new(path.as_str()),
+                first.max(1),
+                count,
+                max_bytes as u64,
+            ) {
+                Ok(got) => NoneOr::Other(got),
+                Err(_) => NoneOr::None,
+            },
+        )
+    }
+
+    /// The last `max_bytes` bytes of a file as `(text, cut)`, or None on any
+    /// I/O error (a missing file among them). `cut` is how many bytes before
+    /// `text` were left out, 0 for a whole file; a cut text starts at a line's
+    /// start, or, when no whole line fits (one long last line), at a
+    /// character's: never mid-character. Only the tail is read, so a
+    /// failing test's multi-GB log costs `max_bytes`; the end of a log is
+    /// where its failure usually is. Non-UTF-8 bytes are replaced (lossy).
+    fn try_read_tail<'v>(
+        #[allow(unused)] this: values::Value<'v>,
+        #[starlark(require = pos)] path: values::StringValue,
+        #[starlark(require = pos)] max_bytes: i32,
+    ) -> anyhow::Result<NoneOr<(String, i64)>> {
+        Ok(
+            match read_tail(std::path::Path::new(path.as_str()), max_bytes.max(0) as u64) {
+                Ok((text, cut)) => NoneOr::Other((text, cut as i64)),
+                Err(_) => NoneOr::None,
+            },
+        )
+    }
+
     /// Reads at most `max_bytes` bytes from the start of a file into a string,
     /// or returns `""` on any I/O error (missing file, permission denied,
     /// transient failure). Like `try_read_to_string`, the silent fall-through
@@ -1069,8 +1115,65 @@ fn marshal_metadata<'v>(m: &fs::Metadata, heap: Heap<'v>) -> Metadata<'v> {
     }
 }
 
+/// [`try_read_lines`](filesystem_methods)'s window of `path`.
+fn read_lines(
+    path: &std::path::Path,
+    first: u32,
+    count: u32,
+    max_bytes: u64,
+) -> std::io::Result<(Vec<String>, bool)> {
+    use std::io::{BufRead, Read};
+    let mut reader = std::io::BufReader::new(std::fs::File::open(path)?.take(max_bytes));
+    let mut lines = Vec::new();
+    let mut buf = Vec::new();
+    let mut n = 0u32;
+    loop {
+        buf.clear();
+        if reader.read_until(b'\n', &mut buf)? == 0 {
+            return Ok((lines, false));
+        }
+        n += 1;
+        if n < first {
+            continue;
+        }
+        if n >= first + count {
+            return Ok((lines, true));
+        }
+        let text = String::from_utf8_lossy(&buf);
+        let text = text.trim_end_matches(['\n', '\r']);
+        lines.push(text.chars().take(4096).collect());
+    }
+}
+
 #[cfg(test)]
 mod tests {
+
+    /// A window of a file's lines, whether it goes on, and nothing past the
+    /// bytes it may read.
+    #[test]
+    fn a_window_of_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f.txt");
+        std::fs::write(
+            &path,
+            (1..=10).map(|i| format!("l{i}\n")).collect::<String>(),
+        )
+        .unwrap();
+        assert_eq!(
+            super::read_lines(&path, 3, 2, 1 << 20).unwrap(),
+            (vec!["l3".into(), "l4".into()], true)
+        );
+        assert_eq!(
+            super::read_lines(&path, 9, 5, 1 << 20).unwrap(),
+            (vec!["l9".into(), "l10".into()], false)
+        );
+        assert_eq!(
+            super::read_lines(&path, 9, 5, 8).unwrap().0,
+            Vec::<String>::new(),
+            "past max_bytes"
+        );
+        assert!(super::read_lines(&dir.path().join("gone"), 1, 1, 1 << 20).is_err());
+    }
 
     #[test]
     fn a_capped_prefix_keeps_the_text_after_a_bad_byte() {
@@ -1353,5 +1456,86 @@ Test = task(implementation = _impl)
                 }
             }
         }
+    }
+}
+
+/// The last `max` bytes of the file at `path`, from a line's start, and how
+/// many bytes before them were left out: `std.fs.try_read_tail`.
+fn read_tail(path: &std::path::Path, max: u64) -> std::io::Result<(String, u64)> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = fs::File::open(path)?;
+    let len = file.metadata()?.len();
+    let start = len.saturating_sub(max);
+    // One byte before the cut too, to see whether it falls at a line's start.
+    let from = start.saturating_sub(1);
+    file.seek(SeekFrom::Start(from))?;
+    let mut buf = Vec::with_capacity((len - from) as usize);
+    file.take(len - from).read_to_end(&mut buf)?;
+    let skip = if start == 0 || buf.is_empty() {
+        // Nothing cut, or the file shrank since its length was read.
+        0
+    } else if buf[0] == b'\n' {
+        // The cut is at a line's start: that line is whole.
+        1
+    } else {
+        // Mid-line: from the next line's start, or with none (one long line),
+        // from the next character's.
+        match buf.iter().position(|&b| b == b'\n') {
+            // A newline ending the tail starts nothing after it: the last
+            // line is longer than `max`, shown from a character's start.
+            Some(i) if i + 1 < buf.len() => i + 1,
+            _ => (1..buf.len())
+                .find(|&i| buf[i] & 0xc0 != 0x80)
+                .unwrap_or(buf.len()),
+        }
+    };
+    Ok((
+        String::from_utf8_lossy(&buf[skip..]).into_owned(),
+        from + skip as u64,
+    ))
+}
+
+#[cfg(test)]
+mod read_tail_tests {
+    use super::read_tail;
+
+    #[test]
+    fn a_tail_starts_at_a_line_and_says_what_it_left_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.log");
+        std::fs::write(&path, "first line\nsecond\nthird\n").unwrap();
+        assert_eq!(
+            read_tail(&path, 1000).unwrap(),
+            ("first line\nsecond\nthird\n".to_string(), 0)
+        );
+        // 10 bytes from the end lands inside "second": the text starts at
+        // "third", the 18 bytes before it left out.
+        assert_eq!(read_tail(&path, 10).unwrap(), ("third\n".to_string(), 18));
+        assert!(read_tail(&dir.path().join("gone"), 10).is_err());
+        // A cut exactly at a line's start keeps that line.
+        assert_eq!(read_tail(&path, 6).unwrap(), ("third\n".to_string(), 18));
+        assert_eq!(
+            read_tail(&path, 13).unwrap(),
+            ("second\nthird\n".to_string(), 11)
+        );
+        // One long line: from a character's start, never empty.
+        let long = dir.path().join("one-line.log");
+        std::fs::write(&long, "aé bcdef").unwrap();
+        assert_eq!(read_tail(&long, 5).unwrap(), ("bcdef".to_string(), 4));
+        assert_eq!(
+            read_tail(&long, 7).unwrap(),
+            (" bcdef".to_string(), 3),
+            "mid-character: from the next"
+        );
+        assert_eq!(read_tail(&long, 8).unwrap(), ("é bcdef".to_string(), 1));
+        // A last line longer than the tail, its newline the tail's last byte.
+        let ends = dir.path().join("long-last.log");
+        std::fs::write(&ends, "start\nabcdefghij\n").unwrap();
+        assert_eq!(read_tail(&ends, 5).unwrap(), ("ghij\n".to_string(), 12));
+        // Nothing asked for, and an empty file.
+        assert_eq!(read_tail(&path, 0).unwrap(), (String::new(), 24));
+        let empty = dir.path().join("empty.log");
+        std::fs::write(&empty, "").unwrap();
+        assert_eq!(read_tail(&empty, 10).unwrap(), (String::new(), 0));
     }
 }

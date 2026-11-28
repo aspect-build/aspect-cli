@@ -17,6 +17,10 @@
 # different shards; otherwise they can all land in one shard and decide CI's
 # wall time. A name here that no longer exists is skipped.
 #
+# The suites whose assertions on what is lit only mean something in colour
+# (`COLOUR_SUITES`) run a second time with CLICOLOR_FORCE=1, in the shard that
+# runs them, since CI's output is no terminal.
+#
 # Run: ./tools/run-axl-suites.sh [path-to-aspect] [SHARD/TOTAL]
 set -euo pipefail
 
@@ -73,3 +77,13 @@ while read -r suite; do
     echo "--- $ASPECT dev $suite"
     "$ASPECT" dev "$suite"
 done <"$SUITES"
+
+COLOUR_SUITES=(
+    test-dashboard
+    test-failure-replay
+)
+for suite in "${COLOUR_SUITES[@]}"; do
+    grep -Fxq -- "$suite" "$SUITES" || continue
+    echo "--- CLICOLOR_FORCE=1 $ASPECT dev $suite"
+    CLICOLOR_FORCE=1 "$ASPECT" dev "$suite"
+done

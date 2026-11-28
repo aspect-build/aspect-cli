@@ -829,6 +829,18 @@ pub fn sgr(params: &str) -> String {
 /// The SGR reset.
 pub const RESET: &str = "\x1b[0m";
 
+/// One of the CLI's own severity lines, `LABEL:rest`: `label` in `sgr` (a
+/// role's, as [`Palette::sgr`] gives it; empty leaves it plain), the colon
+/// and `rest` outside it. The one definition of how an `INFO:` line the CLI
+/// writes looks, wherever it is written.
+pub fn label_line(sgr: &str, label: &str, rest: &str) -> String {
+    if sgr.is_empty() {
+        format!("{label}:{rest}")
+    } else {
+        format!("{sgr}{label}{RESET}:{rest}")
+    }
+}
+
 /// A theme rendered at one depth, or at none (no SGR at all). Ungated: a
 /// caller still asks whether its stream takes colour.
 #[derive(Debug, Clone)]

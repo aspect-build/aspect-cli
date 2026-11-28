@@ -1,0 +1,655 @@
+"""`Dashboard`: build, test, lint, gazelle and format (`_KINDS`) on the
+terminal's alternate screen, in place of the console and Bazel's terminal UI.
+Off by default: `aspect build //... --dashboard`. What it shows and its keys
+are in the builtins' README.md (`Dashboard`).
+
+A pre-task hook takes the screen; an idle hook draws it until a build does.
+Each `BazelTrait.output_frame` (`frame`) reads the CLI's own lines and
+Bazel's console (`build.output_feed()`) in the order they arrived
+(`add_lines`, dashboard/log.axl) and the keys (`on_key`, dashboard/keys.axl)
+and draws one frame (`render`, dashboard/render.axl); `build_event` hooks
+gather the counts and failures (`collect_event`,
+private/lib/failure_records.axl, shared with the plain console);
+`output_end` folds the build to a row (`fold_build`). A post-task hook keeps
+the finished screen up (`--dashboard:stay`), gives the terminal back with
+the task's output dumped to the scrollback, then prints the failure summary
+(`report_lines`), never into the screen's Console tab.
+
+`KEYS` is the one table of key bindings: `on_key`, the keys row and the `?`
+overlay read it. The screen stays off a terminal, on CI, under a coding
+agent, with `TERM` dumb or unset, and under 40x12 (`refusal`).
+"""
+
+load("@aspect//bazel.axl", "BazelTrait", "ExecLogHook")
+load("@aspect//feature/dashboard/actions.axl", "dashboard_actions")
+load("@aspect//feature/dashboard/keys.axl", "dashboard_keys")
+load("@aspect//feature/dashboard/log.axl", "dashboard_log")
+load("@aspect//feature/dashboard/pointer.axl", "dashboard_pointer")
+load("@aspect//feature/dashboard/render.axl", "dashboard_render")
+load("@aspect//feature/dashboard/view.axl", "dashboard_view")
+load("@aspect//traits.axl", "Phases")
+load("@std//time.axl", "monotonic")
+load("../private/lib/agent.axl", "under_agent")
+load("../private/lib/aspect_flags.axl", "publish_all_actions_unless_sent_out")
+load("../private/lib/bazel_results.axl", "bb_clientd_root", "bes_get")
+load("../private/lib/failure_records.axl", "failure_records")
+load("../private/lib/failures.axl", "failures")
+load("../private/lib/results_pages.axl", "bes_results_url", "results_pages")
+load("../private/lib/term_text.axl", "term_text")
+load("../private/lib/tips.axl", "SURFACE_DASHBOARD", "collect_tips_sorted", "silence_tip", "unsilence_tip")
+
+_c = term_text.c
+_plain = term_text.plain
+_RESET = term_text.RESET
+_ANSI = term_text.ANSI
+_CONTROLS = term_text.CONTROLS
+_flaky = failure_records.flaky
+_build_outcome = failure_records.build_outcome
+_build_succeeded = failure_records.build_succeeded
+_collect_event = failure_records.collect_event
+_count_spawn = failure_records.count_spawn
+_note_log_file = failure_records.note_log_file
+_failure_counts = failures.failure_counts
+_action_split = dashboard_actions.action_split
+_actions_text = dashboard_actions.actions_text
+_built = dashboard_actions.built
+_note_progress = dashboard_actions.note_progress
+_note_spawn_time = dashboard_actions.note_spawn_time
+_MAX_LOG = dashboard_log.MAX_LOG
+_add_lines = dashboard_log.add_lines
+_new_search = dashboard_log.new_search
+_replay_lines = dashboard_log.replay_lines
+_report_lines = dashboard_log.report_lines
+_refresh_test_view = dashboard_view.refresh_test_view
+_mouse_key = dashboard_pointer.mouse_key
+_LEAVE_KEYS = dashboard_keys.LEAVE_KEYS
+_MAX_KEYS = dashboard_keys.MAX_KEYS
+_on_key = dashboard_keys.on_key
+_console_height = dashboard_render.console_height
+_render = dashboard_render.render
+
+# The tasks the screen is for, taken from their start; any other keeps the
+# console.
+_KINDS = ["build", "test", "lint", "gazelle", "format"]
+
+# How long a finished screen with nothing failed stays up (`stay =
+# "failure"`), counting down.
+_COUNTDOWN_MS = 10000
+
+def attempt_state(now_ms: int) -> dict:
+    """What a Bazel attempt starts with: its own counts, console, failures
+    and actions, nothing open, timed from `now_ms`."""
+    return dict(
+        failure_records.new_state(),
+        fresh = False,
+        phase = "Starting Bazel…",
+        selected = 0,
+        picked = 0,
+        cache = None,
+        unseen = 0,
+        focus = "console",
+        view = None,
+        log = [],
+        log_size = 0,
+        views = [],
+        parked = {},
+        seeded = 0,
+        seed_trimmed = 0,
+        tab_scroll = 0,
+        hover = None,
+        select = None,
+        kinds = [],
+        own = [],
+        closing = [],
+        closing_tail = [],
+        closing_cut = 0,
+        early = [],
+        dropped = 0,
+        unseen_errors = 0,
+        slowest = {},
+        critical = "",
+        spawn_slowest = [],
+        folded = [],
+        fold_src = [],
+        fold_head = [],
+        fold_open = {},
+        log_base = 0,
+        fold_n = -1,
+        fold_seen = 0,
+        scroll = 0,
+        start_ms = now_ms,
+        bazel_uuid = "",
+        exec_log_read = False,
+        done_total = None,
+        settled = 0,
+    )
+
+def _clear_build(state: dict) -> None:
+    """What a build keeps beside `attempt_state`'s, which the next build and a
+    retried attempt alike start without: the root causes it noted, and what
+    was worked out from them."""
+    state["root_causes"] = {}
+    for key in ("blocked_cache", "entries_cache", "own_cache", "ties_cache"):
+        state[key] = None
+
+# What a build has of its own, which the next build (or a retried attempt)
+# starts afresh; the console and what is open in it are the task's.
+_PER_BUILD = ["fails", "outputs", "selected", "picked", "cache", "last_attempts", "spread", "test_counts", "counts", "inv", "closing", "closing_tail", "closing_cut", "slowest", "spawn_slowest", "critical", "bazel_uuid", "exec_log_read", "done_total", "bep_done_total", "settled", "excerpts"]
+
+def new_build(state: dict, now_ms: int) -> None:
+    """Start the next build (or a retried attempt) in the task's screen: its
+    own counts, failures and invocation, timed from `now_ms`. The console is
+    the task's, so it, the search over it (its current match, where the bar
+    opened, whether it is anchored there) and what is open in it are kept.
+    The Failures list, if focused, goes back to the console, as its rows are
+    the old build's."""
+    fresh = attempt_state(now_ms)
+    for key in _PER_BUILD:
+        state[key] = fresh[key]
+    _clear_build(state)
+    state["progress"] = []
+    state["fresh"] = False
+    state["build_failed"] = False
+    state["build_start_ms"] = now_ms
+    state["picked_build"] = None
+    if state.get("focus") == "failures":
+        state["focus"] = "console"
+
+def end_build(state: dict, now_ms: int) -> None:
+    """A build's end, inside `wait()`: its execution log was read to its end
+    before then, so the build folded to a row (`fold_build`; the task goes
+    on, and its finished screen shows its builds) keeps that it was."""
+    state["exec_log_read"] = True
+    fold_build(state, now_ms)
+    state["building"] = False
+
+def fold_build(state: dict, now_ms: int) -> None:
+    """Keep the build that just ended as a folded row (`build_row`) and what
+    its tabs show, for `<`/`>` to pick it again."""
+    failed, blocked = _failure_counts(state)
+    started = state.get("inv", {}).get("build_started")
+    state.setdefault("builds", []).append(dict(
+        command = str(bes_get(started, "command", "") or "") or state.get("build_command", "") or "bazel",
+        actions = _actions_text(_action_split(dict(state, building = False))),
+        failed = failed,
+        blocked = blocked,
+        ok = failed == 0 and not state["counts"]["tests_failed"] and not state.get("build_failed") and _build_succeeded(state.get("inv") or {}),
+        outcome = _build_outcome(state.get("inv") or {}),
+        ms = max(0, now_ms - state.get("build_start_ms", now_ms)),
+        snapshot = dict({k: state.get(k) for k in _BUILD_KEYS}, building = False, blocked_cache = None, entries_cache = None, own_cache = None, ties_cache = None, excerpts = {}),
+    ))
+
+# What a folded build keeps for its tabs.
+_BUILD_KEYS = ["counts", "inv", "slowest", "spawn_slowest", "critical", "pages", "fails", "outputs", "test_counts", "last_attempts", "spread", "root_causes", "bes_base", "bazel_uuid", "exec_log_read", "done_total", "bep_done_total", "log_path", "collected_errors"]
+
+# How long the finished screen waits for a key while nothing on it moves.
+_IDLE_MS = 1000
+
+# How often the frames read the task's tips anew, and how long a finished
+# screen waits for a key while it counts down or just redrew.
+_TIPS_EVERY_FRAMES = 10
+_BUSY_MS = 100
+
+# The smallest terminal the screen draws in.
+_MIN_COLS = 40
+
+_MIN_ROWS = 12
+
+def refusal(std):
+    """Why the screen does not take this terminal, for a line on stderr, or
+    "" when it does; None when it is not one to ask (not a terminal, CI),
+    where Bazel's console is what is wanted. Under a coding agent the
+    screen would wait for keys nobody types, so it refuses even when
+    enabled."""
+    io = std.io
+    if not (io.stdout.is_tty and io.stderr.is_tty) or std.env.var("CI"):
+        return None
+    if under_agent(std):
+        return "dashboard off: a coding agent is running this; Bazel's console is shown instead"
+    term = std.env.var("TERM") or ""
+    if term in ("", "dumb"):
+        return "dashboard off: TERM is %s; Bazel's console is shown instead" % ("dumb" if term else "not set")
+    size = std.term.size()
+    if size == None:
+        return None
+    if size[0] < _MIN_COLS or size[1] < _MIN_ROWS:
+        return "dashboard off: the terminal is %dx%d, under %dx%d; Bazel's console is shown instead" % (size[0], size[1], _MIN_COLS, _MIN_ROWS)
+    return ""
+
+def new_state(**fields) -> dict:
+    """A Dashboard's whole state before its task starts: a first attempt's
+    (`attempt_state`), nothing taken or read yet, with `fields` set over
+    it (the task's arguments and runtime, or a test's)."""
+    state = attempt_state(0)
+    state.update(
+        screen = None,
+        task = "",
+        start_ms = 0,
+        now_ms = 0,
+        frames = 0,
+        progress = [],
+        filter = "all",
+        search = _new_search(),
+        re = None,
+        controls = None,
+        list = "failures",
+        help = False,
+        zoom = False,
+        mouse = False,
+        line_links = {},
+        frame = [],
+        pane = (-1, -1),
+        excerpt = None,
+        cols = 80,
+        osc = "",
+        note = "",
+        clock = None,
+        process = None,
+        countdown_ms = None,
+        all_actions = True,
+        ended = False,
+        pages = [],
+        bes_base = "",
+        update = {},
+    )
+    state.update(fields)
+    return state
+
+def _keys_and_draw(state: dict, screen):
+    """Every key waiting, then one frame: a burst of wheel or drag
+    reports costs one render, never a backlog."""
+    cols, rows = screen.size()
+    page = _console_height(state, cols, rows)
+    for _ in range(_MAX_KEYS):
+        key = screen.key()
+        if key == None:
+            break
+        _on_key(state, key, page)
+    _draw(state, screen, _render(state, cols, rows))
+
+def _draw(state: dict, screen, frame):
+    """Write `frame` unless it is the one on the screen; whether it was
+    written."""
+    if frame == state.get("drawn"):
+        return False
+    screen.write(frame)
+    state["drawn"] = frame
+    return True
+
+def _add_output(state: dict, screen):
+    _add_cli(state, screen.output())
+
+def _add_cli(state: dict, got: list):
+    """The CLI's own lines (`output()`'s `[line, links, coloured, seq]`),
+    marked as such, their links moved with them."""
+    _add_lines(state, [g[0] for g in got], [g[1] for g in got], [g[2] for g in got], cli = True)
+
+def _add_arrived(state: dict, cli: list, feed: dict) -> None:
+    """The CLI's own lines (`output()`) and Bazel's console's (`feed`, from
+    `output_feed()`) in the order they arrived, merged by the number each
+    was given as it ended (`seq`, `seqs`: one counter for both), as
+    `output.log` has them. A run of either's goes in at once."""
+    lines = feed["lines"]
+    seqs = feed.get("seqs") or []
+    pick = lambda key, a, b: feed[key][a:b] if feed.get(key) != None else None
+    i, j = 0, 0
+    for _ in range(len(cli) + len(lines)):
+        if i >= len(cli) and j >= len(lines):
+            break
+        if j >= len(lines) or (i < len(cli) and j < len(seqs) and cli[i][3] < seqs[j]):
+            k = i
+            for _ in range(len(cli)):
+                if k >= len(cli) or (j < len(seqs) and cli[k][3] > seqs[j]):
+                    break
+                k += 1
+            _add_cli(state, cli[i:k])
+            i = k
+        else:
+            k = j
+            for _ in range(len(lines)):
+                if k >= len(lines) or (i < len(cli) and k < len(seqs) and seqs[k] > cli[i][3]):
+                    break
+                k += 1
+            _add_lines(state, lines[j:k], pick("links", j, k), pick("colours", j, k), pick("kinds", j, k), pick("bazel", j, k))
+            j = k
+
+def _take(state: dict, task_ctx):
+    """Take the terminal for the task, from its start: what it writes
+    is captured into the console from here on."""
+    state["screen"] = task_ctx.std.term.take()
+    state["drawn"] = None
+
+    # What the task wrote before the screen (the banner, its header),
+    # first in the console; on the main screen already, so not
+    # replayed on leaving.
+    early = state["screen"].earlier()
+    state["seeded"] = state.get("seeded", 0) + len(early)
+    _add_cli(state, early)
+
+    # The mouse taken unless asked not to (`m` outlives a screen the
+    # runtime took back), and its wheel as arrows while it is the
+    # terminal's.
+    state["screen"].wheel_keys(True)
+    if state["mouse"]:
+        state["screen"].mouse(True)
+    state["re"] = task_ctx.std.re
+    state["cli_version"] = task_ctx.std.env.aspect_cli_version() or ""
+    state["read"] = task_ctx.std.fs.try_read_tail
+    state["ansi"] = task_ctx.std.re.compile(_ANSI)
+    state["controls"] = task_ctx.std.re.compile(_CONTROLS)
+    state["env"] = task_ctx.std.env
+    state["bb_root"] = bb_clientd_root(task_ctx.std.env)
+    state["process"] = task_ctx.std.process
+    state["io"] = task_ctx.std.io
+    state["fs"] = task_ctx.std.fs
+    state["syntax"] = task_ctx.std.syntax
+    state["cancellation"] = task_ctx.cancellation
+    state["task"] = task_ctx.task.kind
+    state["start_ms"] = int(monotonic() * 1000)
+    state["task_start_ms"] = state["start_ms"]
+    state["silencer"] = lambda id, on: silence_tip(task_ctx, id) if on else unsilence_tip(task_ctx, id)
+    state["tips_from"] = lambda: collect_tips_sorted(task_ctx, surface = SURFACE_DASHBOARD)
+
+def _pre(state: dict, task_ctx):
+    if task_ctx.task.kind not in _KINDS:
+        task_ctx.std.io.stderr.write("Dashboard: for %s; %s shows its console\n" % (", ".join(_KINDS), task_ctx.task.kind))
+        return
+    if task_ctx.std.term.taken:
+        return
+    _take(state, task_ctx)
+    _tick(state, state["screen"])
+
+def _tips(state: dict) -> None:
+    # The task's tips as they stand, for the Tips tab.
+    if state.get("tips_from") != None:
+        state["tips"] = state["tips_from"]()
+
+def _tick(state: dict, screen):
+    """One frame while no build draws them: the CLI's new lines, the keys
+    waiting, the screen redrawn if it changed. Never inside itself: a key
+    that waits (a click's opener) runs the idle hook."""
+    if state.get("ticking"):
+        return
+    state["ticking"] = True
+    _tips(state)
+    state["now_ms"] = int(monotonic() * 1000)
+    state["frames"] += 1
+    _add_output(state, screen)
+    _keys_and_draw(state, screen)
+    state["ticking"] = False
+
+def _idle(state: dict, task_ctx):
+    # Between builds, and before the first: a build's frames draw while
+    # it runs, and the finished screen draws itself.
+    screen = state["screen"]
+    if screen == None or not screen.held or state.get("building") or state["ended"]:
+        return
+    _tick(state, screen)
+
+def frame(state: dict, task_ctx, build):
+    """One `output_frame` of a build: its console's new lines and progress
+    (`build.output_feed()`) and the CLI's own lines, in the order they
+    arrived (`_add_arrived`); then the keys and the frame drawn. A build
+    whose console is shown (its own `output =`) is left alone."""
+    feed = build.output_feed()
+    if feed == None:
+        return
+
+    # The runtime gives a screen back on a hook's error.
+    if state["screen"] != None and not state["screen"].held:
+        state["screen"] = None
+    if state["screen"] == None:
+        return
+
+    # The next build, or a retried attempt of this one: its own counts
+    # and failures, in the task's console.
+    now = int(monotonic() * 1000)
+    if not state.get("building") or state["fresh"]:
+        new_build(state, now)
+        state["building"] = True
+    state["build"] = build
+    state["ended"] = False
+    state["pages"] = results_pages(state["bes_base"], state["bazel_uuid"], state["update"])
+    screen = state["screen"]
+    state["now_ms"] = now
+    state["frames"] += 1
+    _add_arrived(state, screen.output(), feed)
+    state["dropped"] = state.get("dropped", 0) + (feed.get("dropped", 0) or 0)
+
+    # A frame that caught Bazel between drawing its progress area and
+    # redrawing it keeps the last one, which the header shows too.
+    if feed["progress"]:
+        state["progress"] = feed["progress"]
+        state["phase"] = feed["progress"][0]
+        _note_progress(state, feed["progress"])
+    if state["frames"] % _TIPS_EVERY_FRAMES == 0:
+        _tips(state)
+    _keys_and_draw(state, screen)
+
+def _event(state: dict, task_ctx, event):
+    kind = event.kind
+    if kind == "build_started":
+        state["bazel_uuid"] = str(bes_get(event.payload, "uuid", "") or "")
+    elif kind == "options_parsed":
+        state["bes_base"] = bes_results_url(event) or state["bes_base"]
+    _collect_event(state, event)
+    _refresh_test_view(state, event)
+
+def _update(state: dict, task_ctx, update):
+    if update.data:
+        state["update"] = update.data
+
+def _attempt_end(state: dict, task_ctx, exit_code):
+    # The execution log is read to its end before an attempt ends.
+    state["bazel_exit"] = exit_code
+    state["fresh"] = True
+    state["exec_log_read"] = True
+
+def _end(state: dict, task_ctx, build):
+    # Bazel's raw console, and what of it the failure summary and the
+    # Failures list tie Bazel's lines from (`console_ties`).
+    state["log_path"] = build.output_log or ""
+    state["collected_errors"] = build.output_collected_errors()
+    screen = state["screen"]
+    if screen == None or not screen.held:
+        return
+    state["cancelling"] = state["cancelling"] or task_ctx.cancellation.root.cancelled
+    state["build_failed"] = bool(build.output_fatal)
+
+    end_build(state, int(monotonic() * 1000))
+    state["progress"] = []
+    cols, rows = screen.size()
+    _draw(state, screen, _render(state, cols, rows))
+
+def _stay(state: dict, task_ctx, screen, countdown_ms):
+    """Keep the finished screen up, scrollable, until a leave key, or until
+    the run is told to stop (a SIGTERM), which no key would end. With a
+    `countdown_ms`, it leaves by itself once that has gone by, unless a key
+    comes first, which only stops it. The screen is the state's meanwhile,
+    for the keys that use it (`m`)."""
+    state["screen"] = screen
+
+    # The end's tips, collected before the screen is given back, as the
+    # Tips feature prints them only after.
+    _tips(state)
+    _hold(state, task_ctx, screen, countdown_ms)
+    state["screen"] = None
+
+def _hold(state: dict, task_ctx, screen, countdown_ms):
+    # Keys typed while it finished were typed at a screen that read none,
+    # meaning to cancel: not to leave the finished one now.
+    for _ in range(1 << 20):
+        if screen.key() == None:
+            break
+    screen.interrupts(False)
+    deadline = int(monotonic() * 1000) + countdown_ms if countdown_ms else None
+
+    # A key a burst fetched past its last, for the next turn.
+    carried = None
+    for _ in range(1 << 30):
+        if task_ctx.cancellation.root.cancelled or not screen.held:
+            return
+        if deadline != None:
+            state["countdown_ms"] = max(0, deadline - int(monotonic() * 1000))
+            if state["countdown_ms"] == 0:
+                return
+        _add_output(state, screen)
+        cols, rows = screen.size()
+        changed = _draw(state, screen, _render(state, cols, rows))
+
+        # Idle, a key a second; a frame that moves, or the countdown, ten.
+        # Each wait is the screen held for its reader, which the task's
+        # duration leaves out.
+        key = carried if carried != None else screen.key(timeout_ms = _BUSY_MS if changed or deadline != None else _IDLE_MS, reading = True)
+        carried = None
+        if key == "ctrl-c":
+            return
+        if key != None and deadline != None and key.startswith("mouse-move:"):
+            # The pointer passing over the screen: lit, the countdown
+            # left running.
+            _mouse_key(state, key)
+        elif key != None and deadline != None:
+            # A leave key leaves now; any other stops the countdown and
+            # does nothing else.
+            if key in _LEAVE_KEYS:
+                return
+            deadline = None
+            state["countdown_ms"] = None
+        elif key != None:
+            # This key and every one waiting behind it, then one frame.
+            page = _console_height(state, cols, rows)
+            for _ in range(_MAX_KEYS):
+                if _on_key(state, key, page):
+                    return
+                key = screen.key()
+                if key == None or key == "ctrl-c":
+                    break
+            if key == "ctrl-c":
+                return
+            carried = key
+
+# For the tests: `_hold` with a fake screen.
+testonly_hold = _hold
+
+def _post(state: dict, task_ctx, outcome):
+    screen = state["screen"]
+    if screen == None:
+        return
+    state["screen"] = None
+    if screen.held:
+        # Not for a cancelled task (`q`, or Ctrl+C): the CLI is on its way
+        # out, and would force the exit before a key came.
+        if task_ctx.cancellation.root.cancelled:
+            state["cancelling"] = True
+        state["verdict"] = outcome.exit_code == 0
+
+        # A task that failed before any build has nothing to browse:
+        # gone at once, its error last in the scrollback.
+        early = not _built(state) and outcome.exit_code != 0
+        if state["stay"] != "never" and task_ctx.std.io.stdin.is_tty and not state["cancelling"] and not early:
+            state["ended"] = True
+            state["progress"] = []
+            state["phase"] = "Done"
+            c = state["counts"]
+
+            # A flaky test's failed attempt is no failure: it passed.
+            passed = outcome.exit_code == 0 and not [r for r in state["fails"] if not _flaky(state, r)] and not c["failures"] and not c["tests_failed"]
+            _stay(state, task_ctx, screen, _COUNTDOWN_MS if passed and state["stay"] == "failure" else 0)
+        _add_output(state, screen)
+
+        # The scrollback written as part of the release, so no line
+        # written meanwhile shows twice or ahead of it (`_report`).
+        rest = screen.release(replay_stderr = False, dump_lines = _MAX_LOG, older = _older(task_ctx))
+        _add_lines(state, [_plain(line) for line in rest], None, rest, cli = True)
+    _report(state, task_ctx)
+
+def _older(task_ctx):
+    """The dump's line for the lines it leaves out."""
+    return "… {n} older lines: aspect history show " + task_ctx.task.id
+
+def _report(state: dict, task_ctx):
+    """What the scrollback keeps once the screen is gone: the task's
+    output since the screen was taken, as `output.ansi` keeps it
+    (`ctx.std.term.dump_output`), else the console as the screen showed
+    it (`replay_lines`), then the failures, the counts and where the
+    rest is (`report_lines`)."""
+    err = task_ctx.std.io.stderr
+
+    # The task's output as a run without the screen leaves it, from
+    # output.ansi; the console as the screen showed it without one. Both
+    # are in output.log already: not copied again.
+    if not task_ctx.std.term.dump_output(max_lines = _MAX_LOG, older = _older(task_ctx)):
+        for line in _replay_lines(state, err.is_tty):
+            err.write(line + "\n", copy = False)
+    for line in _report_lines(state, task_ctx.task.id, err.is_tty, replayed = True, linked = task_ctx.std.io.linked, excerpt = task_ctx.std.excerpt, max_entries = task_ctx.traits[BazelTrait].failure_summary_max):
+        err.write(line + "\n")
+    gone = sorted(state.get("silenced_tips", {}).keys())
+    if gone:
+        err.write(_c("muted") + "Silenced on this machine: %s · undo: take it out of tips.silence in ~/.aspect/config.json" % ", ".join(gone) + _RESET + "\n")
+
+def _spawn(state: dict, task_ctx, entry):
+    # The entry's kind is its `type`: a `spawn` or a `file`, as asked.
+    what = bes_get(entry, "type")
+    if type(what) == "file":
+        _note_log_file(state["counts"], bes_get(entry, "id", 0), what)
+    else:
+        _count_spawn(state["counts"], what)
+    _note_spawn_time(state, bes_get(entry, "type"))
+
+def _dashboard_impl(ctx: FeatureContext):
+    why = refusal(ctx.std)
+    if why != "":
+        if why:
+            ctx.std.io.stderr.write(why + "\n")
+        return
+
+    state = new_state(
+        mouse = ctx.args.mouse,
+        excerpt = ctx.std.excerpt,
+        clock = lambda: int(monotonic() * 1000),
+        all_actions = ctx.args.actions == "all",
+        stay = ctx.args.stay,
+    )
+
+    t = ctx.traits[BazelTrait]
+    t.output_display = "none"
+    if ctx.args.actions == "all":
+        # Every action reported to this task alone, not to its BES sinks.
+        publish_all_actions_unless_sent_out(t, state)
+
+    # What the Failures tab and the summary tie Bazel's lines from, with the
+    # Console's stages off too.
+    t.output_stages.append(bazel.output.collect_errors())
+    t.output_frame.append(lambda task_ctx, build: frame(state, task_ctx, build))
+    t.output_end.append(lambda task_ctx, build: _end(state, task_ctx, build))
+    t.build_event.append(lambda task_ctx, event: _event(state, task_ctx, event))
+    t.exec_log_event.append(ExecLogHook(on_entry = lambda task_ctx, entry: _spawn(state, task_ctx, entry), kinds = ["spawn", "file"], file_paths = ["/testlogs/"]))
+    t.bazel_attempt_end.append(lambda task_ctx, exit_code: _attempt_end(state, task_ctx, exit_code))
+    ctx.traits[Phases].task_update.append(lambda task_ctx, update: _update(state, task_ctx, update))
+    ctx.hooks.pre_task(lambda task_ctx: _pre(state, task_ctx))
+    ctx.hooks.idle(lambda task_ctx: _idle(state, task_ctx))
+    ctx.hooks.post_task(lambda task_ctx, outcome: _post(state, task_ctx, outcome))
+
+Dashboard = feature(
+    display_name = "Dashboard",
+    summary = "Run build, test, lint, gazelle and format in a full-screen dashboard: the task's console, its builds' running actions and results, failures, metrics.",
+    implementation = _dashboard_impl,
+    enabled = False,
+    args = {
+        "stay": args.string(
+            default = "always",
+            values = ["always", "failure", "never"],
+            bare = "always",
+            description = "Whether the screen stays up once the task ends, until q, Enter, Esc or Ctrl+C: `always` (the default) stays whatever the outcome, to look at its tabs; `failure` stays when anything failed, and with nothing failed counts down 10 seconds and leaves, which q, Enter or Esc cut short and any other key stops; `never` leaves at once. Only when stdin is a terminal.",
+        ),
+        "mouse": args.boolean(
+            default = True,
+            description = "Have the screen take the mouse (the default): its wheel scrolls the console and never the terminal past the screen, a drag selects and copies, and a click opens a web link or a path in the editor --console:file-hyperlink-format names (any other link is copied). false leaves the mouse to the terminal, which then selects and opens links itself and sends the wheel as the arrow keys where it supports that. `m` switches between the two while the screen is up.",
+        ),
+        "actions": args.string(
+            default = "all",
+            values = ["failed", "all"],
+            description = "Which actions Bazel reports to the screen: `all` (the default) adds --build_event_publish_all_actions for this task alone (BES backends the CLI streams to and a --build_event_binary_file get the extra events only if your own flags or rc ask; a --build_event_json_file or --build_event_text_file, which Bazel writes itself, gets them), so the Actions rows tell what ran, was a disk or remote cache hit or was internal while the build runs, and `a` lists the actions that wrote output; `failed` reports only those that failed (while the build runs, the screen then says `? unreported` for what the execution log has not told apart, until the build's metrics come). A build with a --remote_cache or --remote_executor (unless --experimental_build_event_upload_strategy=local) or a --bes_backend of its own reports only failed actions either way: Bazel would send every action's event out itself, and with the cache down it stops the whole event stream at the first one.",
+        ),
+    },
+)

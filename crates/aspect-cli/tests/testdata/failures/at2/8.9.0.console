@@ -1,0 +1,72 @@
+[32mComputing main repo mapping:[0m 
+[1A[K[32mLoading:[0m 
+[1A[K[32mLoading:[0m 0 packages loaded
+[1A[K[31m[1mERROR: [0m${WORKSPACE}/at2/BUILD.bazel:1:8: //at2:t1: expected value of type 'list(output)' for attribute 'outs' of 'genrule', but got "a.txt" (string)
+[32mLoading:[0m 0 packages loaded
+[1A[K[31m[1mERROR: [0m${WORKSPACE}/at2/BUILD.bazel:1:8: //at2:t1: missing value for mandatory attribute 'outs' in 'genrule' rule
+[32mLoading:[0m 0 packages loaded
+[1A[K[31m[1mERROR: [0m${WORKSPACE}/at2/BUILD.bazel:2:8: //at2:t2: expected value of type 'string' for attribute 'cmd' of 'genrule', but got 5 (int)
+[32mLoading:[0m 0 packages loaded
+[1A[K[31m[1mERROR: [0mpackage contains errors: at2: //at2:t1: expected value of type 'list(output)' for attribute 'outs' of 'genrule', but got "a.txt" (string)
+[32mLoading:[0m 0 packages loaded
+[1A[K[32mAnalyzing:[0m 9 targets (0 packages loaded, 0 targets configured)
+[1A[K[31m[1mERROR: [0m${WORKSPACE}/q3/BUILD.bazel:1:8: Target '//at2:ok' contains an error and its package is in error and referenced by '//q3:u1'
+[32mAnalyzing:[0m 9 targets (0 packages loaded, 0 targets configured)
+
+[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/q3/BUILD.bazel:3:8: Target '//at2:ok2' contains an error and its package is in error and referenced by '//q3:u3'
+[32mAnalyzing:[0m 9 targets (0 packages loaded, 0 targets configured)
+
+[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/q2/BUILD.bazel:1:8: Target '//at2:ok' contains an error and its package is in error and referenced by '//q2:u'
+[32mAnalyzing:[0m 9 targets (0 packages loaded, 0 targets configured)
+
+[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/q3/BUILD.bazel:2:8: Target '//at2:t2' contains an error and its package is in error and referenced by '//q3:u2'
+[32mAnalyzing:[0m 9 targets (0 packages loaded, 0 targets configured)
+
+[1A[K[1A[K[32mINFO: [0mAnalyzed 9 targets (0 packages loaded, 0 targets configured).
+
+[1A[K[31m[1mERROR: [0m${WORKSPACE}/at/BUILD.bazel:1:8: //at:t: expected value of type 'list(output)' for attribute 'outs' of 'genrule', but got "notalist.txt" (string)
+
+[1A[K[31m[1mERROR: [0m${WORKSPACE}/at/BUILD.bazel:1:8: //at:t: missing value for mandatory attribute 'outs' in 'genrule' rule
+
+[1A[K[31m[1mERROR: [0m${WORKSPACE}/q/BUILD.bazel:1:8: Target '//at:ok' contains an error and its package is in error and referenced by '//q:on_at'
+
+[1A[K[35mWARNING: [0merrors encountered while analyzing target '//at2:ok', it will not be built.
+Analysis failed
+
+[1A[K[35mWARNING: [0merrors encountered while analyzing target '//q2:u', it will not be built.
+Analysis failed
+
+[1A[K[35mWARNING: [0merrors encountered while analyzing target '//at2:ok2', it will not be built.
+Analysis failed
+
+[1A[K[35mWARNING: [0merrors encountered while analyzing target '//q3:u1', it will not be built.
+Analysis failed
+
+[1A[K[35mWARNING: [0merrors encountered while analyzing target '//q3:u3', it will not be built.
+Analysis failed
+
+[1A[K[35mWARNING: [0merrors encountered while analyzing target '//q:on_at', it will not be built.
+Analysis failed
+
+[1A[K[35mWARNING: [0merrors encountered while analyzing target '//at2:t1', it will not be built.
+Analysis failed
+
+[1A[K[35mWARNING: [0merrors encountered while analyzing target '//at2:t2', it will not be built.
+Analysis failed
+
+[1A[K[35mWARNING: [0merrors encountered while analyzing target '//q3:u2', it will not be built.
+Analysis failed
+
+[1A[K[32mINFO: [0mFound 0 targets...
+
+[1A[K[31m[1mERROR: [0mcommand succeeded, but there were errors parsing the target pattern
+
+[1A[K[32mINFO: [0mElapsed time: 0.043s, Critical Path: 0.00s
+
+[1A[K[32mINFO: [0m1 process: 1 internal.
+
+[1A[K[31m[1mERROR: [0mBuild did NOT complete successfully
+[31m[1mFAILED:[0m 
+[1A[K[31m[1mFAILED:[0m 
+[1A[K[32mINFO: [0mBuild Event Protocol files produced successfully.
+[0m

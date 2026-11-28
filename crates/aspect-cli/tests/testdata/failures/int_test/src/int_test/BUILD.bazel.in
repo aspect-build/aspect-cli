@@ -1,0 +1,5 @@
+# A `test` interrupted while a test runs: `slow` makes the recorder's marker (unsandboxed, as a
+# sandbox's /tmp may be its own), and the recorder sends the client SIGINT.
+load(":defs.bzl", "script_test")
+script_test(name = "ok", body = "exit 0")
+script_test(name = "slow", body = "touch \"$FX_INTERRUPT_MARKER\"; sleep 120", tags = ["no-sandbox"])

@@ -1,0 +1,1 @@
+[genrule(name = "s%d" % n, outs = ["s%d.txt" % n], cmd = "echo 'dying by %d' >&2; kill -%d $$$$" % (n, n)) for n in [5, 6, 9, 10, 11, 24, 30, 31]]

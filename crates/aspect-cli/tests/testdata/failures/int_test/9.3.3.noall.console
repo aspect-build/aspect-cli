@@ -1,0 +1,32 @@
+[32mComputing main repo mapping:[0m 
+[1A[K[32mLoading:[0m 
+[1A[K[32mLoading:[0m 0 packages loaded
+[1A[K[32mAnalyzing:[0m 2 targets (0 packages loaded, 0 targets configured)
+[1A[K[32mAnalyzing:[0m 2 targets (0 packages loaded, 0 targets configured)
+
+[1A[K[1A[K[32mINFO: [0mAnalyzed 2 targets (0 packages loaded, 0 targets configured).
+[32m[4 / 6][0m //int_test:slow; 0s local
+[1A[K[32m[11 / 13][0m 2 actions running
+    Testing //int_test:slow; 0s local
+    Testing //int_test:ok; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[32m[12 / 13][0m 1 / 2 tests;[0m  1 action[0m; last test: [32m//int_test:ok[0m[0m
+    Testing //int_test:slow; 0s local
+
+Bazel caught interrupt signal; cancelling pending invocation.
+
+[1A[K[1A[K[31m[1mERROR: [0mbuild interrupted
+[32m[13 / 13][0m 1 / 2 tests;[0m no actions running[0m; last test: [32m//int_test:ok[0m
+[1A[K[32mINFO: [0mElapsed time: 1.338s, Critical Path: 1.28s
+[32m[13 / 13][0m 1 / 2 tests;[0m no actions running[0m; last test: [32m//int_test:ok[0m
+[1A[K[32mINFO: [0m13 processes: 12 internal, 2 darwin-sandbox.
+[32m[13 / 13][0m 1 / 2 tests;[0m no actions running[0m; last test: [32m//int_test:ok[0m
+[1A[K[31m[1mERROR: [0mBuild did NOT complete successfully
+[31m[1mFAILED:[0m 
+[1A[K[31m[1mFAILED:[0m 
+[1A[K[31m[1mFAILED:[0m 
+[1A[K[31m[1mFAILED:[0m 
+[1A[K[31m[1mFAILED:[0m 
+[1A[K[31m[1mFAILED:[0m 
+[1A[K[31m[1mFAILED:[0m 
+[1A[K[32mINFO: [0mBuild Event Protocol files produced successfully.
+[0m

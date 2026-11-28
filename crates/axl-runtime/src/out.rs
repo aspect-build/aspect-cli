@@ -24,7 +24,7 @@
 //! and `output.ansi` ([`keep_output`]).
 
 /// `println!` that ignores a failed write (notably a closed pipe), and copies
-/// the line to the task's output ([`copy_output`]).
+/// the line to the task's output ([`copy_only`]).
 #[macro_export]
 macro_rules! outln {
     () => {{
@@ -35,30 +35,33 @@ macro_rules! outln {
     }};
 }
 
+/// Write `bytes` to stdout (1) or stderr (2) as one unit, its target held
+/// against every other writer there (see [`axl_types::terminal`]), and copy
+/// them to the task's output ([`copy_only`]) under the same turn.
+pub fn write_std(fd: i32, bytes: &[u8]) -> std::io::Result<()> {
+    axl_types::terminal::write_std(fd, bytes, copy_only)
+}
+
 /// `print!` that ignores a failed write (notably a closed pipe), and copies
-/// the text to the task's output ([`copy_output`]).
+/// the text to the task's output ([`copy_only`]).
 #[macro_export]
 macro_rules! out {
     ($($arg:tt)*) => {{
-        use std::io::Write as _;
         let text = format!($($arg)*);
-        let _ = std::io::stdout().write_all(text.as_bytes());
-        $crate::out::copy_output(text.as_bytes());
+        let _ = $crate::out::write_std(1, text.as_bytes());
     }};
 }
 
 /// `eprintln!` that ignores a failed write (notably a closed pipe), and
-/// copies the line to the task's output ([`copy_output`]).
+/// copies the line to the task's output ([`copy_only`]).
 #[macro_export]
 macro_rules! errln {
     () => {{
         $crate::errln!("");
     }};
     ($($arg:tt)*) => {{
-        use std::io::Write as _;
         let text = format!("{}\n", format_args!($($arg)*));
-        let _ = std::io::stderr().write_all(text.as_bytes());
-        $crate::out::copy_output(text.as_bytes());
+        let _ = $crate::out::write_std(2, text.as_bytes());
     }};
 }
 
@@ -78,10 +81,10 @@ pub const OUTPUT_LOG: &str = "output.log";
 pub const OUTPUT_ANSI: &str = "output.ansi";
 
 /// Copy what AXL's `ctx.std.io.stdout` and `stderr` write as this process's
-/// own output is copied ([`copy_output`]): before a task's files open, to
+/// own output is copied ([`copy_only`]): before a task's files open, to
 /// what they get first. Called once at start-up.
 pub fn copy_axl_output() {
-    axl_types::stream::copy_output_to(copy_output);
+    axl_types::stream::copy_output_to(copy_only);
 }
 
 /// One of the task's output files.
@@ -416,17 +419,97 @@ pub fn begin_early() {
     }
 }
 
-/// Copy `bytes`, as written to stdout or stderr, to the task's output
-/// files, a line at a time (an unended one held back, up to
+/// Copy `bytes`, as written to stdout or stderr (or kept without writing,
+/// a terminal-only tip while a screen holds the terminal), to the task's
+/// output files, a line at a time (an unended one held back, up to
 /// [`MAX_PENDING`], until it ends or [`flush_output`]); before
-/// [`keep_output`], to what it writes first.
-pub fn copy_output(bytes: &[u8]) {
+/// [`keep_output`], to what it writes first. Exactly once: the CLI's own
+/// writes by their writer, routed past a screen's capture
+/// ([`axl_types::terminal`]); what the capture reads (stray writers, a
+/// child given the CLI's stdout) by the capture.
+pub fn copy_only(bytes: &[u8]) {
     if let Ok(mut copies) = OUTPUT.lock() {
         copies.copy(bytes, false);
     }
 }
 
-/// [`copy_output`] for Bazel's console as the console forwards it, whole
+/// While a screen of its own holds the terminal its capture reads what
+/// reaches fds 1 and 2 (stray writers, a child given the CLI's stdout) and
+/// copies it ([`copy_only`]); the CLI's own writes are routed past it then,
+/// copied by their writers. A forwarder that wrote into the capture leaves
+/// its bytes to it. Off before the descriptors are put back and on only
+/// once both are captured.
+static CAPTURE_COPIES: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether a screen's capture copies stdout and stderr ([`CAPTURE_COPIES`]).
+pub fn set_capture_copies(on: bool) {
+    CAPTURE_COPIES.store(on, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Whether a screen's capture copies stdout and stderr now: a writer to fd
+/// 1 or 2 that copies its own bytes leaves them to it then.
+pub fn capture_copies() -> bool {
+    CAPTURE_COPIES.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// How many bytes `output.ansi` holds now: where a dump of what follows
+/// starts ([`output_ansi_since`]). None without the task's files.
+pub fn output_ansi_mark() -> Option<u64> {
+    let copies = OUTPUT.lock().ok()?;
+    copies.log.as_ref().map(|log| log.ansi.written)
+}
+
+/// `output.ansi` from `mark` on, its unended lines (the task's, then the
+/// console's, each on a line of its own) at its end, and the file's path;
+/// None without the task's files or when it cannot be read.
+pub fn output_ansi_since(mark: u64) -> Option<(Vec<u8>, std::path::PathBuf)> {
+    let copies = OUTPUT.lock().ok()?;
+    let log = copies.log.as_ref()?;
+    Some((log.ansi_since(mark)?, log.ansi.path.clone()))
+}
+
+impl OutputLog {
+    /// [`output_ansi_since`]'s bytes, for this log.
+    fn ansi_since(&self, mark: u64) -> Option<Vec<u8>> {
+        use std::io::{Read as _, Seek as _};
+        let log = self;
+        let mut file = std::fs::File::open(&log.ansi.path).ok()?;
+        let end = log.ansi.written;
+        file.seek(std::io::SeekFrom::Start(mark.min(end))).ok()?;
+        let mut text = vec![];
+        file.take(end.saturating_sub(mark))
+            .read_to_end(&mut text)
+            .ok()?;
+        let mut emitted = log.emitted;
+        let mut tails = 0;
+        for stream in [&log.task, &log.console] {
+            let mut stream = stream.clone();
+            let (_, ansi) = render(
+                &stream.pending,
+                &mut stream.style,
+                &mut emitted,
+                &log.secrets,
+            );
+            // The task's and the console's unended lines are two lines.
+            if !ansi.is_empty() {
+                if tails > 0 {
+                    text.push(b'\n');
+                }
+                tails += 1;
+                text.extend_from_slice(&ansi);
+            }
+        }
+        Some(text)
+    }
+}
+
+/// Where `output.ansi` is, for a line naming it when it cannot be dumped.
+pub fn output_ansi_path() -> Option<std::path::PathBuf> {
+    let copies = OUTPUT.lock().ok()?;
+    copies.log.as_ref().map(|log| log.ansi.path.clone())
+}
+
+/// [`copy_only`] for Bazel's console as the console forwards it, whole
 /// lines: kept apart from the task's own unended line, and where the first
 /// of it begins is kept, for [`output_before_console`].
 pub fn copy_console_output(bytes: &[u8]) {
@@ -1115,14 +1198,14 @@ fn redactions(text: &str, secrets: &[String]) -> Vec<std::ops::Range<usize>> {
 pub struct TolerantPrintHandler;
 
 /// Whether this process's stderr is a person's terminal that shows links:
-/// a TTY with a `TERM` other than `dumb` (which writes an escape as text),
+/// a TTY (as it was before a feature's full screen captured it) with a
+/// `TERM` other than `dumb` (which writes an escape as text),
 /// not a CI job's (a file's link names the runner's disk, and a log
 /// viewer may show the escape), and no coding agent reading it (its
 /// environment set, as the Console feature's `auto` profile checks), which
 /// gets each path once, plain.
 pub(crate) fn terminal_links() -> bool {
-    use std::io::IsTerminal as _;
-    std::io::stderr().is_terminal()
+    crate::engine::stderr_is_terminal()
         && std::env::var_os("TERM").is_some_and(|t| !t.is_empty() && t != "dumb")
         && !crate::ci::on_recognized_ci()
         && !crate::agent::detected(|v| std::env::var_os(v))
@@ -1260,7 +1343,9 @@ fn repository_may_choose(value: &str, format: &bazel::console::links::LinkFormat
     use bazel::console::links::LinkFormat;
     match format {
         LinkFormat::None => true,
-        LinkFormat::Template(_) => LinkFormat::ALIASES.iter().any(|(name, _)| *name == value),
+        LinkFormat::Template(_) => LinkFormat::ALIASES
+            .iter()
+            .any(|(name, _, _)| *name == value),
     }
 }
 
@@ -1303,16 +1388,52 @@ static PRINT_LINKER: std::sync::LazyLock<Option<std::sync::Mutex<bazel::console:
         }
         let base = std::env::current_dir().ok()?;
         Some(std::sync::Mutex::new(
-            bazel::console::links::Linker::new(vec![base])
-                .with_files(bazel::console::links::FileLinks::none().written(links_as_text())),
+            bazel::console::links::Linker::new(vec![base]).with_files(
+                bazel::console::links::FileLinks::none()
+                    .written(links_as_text())
+                    .counted(PRINT_WRITTEN.clone()),
+            ),
         ))
     });
+
+/// The URLs [`PRINT_LINKER`] has written out beside its links (the macOS
+/// Terminal's), for a count of what one pass of it wrote ([`links_written`]).
+static PRINT_WRITTEN: std::sync::LazyLock<bazel::console::links::WrittenCount> =
+    std::sync::LazyLock::new(Default::default);
+
+/// How many URLs the CLI's own linker has written out beside its links so
+/// far: before and after a pass, what that pass wrote.
+pub(crate) fn links_written() -> u64 {
+    PRINT_WRITTEN.get()
+}
 
 /// How the CLI's own lines style their links: the process's theme as it is
 /// now, which a run's configs and the terminal's background may have changed.
 fn print_link_style() -> Option<bazel::console::links::LinkStyle> {
     crate::color::console_supports_color()
         .then(|| bazel::console::links::LinkStyle::of(&crate::theme::of_process()))
+}
+
+/// `line` with its URLs and paths linked as AXL `print()`'s are, but as
+/// OSC 8 links only, no URL written out beside one: for a screen, which
+/// opens a link itself. As it is off a person's terminal.
+pub(crate) fn linked_for_screen(line: &str) -> String {
+    static LINKER: std::sync::LazyLock<Option<std::sync::Mutex<bazel::console::links::Linker>>> =
+        std::sync::LazyLock::new(|| {
+            let base = std::env::current_dir().ok()?;
+            Some(std::sync::Mutex::new(
+                bazel::console::links::Linker::new(vec![base])
+                    .with_files(bazel::console::links::FileLinks::none().written(false)),
+            ))
+        });
+    match LINKER.as_ref().and_then(|l| l.lock().ok()) {
+        Some(mut linker) if terminal_links() => {
+            linker.set_format(link_format());
+            String::from_utf8(linker.link_written(line.as_bytes()))
+                .unwrap_or_else(|_| line.to_string())
+        }
+        _ => line.to_string(),
+    }
 }
 
 /// `line` with its URLs and paths linked as AXL `print()`'s are, for a line
@@ -1335,13 +1456,14 @@ impl starlark::PrintHandler for TolerantPrintHandler {
     fn println(&self, text: &str) -> starlark::Result<()> {
         match PRINT_LINKER.as_ref().and_then(|l| l.lock().ok()) {
             Some(mut linker) => {
-                use std::io::Write as _;
                 linker.set_format(link_format());
                 linker.set_style(print_link_style());
                 let mut line = linker.link_written(text.as_bytes());
+                // Written with the linker let go: a dump holds the target
+                // and links its lines through it.
+                drop(linker);
                 line.push(b'\n');
-                let _ = std::io::stderr().write_all(&line);
-                copy_output(&line);
+                let _ = write_std(2, &line);
             }
             None => {
                 let text = bazel::console::links::strip_unlinked(text.as_bytes());
@@ -1408,6 +1530,77 @@ pub fn panicking_print_macros(sources: &include_dir::Dir<'_>) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use bazel::console::links::LinkFormat;
+
+    /// `parts` written to a task's files one after the other: what
+    /// `output.log` and a dump from the start have. Guards whole-line
+    /// rendering: a line written in parts reads as the same bytes written
+    /// at once (a mark changes nothing in the files, which the pty tests
+    /// with a screen check end to end).
+    fn written_in_parts(parts: &[(&[u8], bool)], secrets: &[&str]) -> (String, Vec<u8>) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut log =
+            super::OutputLog::open(dir.path(), secrets.iter().map(|s| s.to_string()).collect())
+                .unwrap();
+        for (part, console) in parts {
+            if *console {
+                log.push_console(part);
+            } else {
+                log.push(part);
+            }
+        }
+        let dump = log.ansi_since(0).unwrap();
+        log.flush();
+        let text = std::fs::read_to_string(dir.path().join(super::OUTPUT_LOG)).unwrap();
+        (text, dump)
+    }
+
+    #[test]
+    fn a_secret_cut_by_a_mark_is_redacted_in_the_files() {
+        let (text, _) = written_in_parts(
+            &[(b"token=SECR", false), (b"ET123\n", false)],
+            &["SECRET123"],
+        );
+        assert!(!text.contains("SECRET123"), "redacted: {text:?}");
+        let (whole, _) = written_in_parts(&[(b"token=SECRET123\n", false)], &["SECRET123"]);
+        assert_eq!(text, whole);
+    }
+
+    #[test]
+    fn an_overwrite_across_a_mark_is_one_line() {
+        let (text, _) = written_in_parts(&[(b"10%", false), (b"\r20%\n", false)], &[]);
+        let (whole, _) = written_in_parts(&[(b"10%\r20%\n", false)], &[]);
+        assert_eq!(text, whole);
+        assert!(!text.contains("10%20%"), "{text:?}");
+        let (erased, _) = written_in_parts(
+            &[(b"Downloading 1/3", false), (b"\x1b[2K\rDone\n", false)],
+            &[],
+        );
+        assert!(!erased.contains("Downloading 1/3Done"), "{erased:?}");
+    }
+
+    #[test]
+    fn a_character_split_by_a_mark_is_whole() {
+        let (text, _) = written_in_parts(&[(b"caf\xc3", false), (b"\xa9\n", false)], &[]);
+        assert!(text.contains("café"), "{text:?}");
+    }
+
+    #[test]
+    fn the_task_and_console_unended_lines_are_two_lines() {
+        let (_, dump) = written_in_parts(
+            &[
+                (b"Continue? ", false),
+                (b"INFO: x\n", true),
+                (b"PARTIAL", true),
+            ],
+            &[],
+        );
+        let dump = String::from_utf8_lossy(&dump);
+        assert!(
+            !dump.contains("Continue? INFO"),
+            "the console's line apart: {dump:?}"
+        );
+        assert!(dump.ends_with("Continue? \nPARTIAL"), "{dump:?}");
+    }
 
     #[test]
     fn the_user_editor_is_a_format_auto_or_unset() {

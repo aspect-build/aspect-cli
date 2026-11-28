@@ -304,7 +304,8 @@ The session can then run `aspect worktree release` itself. Without the `SessionS
 | `GitlabLintComments`     | [feature/gitlab_lint_comments.axl](feature/gitlab_lint_comments.axl)       | `enabled = True` (default); fires on `aspect lint` task updates when a GitLab MR context is detected (`CI_MERGE_REQUEST_IID` on GitLab CI, or the `ASPECT_GITLAB_*` overrides on Aspect Workflows runners on other hosts) | Posts `aspect lint` findings as inline GitLab MR diff discussions, with one-click suggestion blocks where a fix patch is available — the GitLab counterpart to `GithubLintComments`. Auth via the Aspect GitLab App token (`api` scope), same flow as `GitlabStatusComments`. |
 | `BuildkiteAnnotations`   | [feature/buildkite_annotations.axl](feature/buildkite_annotations.axl)     | `enabled = True` (default); requires `BUILDKITE` env    | Posts `buildkite-agent annotate --scope=job` annotations with a leading task pill. |
 | `ArtifactUpload`         | [feature/artifacts.axl](feature/artifacts.axl)                             | `args.upload_*` flags per-task                          | Uploads testlogs / build-failure logs / profile / BEP / execlog to the host CI; registers each URL via `artifacts.append`. |
-| `History`                | [feature/history.axl](feature/history.axl)                                 | `args.action_logs` / `args.test_logs`                    | Keeps builds' action logs (hard-linked) and test logs (copied) in the task history, with an index beside each (`actions.json`, `testlogs.json`). |
+| `Dashboard`              | [feature/dashboard.axl](feature/dashboard.axl)                             | `--dashboard` (off by default); a terminal only, never CI or a coding agent | `build`, `test`, `lint`, `gazelle` and `format` in a live dashboard from their start: the task's console, each build's running actions and results (folded to a row once it ends), tabs for failures (logs, attempts, a peek at the source), metrics and the invocation; on exit the console and a summary go to the scrollback. Its colours come from the theme. |
+| `History`                | [feature/history.axl](feature/history.axl)                                 | `args.action_logs` / `args.test_logs`                    | Keeps builds' action logs and test logs (hard-linked), failed ones' by default, in the task history, with an index beside each (`actions.json`, `testlogs.json`). |
 | `WorktreePool`           | [feature/worktree_pool.axl](feature/worktree_pool.axl)                     | `args.max_slots` / `args.abandoned_grace_hours`          | Sizes the `aspect worktree` pool: the advisory slot limit, and how long a stopped session's slot is kept before another `add` takes it back. |
 | `BuildEvents`            | [feature/build_events.axl](feature/build_events.axl)                       | Always on; `args.max_retries` / `retry_min_delay` / `retry_max_buffer_bytes` / `timeout` / `max_event_bytes` | Retries, replay buffer and upload deadline for every BES backend the CLI streams to, and the size every event of a build streamed to one is held to (a failed action's command line is cut to fit). |
 | `Telemetry`              | [feature/telemetry.axl](feature/telemetry.axl)                             | `ctx.telemetry.exporters.add(...)` in config            | OTLP traces / logs / metrics export. |
@@ -314,6 +315,68 @@ The session can then run `aspect worktree release` itself. Without the `SessionS
 Every feature takes `--<name>:enabled[=true|false]` on every task (`ctx.features[X].enabled` in `config.axl` sets its default), and the bare `--<name>` is its short form: `aspect build //... --console=false` is `--console:enabled=false`, and `--notify` alone turns `Notify` on. Both override `config.axl`; giving both with different values is an error. A feature has no short form where the bare flag already belongs to something else: `Deployment`, whose `--deployment` picks the deployment; any feature on a task with an arg of the same name; and a feature named like a Bazel flag on the tasks that forward it to Bazel (a `Profile` feature leaves `aspect build --profile=p.json` to Bazel), or on every task for a Bazel startup option (`--quiet`). `aspect feature <name>` lists the short form beside `--<name>:enabled` and names the commands it is left to; `aspect describe 'feature <name>'` reports them as `shorthand_unavailable_on`.
 
 `GithubStatusChecks` and `BuildkiteAnnotations` delegate per-kind rendering through [`lib/check_dispatch.axl`](lib/check_dispatch.axl) so adding a new task kind is a single dispatch-table entry rather than an N×2 update. `GithubStatusComments` aggregates *across* tasks (one PR comment per run); `GithubLintComments` posts at the diagnostic-anchor level inside the PR's Files Changed view.
+
+### Dashboard
+
+`aspect build //... --dashboard` (also `test`, `lint`, `gazelle` and `format`)
+takes the terminal's alternate screen for the task, from its start. It stays
+off on CI, under a coding agent, with `TERM` dumb or unset, off a terminal,
+and under 40x12, saying why on stderr.
+
+What it shows:
+
+- **Header:** the task and how long it has run, then at its right end, while
+  a build runs, Bazel's own status (`16 actions, 15 running`), or, where the
+  bar isn't drawn (panes folded, or a short screen), how far the build is
+  (`3,830 of 8,563+ actions done`, `+` while Bazel analyses); between builds,
+  the task's phase; once the task has ended, only what its ✔/✗ can't say
+  (`interrupted`, `ended without a result`).
+- **Build panes**, while a build runs (`p` folds and opens them; each ended
+  build folds to a row; in Metrics or Invocation, `<`/`>` picks the build the
+  bar, Results and those tabs show):
+  - a bar of the build's actions, one glyph per kind, its label
+    `3,830 of 8,563+ actions` while it runs and
+    `8,590 actions · 3,148 cache hits (37%)` at its end, from Bazel's own
+    count;
+  - the actions running now, yellow past a minute and red past five, then
+    the slowest once the build has ended;
+  - Results: targets, tests (`7 passed (5 cached)`, running and pending),
+    the actions by kind (`ran N: █ ok · ╳ failed`, `cache hits N: ▒
+    local · ▓ disk · remote`, `○ up to date` or `○ skipped`, `░
+    internal`), adding up to Bazel's own count, the critical path and the
+    failures. The `○` actions are `up to date` where the build succeeded or
+    failed only its tests, `skipped` once anything else failed, since they
+    can then hold actions whose input failed. `?` explains every glyph.
+- **Tabs**, numbered: Console (the task's whole output, colours kept, each
+  successful action's output folded to a count), Failures (one row per
+  entry of the failure summary, its excerpt under it; Enter opens its log,
+  `]`/`[` steps the rows, `}`/`{` the attempts, shards and runs; `a` lists
+  the actions that wrote output), Metrics, Invocation (secrets redacted),
+  and Tips (`s` silences one in `~/.aspect/config.json`).
+
+Keys (`?` lists those that apply now): `↑`/`↓` or `k`/`j` scroll, the wheel
+three lines, `u`/`d` and Ctrl+`u`/`d` half a page, Page Up/Down, `b` and Space
+a page, Shift+`K`/Home the top and Shift+`J`/End back to following; Tab and
+Shift+Tab cycle the tabs; Esc goes back a step. Ctrl+F or `/` searches with a
+regular expression (smart case unless Ctrl+T, whole words with Ctrl+B; Tab
+filters to the matches; `n`/`N` step). `e` shows every line, errors and
+warnings, or errors only; `w` cuts long lines rather than wrap them; Ctrl+O
+unfolds every fold; `z` gives the console the whole screen. A click on a
+path peeks at the file, `o` opens it in your editor (`editor` in
+`~/.aspect/config.json`, or `--console:file-hyperlink-format`) and `O` picks
+another; a drag selects and copies; `m` gives the mouse back to the terminal
+(`--dashboard:mouse=false`). `q` or Ctrl+C cancels the build.
+
+When the task ends the screen stays up until `q`, Enter or Esc
+(`--dashboard:stay=always`, the default); `failure` counts down ten seconds
+when nothing failed, `never` leaves at once. The scrollback then gets the
+task's output, the flaky tests, the results pages and the failure summary
+(`── Failures (N) ──`, capped by `--console:recap-max`), which is never in the
+screen's Console tab. A prompt, or a child marked `interactive(True)`, gets
+the terminal back while it runs; an unmarked child reads `/dev/null`, so
+mark a spawn interactive if it may prompt. `--dashboard:actions=all` (the
+default) has Bazel report every action, so Results can tell them apart while
+the build runs; `failed` reports only the failures.
 
 ### GitLab lint comments
 

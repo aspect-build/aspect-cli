@@ -1,0 +1,1 @@
+genrule(name = "on_le2", srcs = ["//le2:x"], outs = ["d.txt"], cmd = "true")

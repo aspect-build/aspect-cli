@@ -1,0 +1,2128 @@
+//! A child a task spawns has its output passed on through the CLI, whole and
+//! in order: flushed as it comes, copied to the history's `output.log` a line
+//! at a time, so it never lands inside the CLI's own lines, and waited on
+//! until it is all passed on. With no terminal, a child marked interactive
+//! runs as any other: piped and copied, with no marker lines. A stdout
+//! nobody reads stalls neither stderr nor a screen taken meanwhile, and a
+//! screen's dump of the task's output is never spliced with a child's.
+
+mod common;
+
+use common::{aspect_cli, base_env};
+use std::process::{Command, Output, Stdio};
+
+const TASKS: &str = r#"
+load("@std//time.axl", "sleep")
+
+def _partial(ctx):
+    ctx.std.process.command("sh").args(["-c", "printf partial; sleep 0.3; printf ' rest\n'; printf tail"]).spawn().wait()
+    print("AFTER")
+    return 0
+
+def _interactive(ctx):
+    ctx.std.process.command("sh").args(["-c", "echo from-the-child"]).interactive(True).spawn().wait()
+    return 0
+
+def _takestall(ctx):
+    ctx.std.process.command("sh").args(["-c", "head -c 400000 /dev/zero | tr '\\0' x | fold -w 100"]).spawn()
+    ticks = ctx.std.process.command("sh").args(["-c", "for i in $(seq 1 40); do echo TICK$i >&2; sleep 0.1; done"]).spawn()
+    sleep(500)
+    ctx.std.io.stderr.write("TAKING\n")
+    screen = ctx.std.term.take()
+    screen.write("FRAME")
+    sleep(300)
+    screen.release()
+    ctx.std.io.stderr.write("RELEASED\n")
+    ticks.wait()
+    return 0
+
+def _dumpsplice(ctx):
+    screen = ctx.std.term.take()
+    for i in range(400):
+        print("DUMPLINE-%d-abcdefghijklmnopqrstuvwxyz0123456789" % i)
+    child = ctx.std.process.command("sh").args(["-c", "i=0; while [ $i -lt 20000 ]; do echo CHILDERR$i-abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz >&2; i=$((i+1)); done"]).spawn()
+    sleep(50)
+    screen.release()
+    ctx.std.term.dump_output(max_lines = 500, older = "OLDER {n}")
+    child.wait()
+    return 0
+
+partial = task(implementation = _partial, summary = "A child's partial lines.")
+dumpsplice = task(implementation = _dumpsplice, summary = "A dump while a child writes stderr.")
+
+def _tstpdump(ctx):
+    screen = ctx.std.term.take()
+    screen.write("FRAME")
+    for i in range(400):
+        print("DUMPLINE-%d-abcdefghijklmnopqrstuvwxyz0123456789" % i)
+    for i in range(60000):
+        print("CLILINE-%d-abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz" % i)
+    screen.release()
+    return 0
+
+tstpdump = task(implementation = _tstpdump, summary = "Ctrl+Z's dump while the task prints.")
+
+def _swapstall(ctx):
+    big = ctx.std.process.command("sh").args(["-c", "awk 'BEGIN{for(i=0;i<4000;i++) printf \"N%06d-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\\n\", i}'"]).spawn()
+    sleep(300)
+    screen = ctx.std.term.take()
+    screen.write("FRAME")
+    sleep(300)
+    screen.release()
+    ctx.std.io.stderr.write("RELEASED\n")
+    st = big.wait()
+    ctx.std.io.stderr.write("WAITED-%s\n" % st.code)
+    return 0
+
+swapstall = task(implementation = _swapstall, summary = "A screen taken and given back while stdout takes nothing.")
+
+def _inhtstp(ctx):
+    screen = ctx.std.term.take()
+    screen.write("FRAME")
+    child = ctx.std.process.command("sh").args(["-c", "i=0; while [ $i -lt 30 ]; do echo INH$i; i=$((i+1)); sleep 0.1; done"]).stdout("inherit").spawn()
+    sleep(4000)
+    screen.release()
+    child.wait()
+    return 0
+
+inhtstp = task(implementation = _inhtstp, summary = "A child given the CLI's stdout under a screen, across Ctrl+Z.")
+
+def _tstpstall(ctx):
+    screen = ctx.std.term.take()
+    screen.write("FRAME")
+    for i in range(20000):
+        ctx.std.io.stdout.write("OUTLINE-%d-abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz\n" % i)
+    screen.release()
+    return 0
+
+tstpstall = task(implementation = _tstpstall, summary = "Ctrl+Z while a release replays to a stdout nobody reads.")
+
+def _batches(ctx):
+    return ctx.std.process.command("sh").args(["-c", "i=0; while [ $i -lt 100 ]; do awk -v b=$i 'BEGIN{for(j=0;j<30;j++) printf \"N%06d-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\\n\", b*30+j}'; i=$((i+1)); sleep 0.05; done"]).stdout("inherit").spawn()
+
+def _retake(ctx):
+    a = ctx.std.term.take()
+    a.write("FRAME-A")
+    child = _batches(ctx)
+    sleep(300)
+    a.release()
+    sleep(1500)
+    b = ctx.std.term.take()
+    b.write("FRAME-B")
+    sleep(2500)
+    b.release()
+    ctx.std.io.stderr.write("WAITED-%s\n" % child.wait().code)
+    return 0
+
+retake = task(implementation = _retake, summary = "A child given the CLI's stdout across two screens.")
+
+def _fgslow(ctx):
+    a = ctx.std.term.take()
+    a.write("FRAME-A")
+    child = _batches(ctx)
+    sleep(7000)
+    a.release()
+    ctx.std.io.stderr.write("WAITED-%s\n" % child.wait().code)
+    return 0
+
+fgslow = task(implementation = _fgslow, summary = "A child given the CLI's stdout across Ctrl+Z.")
+
+def _gt_release(ctx):
+    screen = ctx.std.term.take()
+    print("DURING")
+    screen.write("FRAME")
+    sleep(200)
+    screen.release()
+    print("AFTER")
+    return 0
+
+def _gt_exit(ctx):
+    screen = ctx.std.term.take()
+    print("DURING")
+    screen.write("FRAME")
+    sleep(200)
+    return 0
+
+def _gt_hold(ctx):
+    screen = ctx.std.term.take()
+    print("DURING")
+    screen.write("FRAME")
+    sleep(1500)
+    print("RESUMED")
+    screen.write("FRAME2")
+    sleep(200)
+    screen.release()
+    return 0
+
+def _gt_fail(ctx):
+    screen = ctx.std.term.take()
+    print("DURING")
+    screen.write("FRAME")
+    sleep(200)
+    fail("boom")
+
+def _gt_signal(ctx):
+    screen = ctx.std.term.take()
+    print("DURING")
+    screen.write("FRAME")
+    sleep(20000)
+    return 0
+
+def _handoff(ctx):
+    screen = ctx.std.term.take()
+    screen.write("FRAME")
+    sleep(800)
+    ctx.std.process.command("sh").args(["-c", "stty -icanon min 0 time 10; printf 'READ['; dd bs=64 count=1 2>/dev/null | od -An -c | tr -d ' \\n'; echo ']END'"]).interactive(True).spawn().wait()
+    screen.release()
+    return 0
+
+handoff = task(implementation = _handoff, summary = "An interactive child after an answer the screen asked for came late.")
+
+def _isigkept(ctx):
+    screen = ctx.std.term.take()
+    screen.interrupts(False)
+    screen.write("FRAME")
+    ctx.std.process.command("true").interactive(True).spawn().wait()
+    screen.write("RESUMED")
+    for _ in range(300):
+        if screen.key(timeout_ms = 100) == "ctrl-c":
+            screen.release()
+            print("CTRL-C-WAS-A-KEY")
+            return 0
+    screen.release()
+    return 3
+
+isigkept = task(implementation = _isigkept, summary = "Interrupts off, then an interactive child: Ctrl+C is still a key.")
+
+def _heldpost(ctx, outcome):
+    screen = ctx.std.term.take()
+    screen.write("HELD")
+    screen.key(timeout_ms = 2500, reading = True)
+    screen.release()
+
+def _heldscreen(ctx):
+    ctx.hooks.post_task(_heldpost)
+    return 0
+
+heldscreen = task(implementation = _heldscreen, summary = "A post-task hook holding a screen up for its reader.")
+
+def _pollscreen(ctx):
+    screen = ctx.std.term.take()
+    for i in range(20):
+        screen.write("working %d" % i)
+        screen.key(timeout_ms = 100)
+    screen.release()
+    return 0
+
+pollscreen = task(implementation = _pollscreen, summary = "A screen that polls keys while it works.")
+
+def _exitgrand(ctx):
+    screen = ctx.std.term.take()
+    screen.write("FRAME")
+    for i in range(3000):
+        ctx.std.io.stdout.write("OUTLINE-%d-abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz\n" % i)
+    ctx.std.process.command("sh").args(["-c", "(i=0; while [ $i -lt 3000 ]; do echo GAPLINE$i >&2; i=$((i+1)); sleep 0.002; done) & sleep 0.2"]).spawn().wait()
+    return 0
+
+def _dashgap(ctx):
+    screen = ctx.std.term.take()
+    screen.write("FRAME")
+    print("DURING")
+    child = ctx.std.process.command("sh").args(["-c", "i=0; while [ $i -lt 200 ]; do awk -v b=$i 'BEGIN{for(j=0;j<100;j++) printf \"GAPLINE%d\\n\", b*100+j}' >&2; i=$((i+1)); sleep 0.01; done"]).spawn()
+    sleep(150)
+    screen.release(replay_stderr = False, dump_lines = 20000, older = "OLDER {n}")
+    sleep(100)
+    if not ctx.std.term.dump_output(older = "OLDER {n}"):
+        fail("the release's dump not said")
+    child.wait()
+    return 0
+
+exitgrand = task(implementation = _exitgrand, summary = "A screen held at exit while a grandchild floods stderr.")
+dashgap = task(implementation = _dashgap, summary = "A release that dumps while a child writes stderr.")
+
+def _givenback(ctx):
+    screen = ctx.std.term.take()
+    screen.write("FRAME")
+    print("BEFORE-SUSPEND")
+    child = ctx.std.process.command("sh").args(["-c", "sleep 0.5"]).interactive(True).spawn()
+    sleep(200)
+    print("WHILE-GIVEN-BACK")
+    screen.release(replay_stderr = False, dump_lines = 500, older = "OLDER {n}")
+    print("DUMPED-SAID=%s" % ctx.std.term.dump_output(older = "OLDER {n}"))
+    child.wait()
+    return 0
+
+def _splitcli(ctx):
+    screen = ctx.std.term.take()
+    screen.write("FRAME")
+    ctx.std.io.stderr.write("CLIHEAD-")
+    sleep(200)
+    screen.release(replay_stderr = False, dump_lines = 500, older = "OLDER {n}")
+    ctx.std.io.stderr.write("CLITAIL\n")
+    return 0
+
+givenback = task(implementation = _givenback, summary = "A screen released while given back to an interactive child.")
+
+def _pretake(ctx):
+    ctx.std.io.stderr.write("PRETAKE-")
+    sleep(50)
+    screen = ctx.std.term.take()
+    screen.write("FRAME")
+    print("INSCREEN")
+    sleep(100)
+    screen.release(replay_stderr = False, dump_lines = 500, older = "OLDER {n}")
+    ctx.std.io.stderr.write("END\n")
+    return 0
+
+def _prompt(ctx):
+    screen = ctx.std.term.take()
+    screen.write("FRAME")
+    print("BEFOREQ")
+    ctx.std.io.stderr.write("QUESTION? ")
+    ctx.std.io.stdin.read(64)
+    print("ANSWERED")
+    sleep(100)
+    screen.release(replay_stderr = False, dump_lines = 500, older = "OLDER {n}")
+    return 0
+
+pretake = task(implementation = _pretake, summary = "A line begun before the take, ended under the screen.")
+
+def _pretakeolder(ctx):
+    ctx.std.io.stderr.write("PRETAKE-")
+    sleep(50)
+    screen = ctx.std.term.take()
+    screen.write("FRAME")
+    for i in range(1, 5):
+        print("L%d" % i)
+    sleep(100)
+    screen.release(replay_stderr = False, dump_lines = 2, older = "OLDER {n}")
+    return 0
+
+def _pretakeout(ctx):
+    ctx.std.io.stdout.write("PRETAKE-")
+    sleep(50)
+    screen = ctx.std.term.take()
+    screen.write("FRAME")
+    ctx.std.io.stdout.write("INSCREEN\n")
+    sleep(100)
+    screen.release(replay_stderr = False, dump_lines = 500, older = "OLDER {n}")
+    ctx.std.io.stderr.write("END\n")
+    return 0
+
+def _secretcut(ctx):
+    screen = ctx.std.term.take()
+    screen.write("FRAME")
+    token = ctx.args.token
+    ctx.std.io.stderr.write("token=" + token[:4])
+    sleep(2500)
+    ctx.std.io.stderr.write(token[4:] + "\n")
+    sleep(100)
+    screen.release(replay_stderr = False, dump_lines = 500, older = "OLDER {n}")
+    return 0
+
+pretakeolder = task(implementation = _pretakeolder, summary = "A line begun before the take, older lines left out of the dump.")
+
+def _childafter(ctx):
+    ctx.std.io.stderr.write("CLIHEAD-")
+    sleep(50)
+    child = ctx.std.process.command("sh").args(["-c", "printf 'CHILD50PCT' >&2; sleep 1.5; printf -- '-CHILDDONE\\n' >&2"]).spawn()
+    sleep(500)
+    screen = ctx.std.term.take()
+    screen.write("FRAME")
+    print("INSCREEN")
+    sleep(200)
+    screen.release(replay_stderr = False, dump_lines = 500, older = "OLDER {n}")
+    child.wait()
+    ctx.std.io.stderr.write("-CLITAIL\n")
+    return 0
+
+def _childfirst(ctx):
+    child = ctx.std.process.command("sh").args(["-c", "printf 'CHILD50PCT' >&2; sleep 1.5; printf -- '-CHILDDONE\\n' >&2"]).spawn()
+    sleep(500)
+    ctx.std.io.stderr.write("CLIHEAD-")
+    sleep(50)
+    screen = ctx.std.term.take()
+    screen.write("FRAME")
+    sleep(200)
+    screen.release(replay_stderr = False, dump_lines = 500, older = "OLDER {n}")
+    child.wait()
+    ctx.std.io.stderr.write("-CLITAIL\n")
+    return 0
+
+def _stdoutpiped(ctx):
+    child = ctx.std.process.command("sh").args(["-c", "printf 'CHILD50PCT' >&2; sleep 1.5; printf -- '-CHILDDONE\\n' >&2"]).spawn()
+    sleep(300)
+    ctx.std.io.stdout.write("RESULT=")
+    sleep(50)
+    screen = ctx.std.term.take()
+    screen.write("FRAME")
+    sleep(200)
+    screen.release(replay_stderr = False, dump_lines = 500, older = "OLDER {n}")
+    child.wait()
+    ctx.std.io.stdout.write("42\n")
+    return 0
+
+def _latedump(ctx):
+    ctx.std.io.stderr.write("PRE-")
+    sleep(50)
+    screen = ctx.std.term.take()
+    screen.write("FRAME")
+    ctx.std.io.stderr.write("IN\n")
+    sleep(200)
+    screen.release(replay_stderr = False)
+    child = ctx.std.process.command("sh").args(["-c", "printf 'CHILD50PCT' >&2; sleep 1.5; printf -- '-CHILDDONE\\n' >&2"]).spawn()
+    sleep(500)
+    ctx.std.term.dump_output(older = "OLDER {n}")
+    child.wait()
+    return 0
+
+def _inherit(ctx):
+    ctx.std.io.stderr.write("CLIHEAD-")
+    sleep(50)
+    ctx.std.process.command("sh").args(["-c", "printf 'INHERIT50PCT' >&2"]).stderr("inherit").spawn().wait()
+    sleep(100)
+    screen = ctx.std.term.take()
+    screen.write("FRAME")
+    sleep(200)
+    screen.release(replay_stderr = False, dump_lines = 500, older = "OLDER {n}")
+    ctx.std.io.stderr.write("-CLITAIL\n")
+    return 0
+
+def _stdoutcat(ctx):
+    ctx.std.io.stderr.write("CLIHEAD-")
+    sleep(50)
+    child = ctx.std.process.command("sh").args(["-c", "printf 'CHILDOUT50PCT'; sleep 1.5; printf -- '-CHILDDONE\\n'"]).spawn()
+    sleep(500)
+    screen = ctx.std.term.take()
+    screen.write("FRAME")
+    sleep(200)
+    screen.release(replay_stderr = False, dump_lines = 500, older = "OLDER {n}")
+    child.wait()
+    ctx.std.io.stderr.write("-CLITAIL\n")
+    return 0
+
+def _errfile(ctx):
+    ctx.std.io.stderr.write("CLIHEAD-")
+    sleep(50)
+    screen = ctx.std.term.take()
+    screen.write("FRAME")
+    sleep(200)
+    screen.release(replay_stderr = False, dump_lines = 500, older = "OLDER {n}")
+    ctx.std.io.stderr.write("-CLITAIL\n")
+    return 0
+
+inherit = task(implementation = _inherit, summary = "An inherited child's partial after the CLI's, before a take.")
+stdoutcat = task(implementation = _stdoutcat, summary = "A child's stdout partial through a pipe to the terminal.")
+errfile = task(implementation = _errfile, summary = "The CLI's partial when stderr is a file.")
+childafter = task(implementation = _childafter, summary = "A child's partial after the CLI's, on one row, before a take.")
+childfirst = task(implementation = _childfirst, summary = "The CLI's partial after a child's, on one row, before a take.")
+stdoutpiped = task(implementation = _stdoutpiped, summary = "The CLI's stdout partial and a child's on stderr's row.")
+latedump = task(implementation = _latedump, summary = "A dump after the release, a child's partial written between.")
+pretakeout = task(implementation = _pretakeout, summary = "A stdout line begun before the take, ended under the screen.")
+secretcut = task(implementation = _secretcut, summary = "A secret written in two parts, a Ctrl+Z between.", args = {"token": args.string(secret = True)})
+prompt = task(implementation = _prompt, summary = "A question asked under a screen and answered.")
+splitcli = task(implementation = _splitcli, summary = "A CLI line unended when its screen is released with a dump.")
+
+gt_release = task(implementation = _gt_release, summary = "Golden: take and release.")
+gt_exit = task(implementation = _gt_exit, summary = "Golden: a screen held at exit.")
+gt_hold = task(implementation = _gt_hold, summary = "Golden: Ctrl+Z and fg under a screen.")
+gt_fail = task(implementation = _gt_fail, summary = "Golden: a task failing under a screen.")
+gt_signal = task(implementation = _gt_signal, summary = "Golden: Ctrl+C under a screen.")
+def _releasestall(ctx):
+    child = ctx.std.process.command("sh").args(["-c", "head -c 300000 /dev/zero | tr '\\0' x; echo"]).spawn()
+    sleep(800)
+    screen = ctx.std.term.take()
+    screen.write("FRAME")
+    sleep(300)
+    ctx.std.io.stderr.write("RELEASING\n")
+    screen.release(replay_stderr = False, dump_lines = 500, older = "OLDER {n}")
+    ctx.std.io.stderr.write("-CLITAIL\n")
+    child.wait()
+    return 0
+
+takestall = task(implementation = _takestall, summary = "A screen taken while stdout takes nothing.")
+releasestall = task(implementation = _releasestall, summary = "A dump while a forwarder is stalled on stdout.")
+interactive = task(implementation = _interactive, summary = "An interactive child.")
+"#;
+
+/// Run `aspect <task>` in a scratch workspace with stdin and stdout not a
+/// terminal; its output and the history's `output.log`.
+fn run(task: &str) -> (Output, String) {
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::fs::write(dir.path().join("MODULE.aspect"), "").expect("MODULE.aspect");
+    let aspect = dir.path().join(".aspect");
+    std::fs::create_dir(&aspect).expect(".aspect");
+    std::fs::write(aspect.join("tasks.axl"), TASKS).expect("tasks.axl");
+    let history = dir.path().join("history");
+    let output = Command::new(aspect_cli())
+        .arg(task)
+        .current_dir(dir.path())
+        .env_clear()
+        .envs(base_env())
+        .env("ASPECT_CLI_CACHE", dir.path().join("cache"))
+        .env("ASPECT_HISTORY_DIR", &history)
+        .env("HOME", dir.path().join("home"))
+        .stdin(Stdio::null())
+        .output()
+        .unwrap_or_else(|e| panic!("running `aspect {task}`: {e}"));
+    let log = std::fs::read_dir(&history)
+        .ok()
+        .and_then(|entries| {
+            entries
+                .flatten()
+                .map(|e| e.path().join("output.log"))
+                .find(|p| p.exists())
+        })
+        .map(|p| std::fs::read_to_string(p).expect("output.log"))
+        .unwrap_or_default();
+    (output, log)
+}
+
+/// The position of `needle` in `text`, failing with both when it is not there.
+/// Whether process `pid` is stopped (`T` among `ps`'s state letters), as
+/// after a Ctrl+Z.
+#[cfg(unix)]
+fn is_stopped(pid: impl std::fmt::Display) -> bool {
+    Command::new("ps")
+        .args(["-o", "stat=", "-p", &pid.to_string()])
+        .output()
+        .is_ok_and(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .trim_start()
+                .starts_with('T')
+        })
+}
+
+fn at(text: &str, needle: &str) -> usize {
+    text.find(needle)
+        .unwrap_or_else(|| panic!("want {needle:?} in:\n{text}"))
+}
+
+#[test]
+fn a_childs_partial_lines_are_passed_on_whole_and_in_order() {
+    let (output, log) = run("partial");
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    // Its stdout is the CLI's stdout (here not stderr's file), all of it.
+    let shown = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(shown, "partial rest\ntail", "the child's stdout, all of it");
+    assert!(
+        at(&log, "partial rest\n") < at(&log, "tail\n") && at(&log, "tail\n") < at(&log, "AFTER"),
+        "output.log keeps the child's lines whole, the CLI's after:\n{log}"
+    );
+}
+
+#[test]
+fn without_a_terminal_an_interactive_child_is_piped_and_unmarked() {
+    let (output, log) = run("interactive");
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert!(log.contains("from-the-child\n"), "copied:\n{log}");
+    assert!(
+        !log.contains("interactively"),
+        "no marker lines without a terminal:\n{log}"
+    );
+}
+
+/// `aspect <task>` in a scratch workspace, in a session of its own on a pty
+/// of 120x40, its terminal and its stderr, with `stdout` (the pty too when
+/// None); what it writes to
+/// the terminal, a chunk at a time with when it came.
+#[cfg(unix)]
+fn on_a_pty(
+    task: &str,
+    stdout: Option<Stdio>,
+) -> (
+    std::process::Child,
+    std::sync::mpsc::Receiver<(std::time::Duration, Vec<u8>)>,
+    tempfile::TempDir,
+) {
+    on_a_pty_with(task, stdout, &[])
+}
+
+/// Held by each test that asserts how long something took, so those never
+/// run beside one another; the rest, which bound no time, run as they will.
+#[cfg(unix)]
+static TIMED: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// [`TIMED`], whatever a test that held it before did.
+#[cfg(unix)]
+fn timed() -> std::sync::MutexGuard<'static, ()> {
+    TIMED.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// How long a run on a loaded machine may take to get to what a test waits
+/// for, from its start: long, as only the times measured from the event a
+/// test is about are its property.
+#[cfg(unix)]
+const STARTED_WITHIN: std::time::Duration = std::time::Duration::from_secs(90);
+
+/// [`on_a_pty`], with `args` after the task's name.
+#[cfg(unix)]
+fn on_a_pty_with_args(
+    task: &str,
+    args: &[&str],
+) -> (
+    std::process::Child,
+    std::sync::mpsc::Receiver<(std::time::Duration, Vec<u8>)>,
+    tempfile::TempDir,
+) {
+    on_a_pty_opts(
+        task,
+        PtyOpts {
+            args: args.iter().map(|s| s.to_string()).collect(),
+            ..PtyOpts::default()
+        },
+    )
+}
+
+/// How [`on_a_pty_opts`] runs the CLI beyond [`on_a_pty`]'s defaults.
+#[cfg(unix)]
+#[derive(Default, Clone)]
+struct PtyOpts {
+    /// After the task's name.
+    args: Vec<String>,
+    /// Stdout through `| cat` to the same terminal.
+    cat: bool,
+    /// Stderr to this file instead of the terminal.
+    stderr_file: Option<std::path::PathBuf>,
+}
+
+/// [`on_a_pty`] with `opts`.
+#[cfg(unix)]
+fn on_a_pty_opts(
+    task: &str,
+    opts: PtyOpts,
+) -> (
+    std::process::Child,
+    std::sync::mpsc::Receiver<(std::time::Duration, Vec<u8>)>,
+    tempfile::TempDir,
+) {
+    PTY_OPTS.with(|o| *o.borrow_mut() = opts);
+    let got = on_a_pty_with(task, None, &[]);
+    PTY_OPTS.with(|o| *o.borrow_mut() = PtyOpts::default());
+    got
+}
+
+#[cfg(unix)]
+std::thread_local! {
+    /// What [`on_a_pty_opts`] asks of the next CLI run.
+    static PTY_OPTS: std::cell::RefCell<PtyOpts> = std::cell::RefCell::new(PtyOpts::default());
+}
+
+/// [`on_a_pty`], with `env` set for the CLI too.
+#[cfg(unix)]
+fn on_a_pty_with(
+    task: &str,
+    stdout: Option<Stdio>,
+    env: &[(&str, &str)],
+) -> (
+    std::process::Child,
+    std::sync::mpsc::Receiver<(std::time::Duration, Vec<u8>)>,
+    tempfile::TempDir,
+) {
+    use std::io::Read;
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    use std::os::unix::process::CommandExt;
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::fs::write(dir.path().join("MODULE.aspect"), "").expect("MODULE.aspect");
+    let aspect = dir.path().join(".aspect");
+    std::fs::create_dir(&aspect).expect(".aspect");
+    std::fs::write(aspect.join("tasks.axl"), TASKS).expect("tasks.axl");
+
+    let (mut master, mut slave) = (0, 0);
+    // SAFETY: openpty fills the two descriptors it returns.
+    let rc = unsafe {
+        libc::openpty(
+            &mut master,
+            &mut slave,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    assert_eq!(rc, 0, "openpty");
+    // SAFETY: both are ours from openpty.
+    let (master, slave) = unsafe { (OwnedFd::from_raw_fd(master), OwnedFd::from_raw_fd(slave)) };
+    let tty = slave.as_raw_fd();
+    let size = libc::winsize {
+        ws_row: 40,
+        ws_col: 120,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    // SAFETY: TIOCSWINSZ from a live winsize, on our pty.
+    assert_eq!(
+        unsafe { libc::ioctl(tty, libc::TIOCSWINSZ as _, &size) },
+        0,
+        "winsize"
+    );
+    let opts = PTY_OPTS.with(|o| o.borrow().clone());
+    let mut cmd = if opts.cat {
+        let mut sh = Command::new("sh");
+        sh.args(["-c", "\"$0\" \"$@\" | cat", &aspect_cli(), task])
+            .args(&opts.args);
+        sh
+    } else {
+        let mut cli = Command::new(aspect_cli());
+        cli.arg(task).args(&opts.args);
+        cli
+    };
+    let stderr = match &opts.stderr_file {
+        Some(path) => Stdio::from(std::fs::File::create(path).expect("stderr file")),
+        None => Stdio::from(slave.try_clone().expect("dup")),
+    };
+    cmd.current_dir(dir.path())
+        .env_clear()
+        .envs(base_env())
+        .env("ASPECT_CLI_CACHE", dir.path().join("cache"))
+        .env("ASPECT_HISTORY_DIR", dir.path().join("history"))
+        .env("HOME", dir.path().join("home"))
+        .envs(env.iter().copied())
+        .stdin(Stdio::from(slave.try_clone().expect("dup")))
+        .stdout(stdout.unwrap_or_else(|| Stdio::from(slave.try_clone().expect("dup"))))
+        .stderr(stderr);
+    // SAFETY: setsid and ioctl are async-signal-safe.
+    unsafe {
+        cmd.pre_exec(move || {
+            if libc::setsid() < 0 || libc::ioctl(tty, libc::TIOCSCTTY as _, 0) < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let child = cmd.spawn().expect("spawn");
+    drop(cmd);
+    drop(slave);
+    let start = std::time::Instant::now();
+    let (send, chunks) = std::sync::mpsc::channel();
+    let mut screen = std::fs::File::from(master);
+    MASTERS
+        .lock()
+        .unwrap()
+        .insert(child.id(), screen.try_clone().expect("dup master"));
+    std::thread::spawn(move || {
+        let mut buf = [0u8; 4096];
+        while let Ok(n @ 1..) = screen.read(&mut buf) {
+            let _ = send.send((start.elapsed(), buf[..n].to_vec()));
+        }
+    });
+    (child, chunks, dir)
+}
+
+/// The pty masters [`on_a_pty`] made, by the CLI's pid.
+#[cfg(unix)]
+static MASTERS: std::sync::Mutex<std::collections::BTreeMap<u32, std::fs::File>> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+/// The master of the pty `child` (from [`on_a_pty`]) runs on, to type into
+/// or resize.
+#[cfg(unix)]
+fn pty_master(child: &std::process::Child) -> std::fs::File {
+    MASTERS.lock().unwrap()[&child.id()]
+        .try_clone()
+        .expect("dup master")
+}
+
+/// Wait at most `secs` for `child`; on a timeout, fail with what it and its
+/// children are doing ([`common::describe`], Linux) and what it wrote to the
+/// terminal, `chunks` drained, after killing it and every process under it.
+#[cfg(unix)]
+fn wait_bounded(
+    child: &mut std::process::Child,
+    secs: u64,
+    chunks: &std::sync::mpsc::Receiver<(std::time::Duration, Vec<u8>)>,
+) -> std::process::ExitStatus {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+    loop {
+        if let Some(status) = child.try_wait().expect("try_wait") {
+            return status;
+        }
+        if std::time::Instant::now() >= deadline {
+            let doing = common::describe(child.id());
+            for pid in common::descendants(child.id()) {
+                // SAFETY: SIGKILL to processes this test started.
+                unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+            }
+            let _ = child.kill();
+            let _ = child.wait();
+            let wrote: Vec<u8> = chunks.try_iter().flat_map(|(_, b)| b).collect();
+            let wrote = String::from_utf8_lossy(&wrote);
+            let tail: String = wrote
+                .chars()
+                .rev()
+                .take(2000)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect();
+            panic!("the CLI ran past {secs}s, killed:\n{doing}\nits last output:\n{tail}");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
+/// A FIFO in `dir`: its read end (not read until the caller does) and its
+/// write end, for a CLI's stdout nobody reads yet.
+#[cfg(unix)]
+fn unread_fifo(dir: &std::path::Path) -> (std::fs::File, std::fs::File) {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::OpenOptionsExt;
+    let fifo = dir.join("stdout.fifo");
+    let path = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+    // SAFETY: mkfifo on a path of the caller's temp dir.
+    assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0, "mkfifo");
+    // The read end first, not blocking, so the write end opens at once.
+    let reader = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(&fifo)
+        .expect("fifo reader");
+    let writer = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&fifo)
+        .expect("fifo writer");
+    // SAFETY: clearing O_NONBLOCK on our own descriptor, for the read later.
+    unsafe { libc::fcntl(reader.as_raw_fd(), libc::F_SETFL, 0) };
+    (reader, writer)
+}
+
+/// The task's `output.log` under a scratch workspace's history.
+#[cfg(unix)]
+fn output_log(dir: &std::path::Path) -> String {
+    std::fs::read_dir(dir.join("history"))
+        .ok()
+        .and_then(|entries| {
+            entries
+                .flatten()
+                .map(|e| e.path().join("output.log"))
+                .find(|p| p.exists())
+        })
+        .map(|p| String::from_utf8_lossy(&std::fs::read(p).expect("output.log")).into_owned())
+        .unwrap_or_default()
+}
+
+/// A release's dump while a child's forwarder is stalled on a stdout FIFO
+/// nobody reads, stderr the terminal: giving the descriptors back gives up
+/// on stdout's target, and the dump, holding stderr's, follows the main
+/// screen's return at once rather than waiting on its own turn.
+#[cfg(unix)]
+#[test]
+fn a_dump_waits_not_on_a_stalled_stdout() {
+    let _timed = timed();
+    use std::time::Duration;
+
+    let fifos = tempfile::tempdir().expect("temp dir");
+    let (mut reader, writer) = unread_fifo(fifos.path());
+    let (mut child, chunks, _dir) = on_a_pty("releasestall", Some(Stdio::from(writer)));
+    let (mut text, mut left, mut dumped) = (String::new(), None, None);
+    let start = std::time::Instant::now();
+    while !text.contains("-CLITAIL") {
+        match chunks.recv_timeout(STARTED_WITHIN.saturating_sub(start.elapsed())) {
+            Ok((at, bytes)) => {
+                text.push_str(&String::from_utf8_lossy(&bytes));
+                if left.is_none() && text.contains("\x1b[?1049l") {
+                    left = Some(at);
+                }
+                if let Some(back) = text.find("\x1b[?1049l")
+                    && dumped.is_none()
+                    && text[back..].contains("RELEASING")
+                {
+                    dumped = Some(at);
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    let drain = std::thread::spawn(move || std::io::copy(&mut reader, &mut std::io::sink()));
+    let status = wait_bounded(&mut child, 60, &chunks);
+    let _ = drain.join();
+    assert!(status.success(), "{status:?}: {text:?}");
+    let (Some(left), Some(dumped)) = (left, dumped) else {
+        panic!("no leave or no dump: {text:?}");
+    };
+    assert!(
+        dumped.saturating_sub(left) < Duration::from_secs(1),
+        "the dump {:?} after the main screen came back",
+        dumped.saturating_sub(left)
+    );
+}
+
+/// Taking the screen, and giving it back, while a child's stdout fills a
+/// FIFO nobody reads: neither may wait on stdout, or stderr's lines, fed to
+/// the screen, stop with it (macOS's `dup2` over a FIFO waits out a write in
+/// flight on it, and a forwarder's write to one nobody reads blocks). Stdout
+/// is read only once stderr's last tick is in: a tick every 100ms, none of
+/// them held up, and the screen given back before then.
+#[cfg(unix)]
+#[test]
+fn a_stdout_nobody_reads_stalls_no_take_nor_stderr() {
+    let _timed = timed();
+    use std::time::Duration;
+
+    let fifos = tempfile::tempdir().expect("temp dir");
+    let (mut reader, writer) = unread_fifo(fifos.path());
+    let (mut child, chunks, _dir) = on_a_pty("takestall", Some(Stdio::from(writer)));
+
+    // When each of `TICK1`..`TICK40`, `TAKING` and `RELEASED` first shows on
+    // the terminal, the screen's frames around them.
+    let (mut text, mut got) = (String::new(), Vec::<(Duration, String)>::new());
+    // A tick with its line end, so `TICK1` is not found in `TICK10`.
+    let names: Vec<(String, String)> = (1..=40)
+        .map(|i| (format!("TICK{i}"), format!("TICK{i}\r")))
+        .chain(["TAKING", "RELEASED"].map(|n| (n.to_string(), n.to_string())))
+        .collect();
+    let mut see = |at: Duration, bytes: &[u8], got: &mut Vec<(Duration, String)>| {
+        text.push_str(&String::from_utf8_lossy(bytes));
+        for (name, needle) in &names {
+            if !got.iter().any(|(_, l)| l == name) && text.contains(needle.as_str()) {
+                got.push((at, name.clone()));
+            }
+        }
+    };
+    let start = std::time::Instant::now();
+    while !got.iter().any(|(_, l)| l == "TICK40") {
+        match chunks.recv_timeout(STARTED_WITHIN.saturating_sub(start.elapsed())) {
+            Ok((at, bytes)) => see(at, &bytes, &mut got),
+            Err(_) => break,
+        }
+    }
+    let read_from = start.elapsed();
+    let drain = std::thread::spawn(move || std::io::copy(&mut reader, &mut std::io::sink()));
+    let status = wait_bounded(&mut child, 60, &chunks);
+    let _ = drain.join();
+    std::thread::sleep(Duration::from_millis(200));
+    for (at, bytes) in chunks.try_iter() {
+        see(at, &bytes, &mut got);
+    }
+    assert!(status.success(), "{status:?}: {got:?}");
+    let mut ticks: Vec<(usize, Duration)> = got
+        .iter()
+        .filter_map(|(t, l)| Some((l.strip_prefix("TICK")?.parse().ok()?, *t)))
+        .collect();
+    ticks.sort();
+    assert_eq!(
+        ticks.len(),
+        40,
+        "every tick before stdout was read: {got:?}"
+    );
+    let gap = ticks
+        .windows(2)
+        .map(|w| w[1].1.saturating_sub(w[0].1))
+        .max()
+        .unwrap();
+    assert!(
+        gap < Duration::from_secs(1),
+        "a tick held up {gap:?}: {got:?}"
+    );
+    let at = |want: &str| got.iter().find(|(_, l)| l == want).map(|(t, _)| *t);
+    assert!(
+        at("TAKING") < at("RELEASED") && at("RELEASED").is_some_and(|t| t < read_from),
+        "taken and given back before stdout was read at {read_from:?}: {got:?}"
+    );
+}
+
+/// A screen's dump of the task's output, written while a child floods
+/// stderr, on the terminal and with stdout redirected (the exit's path):
+/// every line whole, the dump's and the child's never spliced.
+#[cfg(unix)]
+#[test]
+fn a_dump_is_never_spliced_with_a_childs_stderr() {
+    use std::time::Duration;
+    for stdout in [None, Some(Stdio::null())] {
+        let (mut child, chunks, _dir) = on_a_pty("dumpsplice", stdout);
+        let status = wait_bounded(&mut child, 60, &chunks);
+        std::thread::sleep(Duration::from_millis(300));
+        let mut text = String::new();
+        for (_, bytes) in chunks.try_iter() {
+            text.push_str(&String::from_utf8_lossy(&bytes));
+        }
+        assert!(status.success(), "{status:?}");
+        let torn = torn_lines(&text);
+        assert!(
+            text.contains(&format!("CHILDERR19999-{LONG}")) && torn.is_empty(),
+            "{} torn lines, the first: {:?}",
+            torn.len(),
+            torn.iter().take(3).collect::<Vec<_>>()
+        );
+    }
+}
+
+/// `text` without its CSI (`ESC [ ... final`) and OSC (`ESC ] ... BEL or ST`)
+/// sequences.
+#[cfg(unix)]
+fn plain(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\x1b' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('[') => {
+                for c in chars.by_ref() {
+                    if ('\x40'..='\x7e').contains(&c) {
+                        break;
+                    }
+                }
+            }
+            Some(']') => {
+                while let Some(c) = chars.next() {
+                    if c == '\x07' || c == '\x1b' && chars.next_if_eq(&'\\').is_some() {
+                        break;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// The tail of every long line the tests write: long enough that a line
+/// takes more than one of a forwarder's reads now and then.
+#[cfg(unix)]
+const LONG: &str = "abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz";
+
+/// The lines of `text` (its escapes, the terminal's `^Z` echo and the
+/// `FRAME`s a screen drew before them left out, the screen's entry and exit
+/// ending a line) that hold a dump's, a child's or the CLI's test line, but
+/// not one whole.
+#[cfg(unix)]
+fn torn_lines(text: &str) -> Vec<String> {
+    let numbered = |line: &str, prefix: &str, tail: &str| {
+        line.strip_prefix(prefix)
+            .and_then(|r| r.split_once('-'))
+            .is_some_and(|(n, rest)| n.parse::<u32>().is_ok() && rest == tail)
+    };
+    let mut torn = vec![];
+    // The screen's entry and exit end a line: a frame drawn on it and the
+    // dump after are never one line, however close their bytes.
+    let text = text
+        .replace("\x1b[?1049h", "\n")
+        .replace("\x1b[?1049l", "\n");
+    for line in plain(&text).replace("^Z", "").split('\n') {
+        let line = line.trim_end_matches('\r');
+        let mut line = line.rsplit('\r').next().unwrap_or(line);
+        while let Some(rest) = line.strip_prefix("FRAME") {
+            line = rest;
+        }
+        let whole = numbered(line, "DUMPLINE-", "abcdefghijklmnopqrstuvwxyz0123456789")
+            || numbered(line, "CHILDERR", LONG)
+            || numbered(line, "CLILINE-", LONG);
+        let ours = ["DUMPLINE", "CHILDERR", "CLILINE"]
+            .iter()
+            .any(|p| line.contains(p));
+        if ours && !whole {
+            torn.push(line.to_string());
+        }
+    }
+    torn
+}
+
+/// A screen's frames drawn and left just before a dump are not part of its
+/// first line: what a loaded run left on the terminal, two screens taken and
+/// given back before the dump, is no torn line.
+#[cfg(unix)]
+#[test]
+fn torn_lines_end_at_the_screen() {
+    let text = "\x1b[?1049h\x1b[2J\x1b[?2026hFRAME\x1b[?2026l\x1b[?1049l\x1b[?1049h\x1b[2J\x1b[?2026hFRAME\x1b[?2026l\x1b[?1049lDUMPLINE-0-abcdefghijklmnopqrstuvwxyz0123456789\r\n";
+    assert_eq!(torn_lines(text), Vec::<String>::new());
+    assert_eq!(
+        torn_lines("DUMPLINE-0-abcdef\r\n"),
+        vec!["DUMPLINE-0-abcdef".to_string()]
+    );
+}
+
+/// Ctrl+Z under a screen gives the terminal back with the task's output
+/// dumped, while the task goes on printing: the dump and the CLI's own lines
+/// are never spliced, either way round.
+#[cfg(unix)]
+#[test]
+fn a_ctrl_z_dump_is_never_spliced_with_the_clis_lines() {
+    use std::time::Duration;
+    let (mut child, chunks, _dir) = on_a_pty("tstpdump", None);
+    let mut text = String::new();
+    let start = std::time::Instant::now();
+    while !text.contains("FRAME") && start.elapsed() < Duration::from_secs(30) {
+        if let Ok((_, bytes)) = chunks.recv_timeout(Duration::from_millis(100)) {
+            text.push_str(&String::from_utf8_lossy(&bytes));
+        }
+    }
+    assert!(text.contains("FRAME"), "the screen was taken: {text:?}");
+    // A Ctrl+Z on the terminal, then the shell's `fg`, three times: each
+    // gives the terminal back with a dump while the task prints.
+    // `fg` only once it has stopped, as a shell does: it stops itself after
+    // its dump, and a SIGCONT before that would leave it stopped for good.
+    let stopped = |pid: u32| is_stopped(pid);
+    for _ in 0..3 {
+        // SAFETY: signals to our own child.
+        unsafe { libc::kill(child.id() as i32, libc::SIGTSTP) };
+        let asked = std::time::Instant::now();
+        while !stopped(child.id()) && asked.elapsed() < Duration::from_secs(20) {
+            if child.try_wait().expect("try_wait").is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        if child.try_wait().expect("try_wait").is_some() {
+            break;
+        }
+        unsafe { libc::kill(child.id() as i32, libc::SIGCONT) };
+        std::thread::sleep(Duration::from_millis(300));
+    }
+    let status = wait_bounded(&mut child, 60, &chunks);
+    std::thread::sleep(Duration::from_millis(300));
+    for (_, bytes) in chunks.try_iter() {
+        text.push_str(&String::from_utf8_lossy(&bytes));
+    }
+    assert!(status.success(), "{status:?}");
+    let torn = torn_lines(&text);
+    assert!(
+        text.contains(&format!("CLILINE-59999-{LONG}")) && torn.is_empty(),
+        "{} torn lines, the first: {:?}",
+        torn.len(),
+        torn.iter().take(3).collect::<Vec<_>>()
+    );
+}
+
+/// A screen taken and given back while a child fills a stdout nobody reads:
+/// moving fds 1 and 2 neither fails the forwarder's write (the child would
+/// die of SIGPIPE, its output lost) nor has the capture copy what the
+/// forwarder copies too. Every line reaches stdout and output.log once.
+#[cfg(unix)]
+#[test]
+fn a_screen_switch_over_a_stalled_stdout_loses_and_doubles_nothing() {
+    use std::time::Duration;
+    let fifos = tempfile::tempdir().expect("temp dir");
+    let (mut reader, writer) = unread_fifo(fifos.path());
+    let (mut child, chunks, dir) = on_a_pty("swapstall", Some(Stdio::from(writer)));
+    let mut text = String::new();
+    let start = std::time::Instant::now();
+    while !text.contains("RELEASED") && start.elapsed() < Duration::from_secs(30) {
+        if let Ok((_, bytes)) = chunks.recv_timeout(Duration::from_millis(100)) {
+            text.push_str(&String::from_utf8_lossy(&bytes));
+        }
+    }
+    let drain = std::thread::spawn(move || {
+        let mut got = Vec::new();
+        let _ = std::io::Read::read_to_end(&mut reader, &mut got);
+        got
+    });
+    let status = wait_bounded(&mut child, 60, &chunks);
+    std::thread::sleep(Duration::from_millis(200));
+    for (_, bytes) in chunks.try_iter() {
+        text.push_str(&String::from_utf8_lossy(&bytes));
+    }
+    let stdout = String::from_utf8_lossy(&drain.join().unwrap()).into_owned();
+    assert!(status.success(), "{status:?}");
+    assert!(
+        plain(&text).contains("WAITED-0"),
+        "the child exited 0: {:?}",
+        plain(&text)
+    );
+    let numbered = |text: &str| {
+        text.lines()
+            .filter(|l| {
+                l.strip_prefix('N')
+                    .and_then(|r| r.split_once('-'))
+                    .is_some_and(|(n, x)| {
+                        n.len() == 6 && x.len() > 80 && x.bytes().all(|b| b == b'x')
+                    })
+            })
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+    };
+    let shown = numbered(&stdout);
+    assert_eq!(shown.len(), 4000, "every line on stdout once");
+    let log = numbered(&output_log(dir.path()));
+    let unique: std::collections::HashSet<_> = log.iter().collect();
+    assert_eq!(
+        (log.len(), unique.len()),
+        (4000, 4000),
+        "every line in output.log once"
+    );
+}
+
+/// A child given the CLI's own stdout while a screen holds the terminal,
+/// across Ctrl+Z and `fg`: none of its lines is written over the screen
+/// once it is back, and output.log has each once.
+#[cfg(unix)]
+#[test]
+fn an_inherited_stdout_goes_back_into_the_screen_after_fg() {
+    use std::time::Duration;
+    let (mut child, chunks, dir) = on_a_pty("inhtstp", None);
+    let mut raw = Vec::new();
+    let start = std::time::Instant::now();
+    while !raw.windows(5).any(|w| w == b"FRAME") && start.elapsed() < Duration::from_secs(30) {
+        if let Ok((_, bytes)) = chunks.recv_timeout(Duration::from_millis(100)) {
+            raw.extend(bytes);
+        }
+    }
+    std::thread::sleep(Duration::from_millis(1000));
+    let stopped = |pid: u32| is_stopped(pid);
+    // SAFETY: signals to our own child.
+    unsafe { libc::kill(child.id() as i32, libc::SIGTSTP) };
+    let asked = std::time::Instant::now();
+    while !stopped(child.id()) && asked.elapsed() < Duration::from_secs(20) {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    unsafe { libc::kill(child.id() as i32, libc::SIGCONT) };
+    let status = wait_bounded(&mut child, 60, &chunks);
+    std::thread::sleep(Duration::from_millis(200));
+    for (_, bytes) in chunks.try_iter() {
+        raw.extend(bytes);
+    }
+    assert!(status.success(), "{status:?}");
+    // Walk the screen's enter/leave: no INH line while it is up.
+    let raw = String::from_utf8_lossy(&raw).into_owned();
+    let mut up = false;
+    let mut over = vec![];
+    let mut rest = raw.as_str();
+    while let Some(at) = rest.find(|c| c == '\x1b' || c == 'I') {
+        rest = &rest[at..];
+        if let Some(r) = rest.strip_prefix("\x1b[?1049h") {
+            up = true;
+            rest = r;
+        } else if let Some(r) = rest.strip_prefix("\x1b[?1049l") {
+            up = false;
+            rest = r;
+        } else if rest.starts_with("INH") {
+            let end = rest
+                .find(|c: char| c == '\r' || c == '\n')
+                .unwrap_or(rest.len());
+            if up {
+                over.push(rest[..end].to_string());
+            }
+            rest = &rest[end..];
+        } else {
+            rest = &rest[1..];
+        }
+    }
+    assert!(over.is_empty(), "written over the screen: {over:?}");
+    let log = output_log(dir.path());
+    let inh: Vec<&str> = log.lines().filter(|l| l.starts_with("INH")).collect();
+    let unique: std::collections::HashSet<_> = inh.iter().collect();
+    assert_eq!(
+        (inh.len(), unique.len()),
+        (30, 30),
+        "each line in output.log once: {inh:?}"
+    );
+}
+
+/// Ctrl+Z while a release replays to a stdout nobody reads: the stop waits
+/// on the release's order locks for a bounded while, not the replay's.
+#[cfg(unix)]
+#[test]
+fn ctrl_z_during_a_stalled_release_stops_at_once() {
+    let _timed = timed();
+    use std::time::Duration;
+    let fifos = tempfile::tempdir().expect("temp dir");
+    let (mut reader, writer) = unread_fifo(fifos.path());
+    let (mut child, chunks, _dir) = on_a_pty("tstpstall", Some(Stdio::from(writer)));
+    let mut raw = Vec::new();
+    let start = std::time::Instant::now();
+    // The release has begun once the screen is left.
+    let left = |raw: &[u8]| raw.windows(8).any(|w| w == b"\x1b[?1049l");
+    while !left(&raw) && start.elapsed() < STARTED_WITHIN {
+        if let Ok((_, bytes)) = chunks.recv_timeout(Duration::from_millis(10)) {
+            raw.extend(bytes);
+        }
+    }
+    assert!(
+        left(&raw),
+        "the screen never left: {:?}",
+        String::from_utf8_lossy(&raw)
+    );
+    let stopped = |pid: u32| is_stopped(pid);
+    // SAFETY: signals to our own child.
+    unsafe { libc::kill(child.id() as i32, libc::SIGTSTP) };
+    let asked = std::time::Instant::now();
+    while !stopped(child.id()) && asked.elapsed() < Duration::from_secs(10) {
+        // The terminal read meanwhile, so a dump is never what it waits on.
+        while chunks.try_recv().is_ok() {}
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let took = asked.elapsed();
+    unsafe { libc::kill(child.id() as i32, libc::SIGCONT) };
+    let drain = std::thread::spawn(move || std::io::copy(&mut reader, &mut std::io::sink()));
+    let status = wait_bounded(&mut child, 60, &chunks);
+    let _ = drain.join();
+    assert!(status.success(), "{status:?}");
+    assert!(
+        took < Duration::from_millis(1500),
+        "stopped {took:?} after Ctrl+Z"
+    );
+}
+
+/// The numbered lines a batch child writes, in `text`: whole ones and torn.
+#[cfg(unix)]
+fn batch_lines(text: &str) -> (Vec<String>, Vec<String>) {
+    let (mut whole, mut torn) = (vec![], vec![]);
+    for l in plain(text).replace('\r', "").lines() {
+        let ok = l
+            .strip_prefix('N')
+            .and_then(|r| r.split_once('-'))
+            .is_some_and(|(n, x)| n.len() == 6 && x.len() >= 95 && x.bytes().all(|b| b == b'x'));
+        if ok {
+            whole.push(l.to_string());
+        } else if l.contains("N0") {
+            torn.push(l.to_string());
+        }
+    }
+    (whole, torn)
+}
+
+/// Each of a batch child's 3000 lines, once and whole, in `text`.
+#[cfg(unix)]
+fn assert_every_batch_line_once(what: &str, text: &str) {
+    let (whole, torn) = batch_lines(text);
+    let unique: std::collections::HashSet<_> = whole.iter().collect();
+    assert!(
+        whole.len() == 3000 && unique.len() == 3000 && torn.is_empty(),
+        "{what}: {} lines, {} distinct, {} torn: {:?}",
+        whole.len(),
+        unique.len(),
+        torn.len(),
+        torn.iter().take(3).collect::<Vec<_>>()
+    );
+}
+
+/// A child given the CLI's stdout across two screens while stdout is read
+/// slowly: what it still writes into the first screen's stopped capture
+/// goes on through the second's, and is never cut short when a screen is
+/// taken (a `select` the move cuts short), nor written alongside the second
+/// screen's replay. Stdout and output.log get each line once.
+#[cfg(unix)]
+#[test]
+fn a_child_on_the_clis_stdout_across_two_screens_loses_and_tears_nothing() {
+    use std::time::{Duration, Instant};
+    let fifos = tempfile::tempdir().expect("temp dir");
+    let (mut reader, writer) = unread_fifo(fifos.path());
+    let (mut child, chunks, dir) = on_a_pty("retake", Some(Stdio::from(writer)));
+    // 20KB/s for 8s, then as fast as it comes.
+    let drain = std::thread::spawn(move || {
+        let start = Instant::now();
+        let mut got = Vec::new();
+        let mut buf = vec![0u8; 65536];
+        loop {
+            let slow = start.elapsed() < Duration::from_secs(8);
+            let want = if slow { 1000 } else { buf.len() };
+            match std::io::Read::read(&mut reader, &mut buf[..want]) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => got.extend_from_slice(&buf[..n]),
+            }
+            if slow {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
+        got
+    });
+    let status = wait_bounded(&mut child, 90, &chunks);
+    let stdout = String::from_utf8_lossy(&drain.join().unwrap()).into_owned();
+    assert!(status.success(), "{status:?}");
+    assert_every_batch_line_once("stdout", &stdout);
+    assert_every_batch_line_once("output.log", &output_log(dir.path()));
+}
+
+/// Ctrl+Z while a child writes to the CLI's stdout, a FIFO: what the screen
+/// captured of stdout before the stop goes to stdout then, as a release's
+/// does, not only into the dump on the terminal.
+#[cfg(unix)]
+#[test]
+fn ctrl_z_passes_stdouts_captured_lines_to_a_stdout_that_is_no_terminal() {
+    use std::time::Duration;
+    let fifos = tempfile::tempdir().expect("temp dir");
+    let (mut reader, writer) = unread_fifo(fifos.path());
+    let drain = std::thread::spawn(move || {
+        let mut got = Vec::new();
+        let _ = std::io::Read::read_to_end(&mut reader, &mut got);
+        got
+    });
+    let (mut child, chunks, _dir) = on_a_pty("fgslow", Some(Stdio::from(writer)));
+    // Once the screen is up, and some of the child's lines with it.
+    let mut raw = Vec::new();
+    let start = std::time::Instant::now();
+    while !raw.windows(7).any(|w| w == b"FRAME-A") && start.elapsed() < Duration::from_secs(30) {
+        if let Ok((_, bytes)) = chunks.recv_timeout(Duration::from_millis(50)) {
+            raw.extend(bytes);
+        }
+    }
+    std::thread::sleep(Duration::from_millis(1500));
+    let stopped = |pid: u32| is_stopped(pid);
+    // SAFETY: signals to our own child.
+    unsafe { libc::kill(child.id() as i32, libc::SIGTSTP) };
+    let asked = std::time::Instant::now();
+    while !stopped(child.id()) && asked.elapsed() < Duration::from_secs(20) {
+        while chunks.try_recv().is_ok() {}
+        if child.try_wait().expect("try_wait").is_some() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(stopped(child.id()), "stopped on Ctrl+Z");
+    std::thread::sleep(Duration::from_millis(300));
+    unsafe { libc::kill(child.id() as i32, libc::SIGCONT) };
+    let status = wait_bounded(&mut child, 60, &chunks);
+    let stdout = String::from_utf8_lossy(&drain.join().unwrap()).into_owned();
+    assert!(status.success(), "{status:?}");
+    assert_every_batch_line_once("stdout", &stdout);
+}
+
+/// `bytes` a CLI wrote to its terminal, normalised for a golden file: escapes
+/// as `\e`, a carriage return not before a newline as `\r`, every duration
+/// (`1.2s`, `30ms`) as `<T>`, and `dir` (the scratch workspace) as `<DIR>`.
+#[cfg(unix)]
+fn golden_text(bytes: &[u8], dir: &std::path::Path) -> String {
+    let text = String::from_utf8_lossy(bytes).replace(&*dir.to_string_lossy(), "<DIR>");
+    let text = text.replace("/private<DIR>", "<DIR>");
+    let mut out = String::new();
+    let chars: Vec<char> = text.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c.is_ascii_digit() && (i == 0 || !chars[i - 1].is_ascii_alphanumeric()) {
+            let mut j = i;
+            while j < chars.len() && (chars[j].is_ascii_digit() || chars[j] == '.') {
+                j += 1;
+            }
+            let unit = if chars[j..].starts_with(&['m', 's']) {
+                2
+            } else if chars.get(j) == Some(&'s') {
+                1
+            } else {
+                0
+            };
+            if unit > 0
+                && !chars
+                    .get(j + unit)
+                    .is_some_and(|c| c.is_ascii_alphanumeric())
+            {
+                out.push_str("<T>");
+                i = j + unit;
+                continue;
+            }
+        }
+        match c {
+            '\x1b' => out.push_str("\\e"),
+            '\r' if chars.get(i + 1) != Some(&'\n') => out.push_str("\\r"),
+            '\r' => {}
+            '\x07' => out.push_str("\\a"),
+            _ => out.push(c),
+        }
+        i += 1;
+    }
+    out
+}
+
+/// How a golden scenario is driven once its screen is up.
+#[cfg(unix)]
+#[derive(Clone, Copy)]
+enum Drive {
+    Nothing,
+    CtrlZThenFg,
+    CtrlC,
+}
+
+/// Run `task` on a pty, drive it, and compare what it wrote to the terminal
+/// with `tests/testdata/terminal/<task>.golden`; `UPDATE_GOLDEN=1` writes it
+/// anew instead (under cargo).
+#[cfg(unix)]
+fn check_golden(task: &str, drive: Drive, golden: &str) {
+    use std::time::Duration;
+    let (mut child, chunks, dir) = on_a_pty(&task.replace('_', "-"), None);
+    let mut raw = Vec::new();
+    let start = std::time::Instant::now();
+    while !raw.windows(5).any(|w| w == b"FRAME") && start.elapsed() < Duration::from_secs(30) {
+        if let Ok((_, bytes)) = chunks.recv_timeout(Duration::from_millis(20)) {
+            raw.extend(bytes);
+        }
+    }
+    let pid = child.id() as i32;
+    let stopped = |pid: i32| is_stopped(pid);
+    match drive {
+        Drive::Nothing => {}
+        Drive::CtrlZThenFg => {
+            std::thread::sleep(Duration::from_millis(200));
+            // SAFETY: signals to our own child.
+            unsafe { libc::kill(pid, libc::SIGTSTP) };
+            let asked = std::time::Instant::now();
+            while !stopped(pid) && asked.elapsed() < Duration::from_secs(10) {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            unsafe { libc::kill(pid, libc::SIGCONT) };
+        }
+        Drive::CtrlC => {
+            std::thread::sleep(Duration::from_millis(200));
+            unsafe { libc::kill(pid, libc::SIGINT) };
+        }
+    }
+    let _ = wait_bounded(&mut child, 60, &chunks);
+    std::thread::sleep(Duration::from_millis(200));
+    for (_, bytes) in chunks.try_iter() {
+        raw.extend(bytes);
+    }
+    // From the take on (the banner before it says how the CLI was built),
+    // and up to a failure's message (its traceback names lines of the
+    // tasks above, which move as they are edited).
+    let mut got = golden_text(&raw, dir.path());
+    if let Some(at) = got.find("\\e[?1049h") {
+        got = got[at..].to_string();
+    }
+    if let Some(at) = got.find("error: Traceback") {
+        let end = got[at..]
+            .find("error: fail: ")
+            .map_or(got.len(), |e| at + e);
+        let end = got[end..].find('\n').map_or(got.len(), |n| end + n + 1);
+        got = format!(
+            "{}{}",
+            &got[..at],
+            &got[end - got[at..end].lines().last().map_or(0, |l| l.len() + 1)..end]
+        );
+    }
+    if std::env::var_os("UPDATE_GOLDEN").is_some() {
+        // Read at run time (cargo sets it): env! would embed the build path,
+        // which Bazel's process wrapper refuses.
+        let manifest = std::env::var("CARGO_MANIFEST_DIR").expect("UPDATE_GOLDEN runs under cargo");
+        let path = std::path::Path::new(&manifest)
+            .join("tests/testdata/terminal")
+            .join(format!("{task}.golden"));
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, &got).unwrap();
+        return;
+    }
+    if got != golden {
+        let (g, w): (Vec<&str>, Vec<&str>) = (got.lines().collect(), golden.lines().collect());
+        let at = (0..g.len().max(w.len()))
+            .find(|&i| g.get(i) != w.get(i))
+            .unwrap_or(0);
+        panic!(
+            "{task}: the terminal's bytes differ from tests/testdata/terminal/{task}.golden \
+             (UPDATE_GOLDEN=1 cargo test rewrites it) at line {at}:\n  got:  {:?}\n  want: {:?}\n\nall of it:\n{got}",
+            g.get(at),
+            w.get(at)
+        );
+    }
+}
+
+/// A golden file's contents, compiled in (Bazel: `compile_data`).
+#[cfg(unix)]
+macro_rules! golden {
+    ($name:literal) => {
+        include_str!(concat!("testdata/terminal/", $name, ".golden"))
+    };
+}
+
+/// What a take and a release write: the screen's modes in, its frame,
+/// then everything put back and the task's output dumped to the scrollback.
+#[cfg(unix)]
+#[test]
+fn golden_take_and_release() {
+    check_golden("gt_release", Drive::Nothing, golden!("gt_release"));
+}
+
+/// A screen still held when the task ends: given back on the way out,
+/// its output dumped.
+#[cfg(unix)]
+#[test]
+fn golden_a_screen_held_at_exit() {
+    check_golden("gt_exit", Drive::Nothing, golden!("gt_exit"));
+}
+
+/// Ctrl+Z under a screen and `fg`: given back with a dump, then taken back
+/// and its last frame drawn, then released.
+#[cfg(unix)]
+#[test]
+fn golden_ctrl_z_and_fg() {
+    check_golden("gt_hold", Drive::CtrlZThenFg, golden!("gt_hold"));
+}
+
+/// A task failing under a screen: the terminal restored, the error after.
+#[cfg(unix)]
+#[test]
+fn golden_a_failure_under_a_screen() {
+    check_golden("gt_fail", Drive::Nothing, golden!("gt_fail"));
+}
+
+/// Ctrl+C under a screen: the terminal restored as the task is cancelled.
+#[cfg(unix)]
+#[test]
+fn golden_ctrl_c_under_a_screen() {
+    check_golden("gt_signal", Drive::CtrlC, golden!("gt_signal"));
+}
+
+/// The terminal answers the screen's own query late (a slow link), then an
+/// interactive child gets the terminal: the answer is read out and dropped
+/// first, never the child's input.
+#[cfg(unix)]
+#[test]
+fn a_late_answer_to_the_screens_query_never_reaches_a_child() {
+    use std::io::Write as _;
+    use std::time::Duration;
+    let (mut child, chunks, _dir) = on_a_pty("handoff", None);
+    let mut raw = Vec::new();
+    let start = std::time::Instant::now();
+    while !raw.windows(5).any(|w| w == b"FRAME") && start.elapsed() < Duration::from_secs(30) {
+        if let Ok((_, bytes)) = chunks.recv_timeout(Duration::from_millis(20)) {
+            raw.extend(bytes);
+        }
+    }
+    // The DA1 answer, after the take's wait for it.
+    let mut master = pty_master(&child);
+    master.write_all(b"\x1b[?62;22c").unwrap();
+    let status = wait_bounded(&mut child, 60, &chunks);
+    std::thread::sleep(Duration::from_millis(200));
+    for (_, bytes) in chunks.try_iter() {
+        raw.extend(bytes);
+    }
+    assert!(status.success(), "{status:?}");
+    let text = plain(&String::from_utf8_lossy(&raw));
+    let read = text
+        .split("READ[")
+        .nth(1)
+        .and_then(|r| r.split("]END").next())
+        .unwrap_or("<none>");
+    assert_eq!(read, "", "what the child read: {text:?}");
+}
+
+/// Interrupts turned off (a finished screen held up), then given back to an
+/// interactive child and taken again: Ctrl+C still arrives as a key, never
+/// a signal that would cancel the task, as the resume sets the screen's
+/// modes again with that choice in them.
+#[cfg(unix)]
+#[test]
+fn interrupts_stay_off_across_a_suspend() {
+    use std::io::Write as _;
+    use std::time::Duration;
+    let (mut child, chunks, _dir) = on_a_pty("isigkept", None);
+    let mut raw = Vec::new();
+    let start = std::time::Instant::now();
+    while !raw.windows(7).any(|w| w == b"RESUMED") && start.elapsed() < Duration::from_secs(30) {
+        if let Ok((_, bytes)) = chunks.recv_timeout(Duration::from_millis(20)) {
+            raw.extend(bytes);
+        }
+    }
+    assert!(
+        raw.windows(7).any(|w| w == b"RESUMED"),
+        "{}",
+        String::from_utf8_lossy(&raw)
+    );
+    pty_master(&child).write_all(b"\x03").unwrap();
+    let status = wait_bounded(&mut child, 60, &chunks);
+    std::thread::sleep(Duration::from_millis(200));
+    for (_, bytes) in chunks.try_iter() {
+        raw.extend(bytes);
+    }
+    let text = plain(&String::from_utf8_lossy(&raw));
+    assert!(status.success(), "{status:?}: {text:?}");
+    assert!(text.contains("CTRL-C-WAS-A-KEY"), "{text:?}");
+}
+
+/// A post-task hook that holds a screen up for its reader (waiting for a
+/// key with `reading = True`, as the Dashboard's finished screen does) is
+/// not the task's time: its record and its closing line leave the wait out,
+/// and only that.
+#[cfg(unix)]
+#[test]
+fn a_screen_held_for_its_reader_is_not_in_the_recorded_duration() {
+    use std::time::Duration;
+    let (mut child, chunks, dir) = on_a_pty("heldscreen", None);
+    let status = wait_bounded(&mut child, 60, &chunks);
+    std::thread::sleep(Duration::from_millis(200));
+    let raw: Vec<u8> = chunks.try_iter().flat_map(|(_, bytes)| bytes).collect();
+    let text = plain(&String::from_utf8_lossy(&raw));
+    assert!(status.success(), "{status:?}: {text:?}");
+    let record: serde_json::Value = std::fs::read_dir(dir.path().join("history"))
+        .expect("the history")
+        .flatten()
+        .find_map(|e| std::fs::read_to_string(e.path().join("task.json")).ok())
+        .map(|t| serde_json::from_str(&t).expect("task.json"))
+        .expect("a task.json");
+    let took = record["duration_ms"].as_u64().expect("duration_ms");
+    assert!(took < 1500, "the 2.5s wait counted: {took}ms in {record}");
+    let said = common::closing_line_ms(&text);
+    assert!(
+        said < 1500 && said.abs_diff(took) < 100,
+        "the closing line's {said}ms against the record's {took}ms"
+    );
+}
+
+/// A screen that polls keys while it works (`key(timeout_ms = 100)` twenty
+/// times, not reading) keeps that time as the task's: the record and the
+/// closing line count all of it.
+#[cfg(unix)]
+#[test]
+fn a_screen_polling_keys_while_it_works_keeps_its_time() {
+    use std::time::Duration;
+    let (mut child, chunks, dir) = on_a_pty("pollscreen", None);
+    let status = wait_bounded(&mut child, 60, &chunks);
+    std::thread::sleep(Duration::from_millis(200));
+    let raw: Vec<u8> = chunks.try_iter().flat_map(|(_, bytes)| bytes).collect();
+    let text = plain(&String::from_utf8_lossy(&raw));
+    assert!(status.success(), "{status:?}: {text:?}");
+    let record: serde_json::Value = std::fs::read_dir(dir.path().join("history"))
+        .expect("the history")
+        .flatten()
+        .find_map(|e| std::fs::read_to_string(e.path().join("task.json")).ok())
+        .map(|t| serde_json::from_str(&t).expect("task.json"))
+        .expect("a task.json");
+    let took = record["duration_ms"].as_u64().expect("duration_ms");
+    assert!(took >= 1900, "the polling left out: {took}ms in {record}");
+    let said = common::closing_line_ms(&text);
+    assert!(
+        said.abs_diff(took) < 100,
+        "the closing line's {said}ms against the record's {took}ms"
+    );
+}
+
+/// Ctrl+Z, the terminal resized while stopped, then fg: the screen comes
+/// back clear for its next frame, not with its last one drawn at the old size.
+#[cfg(unix)]
+#[test]
+fn fg_at_another_size_draws_no_stale_frame() {
+    use std::time::Duration;
+    let (mut child, chunks, _dir) = on_a_pty("gt-hold", None);
+    let mut raw = Vec::new();
+    let start = std::time::Instant::now();
+    while !raw.windows(5).any(|w| w == b"FRAME") && start.elapsed() < Duration::from_secs(30) {
+        if let Ok((_, bytes)) = chunks.recv_timeout(Duration::from_millis(20)) {
+            raw.extend(bytes);
+        }
+    }
+    let pid = child.id() as i32;
+    let stopped = || is_stopped(pid);
+    std::thread::sleep(Duration::from_millis(200));
+    // SAFETY: signals to our own child; TIOCSWINSZ on its terminal.
+    unsafe { libc::kill(pid, libc::SIGTSTP) };
+    let asked = std::time::Instant::now();
+    while !stopped() && asked.elapsed() < Duration::from_secs(10) {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let master = pty_master(&child);
+    let size = libc::winsize {
+        ws_row: 30,
+        ws_col: 90,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    unsafe {
+        libc::ioctl(
+            std::os::fd::AsRawFd::as_raw_fd(&master),
+            libc::TIOCSWINSZ as _,
+            &size,
+        )
+    };
+    let mark = raw.len();
+    unsafe { libc::kill(pid, libc::SIGCONT) };
+    let status = wait_bounded(&mut child, 60, &chunks);
+    std::thread::sleep(Duration::from_millis(200));
+    for (_, bytes) in chunks.try_iter() {
+        raw.extend(bytes);
+    }
+    assert!(status.success(), "{status:?}");
+    let after = String::from_utf8_lossy(&raw[mark..]).into_owned();
+    let back = after.find("\x1b[?1049h").expect("taken back");
+    let redrawn = &after[back..];
+    let next = redrawn.find("FRAME2").unwrap_or(redrawn.len());
+    assert!(
+        !redrawn[..next].contains("FRAME"),
+        "the old frame drawn again: {redrawn:?}"
+    );
+}
+
+/// The GAPLINE numbers a child wrote, as the terminal shows them, in order.
+#[cfg(unix)]
+fn gaplines(text: &str) -> Vec<u32> {
+    plain(text)
+        .split("GAPLINE")
+        .skip(1)
+        .filter_map(|r| {
+            let n: String = r.chars().take_while(|c| c.is_ascii_digit()).collect();
+            n.parse().ok()
+        })
+        .collect()
+}
+
+/// Each line once, in the order written: none shown both live and in the
+/// dump, none live ahead of it.
+#[cfg(unix)]
+fn assert_once_in_order(what: &str, lines: &[u32]) {
+    let back: Vec<(u32, u32)> = lines
+        .windows(2)
+        .filter(|w| w[1] <= w[0])
+        .map(|w| (w[0], w[1]))
+        .collect();
+    assert!(
+        !lines.is_empty() && back.is_empty(),
+        "{what}: {} lines, out of order or twice at {:?}",
+        lines.len(),
+        back.iter().take(5).collect::<Vec<_>>()
+    );
+}
+
+/// A screen still held when the task ends, a grandchild writing stderr all
+/// the while and stdout a pipe nobody reads: the exit's dump is written
+/// with every writer held from the main screen coming back, before the
+/// stalled stdout's replay.
+#[cfg(unix)]
+#[test]
+fn the_exit_dump_shows_each_line_once_and_first() {
+    use std::time::Duration;
+    let fifos = tempfile::tempdir().expect("temp dir");
+    let (mut reader, writer) = unread_fifo(fifos.path());
+    let (mut child, chunks, _dir) = on_a_pty("exitgrand", Some(Stdio::from(writer)));
+    let status = wait_bounded(&mut child, 60, &chunks);
+    std::thread::sleep(Duration::from_millis(300));
+    let drain = std::thread::spawn(move || std::io::copy(&mut reader, &mut std::io::sink()));
+    let mut text = String::new();
+    for (_, bytes) in chunks.try_iter() {
+        text.push_str(&String::from_utf8_lossy(&bytes));
+    }
+    drop(drain);
+    assert!(status.success(), "{status:?}");
+    assert_once_in_order("the exit's scrollback", &gaplines(&text));
+}
+
+/// A screen's own release with a dump (as the Dashboard leaves), a child
+/// writing stderr all the while: the dump is part of the release, nothing
+/// shown twice or ahead of it, and a later dump_output says it was written.
+#[cfg(unix)]
+#[test]
+fn a_release_that_dumps_shows_each_line_once_and_first() {
+    use std::time::Duration;
+    // A dump made to wait between reading the task's output and writing it,
+    // so a writer it does not hold off lands in between.
+    let (mut child, chunks, _dir) =
+        on_a_pty_with("dashgap", None, &[("ASPECT_TEST_DUMP_DELAY_MS", "100")]);
+    let status = wait_bounded(&mut child, 60, &chunks);
+    std::thread::sleep(Duration::from_millis(200));
+    let mut text = String::new();
+    for (_, bytes) in chunks.try_iter() {
+        text.push_str(&String::from_utf8_lossy(&bytes));
+    }
+    assert!(status.success(), "{status:?}: {}", plain(&text));
+    let lines = gaplines(&text);
+    assert_once_in_order("the release's scrollback", &lines);
+    assert_eq!(lines.len(), 20000, "every line");
+}
+
+/// A screen released while given back (an interactive child spawned and not
+/// waited on): the suspend dumped already, so the release's dump is said
+/// to be written, and nothing is dumped twice.
+#[cfg(unix)]
+#[test]
+fn a_screen_released_while_given_back_dumps_once() {
+    use std::time::Duration;
+    let (mut child, chunks, _dir) = on_a_pty("givenback", None);
+    let status = wait_bounded(&mut child, 60, &chunks);
+    std::thread::sleep(Duration::from_millis(200));
+    let mut text = String::new();
+    for (_, bytes) in chunks.try_iter() {
+        text.push_str(&String::from_utf8_lossy(&bytes));
+    }
+    let text = plain(&text);
+    assert!(status.success(), "{status:?}: {text}");
+    assert!(
+        text.contains("DUMPED-SAID=True"),
+        "the suspend's dump said: {text}"
+    );
+    assert_eq!(
+        text.matches("BEFORE-SUSPEND").count(),
+        1,
+        "dumped once: {text}"
+    );
+}
+
+/// A CLI line still unended when its screen is released with a dump: the
+/// dump writes as far as it goes, and its end follows on the same line.
+#[cfg(unix)]
+#[test]
+fn a_cli_line_unended_at_release_keeps_its_start() {
+    use std::time::Duration;
+    let (mut child, chunks, _dir) = on_a_pty("splitcli", None);
+    let status = wait_bounded(&mut child, 60, &chunks);
+    std::thread::sleep(Duration::from_millis(200));
+    let mut text = String::new();
+    for (_, bytes) in chunks.try_iter() {
+        text.push_str(&String::from_utf8_lossy(&bytes));
+    }
+    let text = plain(&text);
+    assert!(status.success(), "{status:?}: {text}");
+    assert!(text.contains("CLIHEAD-CLITAIL"), "the line whole: {text:?}");
+}
+
+/// What the terminal shows of `raw`, as rows: the alternate screen's text
+/// (between entering and leaving it) left out, a carriage return going back
+/// to its row's start, `ESC [ K` erasing the rest of it and `ESC [ 2 K`
+/// all of it, other escapes left out.
+#[cfg(unix)]
+fn main_screen(raw: &str) -> String {
+    let mut main = String::new();
+    let mut rest = raw;
+    while let Some(at) = rest.find("\x1b[?1049h") {
+        main.push_str(&rest[..at]);
+        rest = rest[at..]
+            .find("\x1b[?1049l")
+            .map_or("", |end| &rest[at + end..]);
+    }
+    main.push_str(rest);
+    let (mut rows, mut row, mut col) = (Vec::<String>::new(), Vec::<char>::new(), 0usize);
+    let mut chars = main.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\x1b' => match chars.next() {
+                Some('[') => {
+                    let mut params = String::new();
+                    let mut last = ' ';
+                    for c in chars.by_ref() {
+                        last = c;
+                        if ('\x40'..='\x7e').contains(&c) {
+                            break;
+                        }
+                        params.push(c);
+                    }
+                    if last == 'K' && params == "2" {
+                        row.clear();
+                    } else if last == 'K' {
+                        row.truncate(col);
+                    }
+                }
+                Some(']') => {
+                    while let Some(c) = chars.next() {
+                        if c == '\x07' || c == '\x1b' && chars.next_if_eq(&'\\').is_some() {
+                            break;
+                        }
+                    }
+                }
+                _ => {}
+            },
+            '\r' => col = 0,
+            '\n' => {
+                rows.push(row.iter().collect());
+                row.clear();
+                col = 0;
+            }
+            c => {
+                if col < row.len() {
+                    row[col] = c;
+                } else {
+                    row.push(c);
+                }
+                col += 1;
+            }
+        }
+    }
+    rows.push(row.iter().collect());
+    rows.join("\n")
+}
+
+/// A line the task began before taking the screen and ended under it: its
+/// start stays on its row, and the dump, on a line of its own, has the
+/// line whole. Nothing lost, no row erased.
+#[cfg(unix)]
+#[test]
+fn a_line_begun_before_the_take_loses_nothing() {
+    use std::time::Duration;
+    let (mut child, chunks, _dir) = on_a_pty("pretake", None);
+    let status = wait_bounded(&mut child, 60, &chunks);
+    std::thread::sleep(Duration::from_millis(200));
+    let raw: Vec<u8> = chunks.try_iter().flat_map(|(_, b)| b).collect();
+    let text = main_screen(&String::from_utf8_lossy(&raw));
+    assert!(status.success(), "{status:?}: {text}");
+    let rows: Vec<&str> = text.lines().collect();
+    assert!(rows.contains(&"PRETAKE-"), "the start on its row: {text:?}");
+    assert!(
+        text.contains("PRETAKE-INSCREEN\nEND"),
+        "the line whole, then the rest: {text:?}"
+    );
+}
+
+/// A question the task asked under the screen, answered at the prompt the
+/// screen gave the terminal back for: the answer's row stays as typed, and
+/// the release's dump writes the task's line as the files have it, on a row
+/// of its own. Nothing lost, no row erased.
+#[cfg(unix)]
+#[test]
+fn a_question_answered_at_a_prompt_loses_nothing() {
+    use std::io::Write as _;
+    use std::time::Duration;
+    let (mut child, chunks, _dir) = on_a_pty("prompt", None);
+    let mut raw = Vec::new();
+    let start = std::time::Instant::now();
+    while !String::from_utf8_lossy(&raw).contains("QUESTION? ")
+        && start.elapsed() < Duration::from_secs(30)
+    {
+        if let Ok((_, bytes)) = chunks.recv_timeout(Duration::from_millis(20)) {
+            raw.extend(bytes);
+        }
+    }
+    std::thread::sleep(Duration::from_millis(300));
+    pty_master(&child).write_all(b"y\n").unwrap();
+    let status = wait_bounded(&mut child, 60, &chunks);
+    std::thread::sleep(Duration::from_millis(200));
+    for (_, bytes) in chunks.try_iter() {
+        raw.extend(bytes);
+    }
+    let text = main_screen(&String::from_utf8_lossy(&raw));
+    assert!(status.success(), "{status:?}: {text}");
+    // The answer's row as typed, then the task's line as the files have it.
+    assert_eq!(
+        text.matches("QUESTION? y").count(),
+        1,
+        "the answer once: {text:?}"
+    );
+    assert_eq!(text.matches("ANSWERED").count(), 1, "{text:?}");
+    let rows: Vec<&str> = text.lines().filter(|r| !r.is_empty()).collect();
+    assert!(
+        rows.windows(2).all(|w| w[0] != w[1]),
+        "a row twice: {rows:?}"
+    );
+}
+
+/// A line begun before the take, and more lines under the screen than the
+/// dump writes: the note for the lines left out is a line of its own.
+#[cfg(unix)]
+#[test]
+fn the_dumps_older_note_is_a_line_of_its_own() {
+    use std::time::Duration;
+    let (mut child, chunks, _dir) = on_a_pty("pretakeolder", None);
+    let status = wait_bounded(&mut child, 60, &chunks);
+    std::thread::sleep(Duration::from_millis(200));
+    let raw: Vec<u8> = chunks.try_iter().flat_map(|(_, b)| b).collect();
+    let text = main_screen(&String::from_utf8_lossy(&raw));
+    assert!(status.success(), "{status:?}: {text}");
+    assert!(
+        !text.contains("PRETAKE-OLDER"),
+        "the note glued on: {text:?}"
+    );
+    assert!(text.lines().any(|r| r.starts_with("OLDER ")), "{text:?}");
+}
+
+/// A stdout line begun before the take, std's buffer holding it, ended under
+/// the screen: its start out before the dump, the dump with it whole, and
+/// nothing of it after the task's end.
+#[cfg(unix)]
+#[test]
+fn a_buffered_stdout_line_begun_before_the_take_comes_out_in_order() {
+    use std::time::Duration;
+    let (mut child, chunks, _dir) = on_a_pty("pretakeout", None);
+    let status = wait_bounded(&mut child, 60, &chunks);
+    std::thread::sleep(Duration::from_millis(200));
+    let raw: Vec<u8> = chunks.try_iter().flat_map(|(_, b)| b).collect();
+    let text = main_screen(&String::from_utf8_lossy(&raw));
+    assert!(status.success(), "{status:?}: {text}");
+    assert!(text.contains("PRETAKE-INSCREEN"), "{text:?}");
+    let after = text.split("Passed").nth(1).unwrap_or("");
+    assert!(!after.contains("PRETAKE"), "after the end: {text:?}");
+}
+
+/// A secret written in two parts, a Ctrl+Z and `fg` between them (a dump's
+/// mark set with its start unended): redacted in output.log, whole lines as
+/// ever.
+#[cfg(unix)]
+#[test]
+fn a_secret_cut_by_a_suspend_is_redacted_in_the_history() {
+    use std::time::Duration;
+    let secret = "SECRET123XYZ";
+    let (mut child, chunks, dir) = on_a_pty_with_args("secretcut", &[&format!("--token={secret}")]);
+    let mut raw = Vec::new();
+    let start = std::time::Instant::now();
+    while !raw.windows(5).any(|w| w == b"FRAME") && start.elapsed() < Duration::from_secs(30) {
+        if let Ok((_, bytes)) = chunks.recv_timeout(Duration::from_millis(20)) {
+            raw.extend(bytes);
+        }
+    }
+    std::thread::sleep(Duration::from_millis(300));
+    let pid = child.id() as i32;
+    let stopped = || is_stopped(pid);
+    // SAFETY: signals to our own child.
+    unsafe { libc::kill(pid, libc::SIGTSTP) };
+    let asked = std::time::Instant::now();
+    while !stopped() && asked.elapsed() < Duration::from_secs(10) {
+        while chunks.try_recv().is_ok() {}
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let was_stopped = stopped();
+    unsafe { libc::kill(pid, libc::SIGCONT) };
+    let status = wait_bounded(&mut child, 60, &chunks);
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(was_stopped, "stopped on Ctrl+Z before fg");
+    assert!(status.success(), "{status:?}");
+    let log = output_log(dir.path());
+    assert!(log.contains("token="), "{log:?}");
+    assert!(!log.contains(secret), "unredacted: {log:?}");
+}
+
+/// A row the terminal shows a child's unended line on (alone or with the
+/// CLI's) when a screen's dump is written: the dump never erases it, as the
+/// child's start would never be written again.
+#[cfg(unix)]
+#[test]
+fn a_dump_never_erases_a_childs_unended_line() {
+    use std::time::Duration;
+    let cases: [(&str, Option<Stdio>); 5] = [
+        ("childafter", None),
+        ("childfirst", None),
+        ("stdoutpiped", None),
+        ("stdoutpiped", Some(Stdio::null())),
+        ("latedump", None),
+    ];
+    for (task, stdout) in cases {
+        let piped = stdout.is_some();
+        let (mut child, chunks, _dir) = on_a_pty(task, stdout);
+        let status = wait_bounded(&mut child, 60, &chunks);
+        std::thread::sleep(Duration::from_millis(200));
+        let raw: Vec<u8> = chunks.try_iter().flat_map(|(_, b)| b).collect();
+        let text = main_screen(&String::from_utf8_lossy(&raw));
+        assert!(status.success(), "{task}: {status:?}: {text}");
+        assert!(
+            text.contains("CHILD50PCT"),
+            "{task} (stdout piped: {piped}): the child's start erased: {text:?}"
+        );
+    }
+
+    // A child given the CLI's own stderr, and one's stdout through a pipe
+    // to the same terminal: nothing of either erased.
+    for (task, opts, want) in [
+        ("inherit", PtyOpts::default(), "INHERIT50PCT"),
+        (
+            "stdoutcat",
+            PtyOpts {
+                cat: true,
+                ..PtyOpts::default()
+            },
+            "CHILDOUT50PCT",
+        ),
+    ] {
+        let (mut child, chunks, _dir) = on_a_pty_opts(task, opts);
+        let status = wait_bounded(&mut child, 60, &chunks);
+        std::thread::sleep(Duration::from_millis(200));
+        let raw: Vec<u8> = chunks.try_iter().flat_map(|(_, b)| b).collect();
+        let text = main_screen(&String::from_utf8_lossy(&raw));
+        assert!(status.success(), "{task}: {status:?}: {text}");
+        assert!(text.contains(want), "{task}: {want} erased: {text:?}");
+        assert!(text.contains("-CLITAIL"), "{task}: {text:?}");
+    }
+
+    // Stderr a file: the dump writes no escape there, and loses nothing.
+    let files = tempfile::tempdir().expect("temp dir");
+    let err = files.path().join("stderr.txt");
+    let (mut child, chunks, _dir) = on_a_pty_opts(
+        "errfile",
+        PtyOpts {
+            stderr_file: Some(err.clone()),
+            ..PtyOpts::default()
+        },
+    );
+    let status = wait_bounded(&mut child, 60, &chunks);
+    assert!(status.success(), "errfile: {status:?}");
+    let written = std::fs::read_to_string(&err).expect("stderr file");
+    assert!(
+        !written.contains('\x1b'),
+        "an escape in a stderr file: {written:?}"
+    );
+    assert!(
+        written.contains("CLIHEAD-") && written.contains("-CLITAIL"),
+        "{written:?}"
+    );
+}

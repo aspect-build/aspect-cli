@@ -1,0 +1,5 @@
+load(":defs.bzl", "work")
+work(name = "nolabel", msg = "Doing some work", cmd = "echo 'nolabel out' >&2; printf '\\033[31m\\033[1mERROR: \\033[0mheld nolabel' >&2")
+work(name = "deflt", cmd = "echo 'default out' >&2; printf '\\033[31m\\033[1mERROR: \\033[0mheld default' >&2")
+work(name = "withlabel", msg = "Working on %{label}", cmd = "echo 'label out' >&2; printf '\\033[31m\\033[1mERROR: \\033[0mheld withlabel' >&2")
+work(name = "двое", msg = "Working on %{label} and //lp:nolabel", cmd = "echo 'two out' >&2; printf '\\033[31m\\033[1mERROR: \\033[0mheld twolabels' >&2")

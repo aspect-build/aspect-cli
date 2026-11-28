@@ -1,0 +1,35 @@
+[32mComputing main repo mapping:[0m 
+[1A[K[32mLoading:[0m 
+[1A[K[32mLoading:[0m 0 packages loaded
+[1A[K[32mAnalyzing:[0m target //sl:s (0 packages loaded, 0 targets configured)
+[1A[K[32mAnalyzing:[0m target //sl:s (0 packages loaded, 0 targets configured)
+
+[1A[K[1A[K[32mINFO: [0mAnalyzed target //sl:s (0 packages loaded, 0 targets configured).
+
+[1A[K[31m[1mERROR: [0m${WORKSPACE}/sl/BUILD.bazel:2:3: Working failed: (Exit 1): bash failed: error executing W command (from sl rule target //sl:s) /bin/bash -c 'exit 1'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+[32m[1 / 3][0m 2 actions running
+    Working; 0s darwin-sandbox
+    Working; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[32m[2 / 3][0m Working; 0s darwin-sandbox
+[1A[K[31m[1mERROR: [0m${WORKSPACE}/sl/BUILD.bazel:2:3: Working failed: (Exit 1): bash failed: error executing W command (from sl rule target //sl:s) /bin/bash -c 'sleep 0.5; echo '\''loud one broke'\'' >&2; exit 1'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+loud one broke
+[32m[2 / 3][0m Working; 0s darwin-sandbox
+[1A[K[32mINFO: [0mFound 1 target...
+[32m[3 / 3][0m no actions running
+[1A[KTarget //sl:s failed to build
+[32m[3 / 3][0m no actions running
+[1A[KUse --verbose_failures to see the command lines of failed build steps.
+[32m[3 / 3][0m no actions running
+[1A[K[32mINFO: [0mElapsed time: 0.583s, Critical Path: 0.54s
+[32m[3 / 3][0m no actions running
+[1A[K[32mINFO: [0m3 processes: 3 internal.
+[32m[3 / 3][0m no actions running
+[1A[K[31m[1mERROR: [0mBuild did NOT complete successfully
+[31m[1mFAILED:[0m 
+[1A[K[31m[1mFAILED:[0m 
+[1A[K[32mINFO: [0mBuild Event Protocol files produced successfully.
+[0m

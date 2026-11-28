@@ -1,0 +1,72 @@
+"""Unit tests for lib/path_glob.axl.
+
+Run with:
+  aspect dev test-path-glob
+"""
+
+load("./path_glob.axl", "match_any", "match_path")
+
+def _eq(label, got, want):
+    if got != want:
+        fail("%s: got %r, want %r" % (label, got, want))
+
+def _test_segments(_ctx):
+    for pattern, path, want in [
+        ("*.lock", "Cargo.lock", True),
+        ("*.lock", "subdir/Cargo.lock", False),
+        ("vendor/*", "vendor/foo", True),
+        ("vendor/*", "vendor/foo/bar", False),
+        ("vendor/**", "vendor/foo/bar/baz", True),
+        ("vendor/**", "vendor", False),
+        ("vendor/", "vendor", True),
+        ("", "a", False),
+        ("*", "", True),
+        ("?", "ab", False),
+        ("*?", "abcdefghijk", True),
+        ("*b", "aaaaaaaaaab", True),
+        ("a*b?c", "aXbYc", True),
+        ("*.axl", ".axl", True),
+        ("a//b", "a//b", True),
+        ("a//b", "a/b", False),
+    ]:
+        _eq("%r ~ %r" % (pattern, path), match_path(pattern, path), want)
+
+def _test_double_star(_ctx):
+    # A `**` followed by no other matches its tail against the path's last
+    # segments alone; one followed by another tries every split.
+    for pattern, path, want in [
+        ("**/foo", "a/b/foo", True),
+        ("**/foo", "foo", True),
+        ("**/foo", "foo/a", False),
+        ("**/*.bzl", "a/b/defs.bzl", True),
+        ("**/BUILD", "a/BUILD.bazel", False),
+        ("a/**/b", "a/x/y/b", True),
+        ("a/**/b", "a/b", True),
+        ("a/**/b/*.c", "a/q/b/c.c", True),
+        ("a/**/b/*.c", "a/q/b/d/c.c", False),
+        ("**/x/**/y", "q/x/r/s/y", True),
+        ("**/x/**/y", "q/y", False),
+        ("**/x/**/y", "x/y", True),
+        ("**/x/**/x", "x", False),
+        ("**/x/**/x", "q/x/x", True),
+        ("/a/**", "/a/b", True),
+        ("**/testdata/**/*.golden", "crates/c/tests/testdata/failures/uni/9.3.3.golden", True),
+    ]:
+        _eq("%r ~ %r" % (pattern, path), match_path(pattern, path), want)
+    _eq("any of them", match_any(["**/BUILD", "**/*.axl"], "a/b/c.axl"), True)
+
+_UNIT_TESTS = [_test_segments, _test_double_star]
+
+def _test_impl(ctx):
+    for t in _UNIT_TESTS:
+        t(ctx)
+    print("path_glob.axl: OK (%d tests)" % len(_UNIT_TESTS))
+    return 0
+
+path_glob_tests = task(
+    summary = "Run the path glob AXL unit tests.",
+    kind = "test-path-glob",
+    group = ["dev"],
+    implementation = _test_impl,
+    args = {},
+)

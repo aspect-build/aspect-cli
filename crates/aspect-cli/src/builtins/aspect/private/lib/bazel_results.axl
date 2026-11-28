@@ -339,25 +339,30 @@ def local_output_path(file, bb_root, base_dir = "") -> str:
         return (base_dir + "/" + rel) if base_dir else rel
     return uri_to_path_under_root(uri, bb_root)
 
-def testlogs_dir(exec_root, output_dir, label) -> str:
-    """Local testlogs directory for a main-repo test, or "".
+def testlogs_rel(label) -> str:
+    """A test's folder under `testlogs/`: `<pkg>/<name>`, an external
+    repository's test's under `external/<repo>/`; "" for a label it can't
+    read."""
+    repo, sep, rest = (label or "").lstrip("@").partition("//")
+    if not sep or ":" not in rest:
+        return ""
+    pkg, _, name = rest.partition(":")
+    return "/".join((["external", repo] if repo else []) + [p for p in pkg.split("/") if p] + [name])
 
-    `<exec_root>/bazel-out/<output_dir>/testlogs/<pkg>/<name>`, where
-    `output_dir` is the configuration's output directory (`k8-fastbuild`).
-    Bazel reports these outputs as `bytestream://` URIs with no
-    `path_prefix` when it uploads them, so this is the only local handle on a
-    file that is on disk. "" for an external-repo label or a missing input.
-    A sharded, multi-run or retried test's files sit below it; see
+def testlogs_dir(exec_root, output_dir, label) -> str:
+    """Local testlogs directory for a test, or "".
+
+    `<exec_root>/bazel-out/<output_dir>/testlogs/<pkg>/<name>`
+    (`testlogs_rel`), where `output_dir` is the configuration's output
+    directory (`k8-fastbuild`). Bazel reports these outputs as
+    `bytestream://` URIs with no `path_prefix` when it uploads them, so this
+    is the only local handle on a file that is on disk. "" for a missing
+    input. A sharded, multi-run or retried test's files sit below it; see
     `testlog_path`.
     """
-    if not exec_root or not output_dir or not label:
+    rel = testlogs_rel(label)
+    if not exec_root or not output_dir or not rel:
         return ""
-    if label.startswith("@@//") or label.startswith("@//"):
-        label = label[label.index("//"):]
-    if not label.startswith("//") or ":" not in label:
-        return ""
-    pkg, name = label[2:].split(":", 1)
-    rel = (pkg + "/" + name) if pkg else name
     return exec_root + "/bazel-out/" + output_dir + "/testlogs/" + rel
 
 def testlog_path(logs_dir, run, shard, attempt, run_count, shard_count, final, ext) -> str:

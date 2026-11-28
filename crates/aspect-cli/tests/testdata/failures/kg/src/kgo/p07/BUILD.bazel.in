@@ -1,0 +1,1 @@
+genrule(name = "x", outs = ["x.txt"], cmd = "true", bogus_attr_7 = 1)

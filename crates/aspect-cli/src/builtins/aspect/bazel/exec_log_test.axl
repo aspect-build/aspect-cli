@@ -23,7 +23,7 @@ Run with:
   aspect dev test-bazel-exec-log
 """
 
-load("@aspect//bazel/exec_log.axl", "testonly_fire", "testonly_is_exact", "testonly_union_kinds", "testonly_wanted_kinds", "testonly_wants")
+load("@aspect//bazel/exec_log.axl", "testonly_fire", "testonly_is_exact", "testonly_union_file_paths", "testonly_union_kinds", "testonly_wanted_kinds", "testonly_wants")
 load("@aspect//bazel.axl", "BazelTrait", "ExecLogHook", "bazel_exec_log")
 
 def _eq(label, got, want):
@@ -266,6 +266,21 @@ def _test_open_with_disagreeing_hooks_is_not_exact(_ctx):
     h = bazel_exec_log.open(trait)
     _eq("re-check needed", h.exact, False)
 
+def _test_file_paths_narrow_the_files_alone(_ctx):
+    """A hook's `file_paths` keeps the `file` entries whose path holds one;
+    the union is every file once a hook taking files asks for all of them."""
+    noop = lambda _ctx, _entry: None
+    logs = ExecLogHook(on_entry = noop, kinds = ["spawn", "file"], file_paths = ["/testlogs/"])
+    _eq("one hook's paths", testonly_union_file_paths([logs]), ["/testlogs/"])
+    _eq("a hook taking no files asks for none", testonly_union_file_paths([logs, ExecLogHook(on_entry = noop, kinds = ["spawn"])]), ["/testlogs/"])
+    _eq("one taking every file widens it", testonly_union_file_paths([logs, ExecLogHook(on_entry = noop, kinds = ["file"])]), None)
+    _eq("no hook taking files", testonly_union_file_paths([ExecLogHook(on_entry = noop, kinds = ["spawn"])]), None)
+    _eq("exact alone", testonly_is_exact([logs], ["file", "spawn"]), True)
+    _eq("not beside one taking every file", testonly_is_exact([logs, ExecLogHook(on_entry = noop, kinds = ["file", "spawn"])], ["file", "spawn"]), False)
+    _eq("a test's log", testonly_wants(logs, "file", "bazel-out/k8/testlogs/t/test.log"), True)
+    _eq("another file", testonly_wants(logs, "file", "bazel-out/k8/bin/a.o"), False)
+    _eq("a spawn", testonly_wants(logs, "spawn"), True)
+
 def _test_pump_and_close_are_noops_without_a_handle(ctx):
     """Every call site calls both unconditionally, so neither may care whether a
     hook was registered."""
@@ -297,6 +312,7 @@ _UNIT_TESTS = [
     _test_open_is_fresh_per_call,
     _test_open_with_disagreeing_hooks_is_not_exact,
     _test_pump_and_close_are_noops_without_a_handle,
+    _test_file_paths_narrow_the_files_alone,
 ]
 
 def _test_impl(ctx: TaskContext) -> int:

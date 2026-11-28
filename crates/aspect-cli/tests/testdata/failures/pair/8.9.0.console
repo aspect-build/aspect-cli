@@ -1,0 +1,101 @@
+[32mComputing main repo mapping:[0m 
+[1A[K[32mLoading:[0m 
+[1A[K[32mLoading:[0m 0 packages loaded
+[1A[K[32mAnalyzing:[0m 4 targets (0 packages loaded, 0 targets configured)
+[1A[K[32mAnalyzing:[0m 4 targets (0 packages loaded, 0 targets configured)
+[32m[0 / 1][0m checking cached actions
+[1A[K[1A[K[32mINFO: [0mAnalyzed 4 targets (0 packages loaded, 0 targets configured).
+[32m[0 / 1][0m [Prepa] BazelWorkspaceStatusAction stable-status.txt
+[1A[K[31m[1mERROR: [0m${WORKSPACE}/pair/BUILD.bazel:5:5: Generating two for //pair:same failed: (Exit 3): bash failed: error executing Gen command (from target //pair:same) /bin/bash -c 'echo '\''identical text'\'' >&2; exit 3'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+identical text
+[32m[1 / 9][0m 8 actions running
+    Generating two for //pair:crlf; 0s darwin-sandbox
+    Generating two for //pair:same; 0s darwin-sandbox
+    Generating one for //pair:ansi; 0s darwin-sandbox
+    Generating one for //pair:crlf; 0s darwin-sandbox
+    Generating two for //pair:ansi; 0s darwin-sandbox
+    Generating two for //pair:plain; 0s darwin-sandbox
+    Generating one for //pair:same; 0s darwin-sandbox
+    Generating one for //pair:plain; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/pair/BUILD.bazel:2:5: Generating one for //pair:plain failed: (Exit 2): bash failed: error executing Gen command (from target //pair:plain) /bin/bash -c 'echo '\''plain one broke'\'' >&2; exit 2'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+plain one broke
+[32m[2 / 9][0m 7 actions running
+    Generating two for //pair:crlf; 0s darwin-sandbox
+    Generating one for //pair:ansi; 0s darwin-sandbox
+    Generating one for //pair:crlf; 0s darwin-sandbox
+    Generating two for //pair:ansi; 0s darwin-sandbox
+    Generating two for //pair:plain; 0s darwin-sandbox
+    Generating one for //pair:same; 0s darwin-sandbox
+    Generating one for //pair:plain; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/pair/BUILD.bazel:4:5: Generating two for //pair:crlf failed: (Exit 3): bash failed: error executing Gen command (from target //pair:crlf) /bin/bash -c 'printf '\''crlf two broke\r\n'\'' >&2; exit 3'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+crlf two broke
+[32m[3 / 9][0m 6 actions running
+    Generating two for //pair:crlf; 0s darwin-sandbox
+    Generating one for //pair:ansi; 0s darwin-sandbox
+    Generating one for //pair:crlf; 0s darwin-sandbox
+    Generating two for //pair:ansi; 0s darwin-sandbox
+    Generating two for //pair:plain; 0s darwin-sandbox
+    Generating one for //pair:same; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/pair/BUILD.bazel:3:5: Generating two for //pair:ansi failed: (Exit 3): bash failed: error executing Gen command (from target //pair:ansi) /bin/bash -c 'printf '\''\033[31merror:\033[0m ansi two broke\n'\'' >&2; exit 3'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+[31merror:[0m ansi two broke
+[32m[4 / 9][0m 5 actions running
+    Generating one for //pair:ansi; 0s darwin-sandbox
+    Generating one for //pair:crlf; 0s darwin-sandbox
+    Generating two for //pair:ansi; 0s darwin-sandbox
+    Generating two for //pair:plain; 0s darwin-sandbox
+    Generating one for //pair:same; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[32m[5 / 9][0m 4 actions running
+    Generating one for //pair:ansi; 0s darwin-sandbox
+    Generating one for //pair:crlf; 0s darwin-sandbox
+    Generating two for //pair:plain; 0s darwin-sandbox
+    Generating one for //pair:same; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/pair/BUILD.bazel:2:5: Generating two for //pair:plain failed: (Exit 3): bash failed: error executing Gen command (from target //pair:plain) /bin/bash -c 'sleep 1; echo '\''plain two broke'\'' >&2; exit 3'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+plain two broke
+[32m[5 / 9][0m 4 actions running
+    Generating one for //pair:ansi; 1s darwin-sandbox
+    Generating one for //pair:crlf; 1s darwin-sandbox
+    Generating two for //pair:plain; 1s darwin-sandbox
+    Generating one for //pair:same; 1s darwin-sandbox
+[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/pair/BUILD.bazel:4:5: Generating one for //pair:crlf failed: (Exit 2): bash failed: error executing Gen command (from target //pair:crlf) /bin/bash -c 'sleep 1; printf '\''crlf one broke\r\n'\'' >&2; exit 2'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+crlf one broke
+[32m[6 / 9][0m 3 actions running
+    Generating one for //pair:ansi; 1s darwin-sandbox
+    Generating one for //pair:crlf; 1s darwin-sandbox
+    Generating one for //pair:same; 1s darwin-sandbox
+[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/pair/BUILD.bazel:3:5: Generating one for //pair:ansi failed: (Exit 2): bash failed: error executing Gen command (from target //pair:ansi) /bin/bash -c 'sleep 1; printf '\''\033[31merror:\033[0m ansi one broke\n'\'' >&2; exit 2'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+[31merror:[0m ansi one broke
+[32m[7 / 9][0m 2 actions running
+    Generating one for //pair:ansi; 1s darwin-sandbox
+    Generating one for //pair:same; 1s darwin-sandbox
+[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/pair/BUILD.bazel:5:5: Generating one for //pair:same failed: (Exit 2): bash failed: error executing Gen command (from target //pair:same) /bin/bash -c 'sleep 1; echo '\''identical text'\'' >&2; exit 2'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+identical text
+[32m[8 / 9][0m Generating one for //pair:same; 1s darwin-sandbox
+[1A[K[32mINFO: [0mFound 4 targets...
+[32m[9 / 9][0m no actions running
+[1A[KUse --verbose_failures to see the command lines of failed build steps.
+[32m[9 / 9][0m no actions running
+[1A[K[32mINFO: [0mElapsed time: 1.097s, Critical Path: 1.04s
+[32m[9 / 9][0m no actions running
+[1A[K[32mINFO: [0m9 processes: 9 internal.
+[32m[9 / 9][0m no actions running
+[1A[K[31m[1mERROR: [0mBuild did NOT complete successfully
+[31m[1mFAILED:[0m 
+[1A[K[31m[1mFAILED:[0m 
+[1A[K[32mINFO: [0mBuild Event Protocol files produced successfully.
+[0m

@@ -73,7 +73,8 @@ A task with its own preset starts from it alone, without `templates`;
 The runtime does the rendering: it reads these args after `config.axl` runs
 and before the header prints. Bazel's own output, warnings and errors, and
 stdout are never templated, and nor is the end of Bazel's console (the
-recap and what was hidden): it prints under every preset. A tip's first
+failure summary and what was hidden): it prints under every preset, `compact`
+and `agent` included. A tip's first
 line is the `tip` slot, `TIP[id] suggestion: title`; `emoji` and `silent`
 add the severity's emoji (`TIP[id] 💡 suggestion: title`), and a template
 that renders blank hides the tip:
@@ -111,7 +112,20 @@ It puts `default_stages` from `@aspect//bazel/console.axl` on
 `BazelTrait.output_stages`:
 - paths are made relative;
 - the first warning of each kind is shown and the rest are counted at the end;
-- errors that scrolled away are repeated;
+- every failure Bazel's build events report is listed at the end, under
+  `── Failures (N) ──`, an entry each, in groups: the targets' (a root whose
+  analysis or loading failed, a missing source), the failed actions, the
+  tests. An entry is its heading (`✗ //pkg:t  Genrule · exit 1 ·
+  pkg/BUILD.bazel:3:8`), then, for the first five, an excerpt of what the
+  tool said behind a `│` (a test's from its failed attempt's `test.log`),
+  its log's path and the targets it blocked. Past `--console:recap-max`
+  entries (10) the heading says `first 10 of 14` and the rest are counted.
+  Bazel's `ERROR:` lines that tie to no entry exactly are listed under
+  `── Other errors from Bazel ──`, on a passing build too. Every build
+  then ends with one line of counts (`193 built, 1 failed · 47 tests
+  passed, 2 failed · Bazel's raw log: <path>`) and `All of it: aspect
+  history show <id>`. Under the Dashboard the summary goes to the
+  scrollback only, when the screen is left;
 - a run of identical lines, an action's output included, shows as its first
   and a count, but never Bazel's progress or status lines;
 - a tip is given for failures we recognize: the tip rules of
@@ -126,9 +140,9 @@ terminal), with how many messages were hidden and, for each kind collapsed, a
 file beside the log holding all of them. They are kept and pruned with the
 rest of the history.
 
-On a terminal, the URLs in Bazel's console and the recap, and the paths that
-name a file that exists (`src/a.cc:3:4` links to `src/a.cc` at line 3), are
-links to open it in an editor too, unless a coding agent is reading it, it is a CI
+On a terminal, the URLs in Bazel's console and the failure summary, and the
+paths that name a file that exists (`src/a.cc:3:4` links to `src/a.cc` at
+line 3), are links to open it in an editor too, unless a coding agent is reading it, it is a CI
 job's, or `TERM` is `dumb`. What a path's link opens is `file_hyperlink_format`:
 your own choice is `"editor": "cursor"` in `~/.aspect/config.json` (or
 `ASPECT_FILE_HYPERLINK_FORMAT=cursor` in your shell's profile), which beats a
@@ -210,10 +224,16 @@ load("@aspect//bazel/console.axl", "PROFILES", "RECAP_MAX", "STAGE_NAMES", "cons
 load("@aspect//bazel.axl", "BazelTrait")
 load("@aspect//tips.axl", "TipsTrait")
 load("../private/lib/agent.axl", "under_agent")
+load("../private/lib/bazel_results.axl", "bb_clientd_root")
 load("../private/lib/environment.axl", "warn")
+load("../private/lib/failure_records.axl", "failure_records")
+load("../private/lib/failures.axl", "failures")
 load("../private/lib/task_template_args.axl", "TASK_PRESET_PRECEDENCE", "task_template_args")
+load("../private/lib/term_text.axl", "term_text")
 
 def _console_impl(ctx: FeatureContext):
+    if ctx.args.recap_max < 1:
+        ctx.std.process.exit(1, "--console:recap-max=%d: the most failures the summary lists must be 1 or more" % ctx.args.recap_max)
     profile = ctx.args.profile
     if profile == "auto":
         profile = "agent" if under_agent(ctx.std) else "human"
@@ -225,11 +245,16 @@ def _console_impl(ctx: FeatureContext):
         recap_max = ctx.args.recap_max,
         root = lambda: ctx.std.env.bazel_root_dir(),
         cwd = lambda: ctx.std.env.current_dir(),
+        summary = True,
     )
     for problem in got.problems:
         warn(ctx.std, "--console: " + problem)
     trait = ctx.traits[BazelTrait]
     trait.output_stages.extend(got.stages)
+
+    # What the failure summary ties Bazel's lines from, whichever of the
+    # console's stages are on.
+    trait.output_stages.append(bazel.output.collect_errors())
 
     # The tip rules are read as each build starts and ends, not now: a feature
     # whose implementation runs after this one may still append some.
@@ -255,6 +280,43 @@ def _console_impl(ctx: FeatureContext):
         emit_tips(task_ctx, build, console_tip_rules(tips.rules), batch = str(builds[0]))
 
     trait.output_end.append(_emit_tips)
+
+    # The failure summary at the end of each build's console: every failure
+    # once with what Bazel said of it, the counts, Bazel's raw log and where
+    # the rest is. Not under the Dashboard (`output_display` `none`), which
+    # shows failures in its own tab and puts the summary in the scrollback.
+    summary = [None]
+
+    def _fresh(task_ctx):
+        return failure_records.new_state(task_ctx.std.fs.try_read_tail, bb_clientd_root(task_ctx.std.env), task_ctx.std.re.compile(term_text.ANSI))
+
+    def _collect(task_ctx, event):
+        if event.kind == "build_started" or summary[0] == None:
+            summary[0] = _fresh(task_ctx)
+        failure_records.collect_event(summary[0], event)
+
+    # The summary lists as many failures as the recap would repeat errors,
+    # with or without the Dashboard.
+    trait.failure_summary_max = ctx.args.recap_max
+
+    def _summarize(task_ctx, build):
+        if trait.output_display == "none":
+            return
+        state = summary[0] or _fresh(task_ctx)
+        state["build"] = build
+        state["collected_errors"] = build.output_collected_errors()
+        state["cancelling"] = task_ctx.cancellation.root.cancelled
+        err = task_ctx.std.io.stderr
+        size = task_ctx.std.term.size() if err.is_tty else None
+        for line in failures.failure_summary(state, task_ctx.task.id, err.is_tty, build.output_log or "", task_ctx.std.io.linked, task_ctx.std.excerpt, size[0] if size else 100, build.exit_code, max_entries = trait.failure_summary_max):
+            err.write(line + "\n")
+        summary[0] = None
+
+    trait.build_event.append(_collect)
+
+    # Ahead of the tips the build's end emits, so the summary follows
+    # Bazel's own end.
+    trait.output_end.insert(0, _summarize)
     if got.display != "auto" and trait.output_display == "auto":
         trait.output_display = got.display
     if not got.progress:
@@ -356,7 +418,7 @@ Console = feature(
         ),
         "recap_max": args.int(
             default = RECAP_MAX,
-            description = "How many of Bazel's errors to repeat at the end of the console, once they have scrolled away.",
+            description = "How many failures the end-of-build summary lists, and of Bazel's other errors, 1 or more; the rest are counted (`aspect history show` has all).",
         ),
         "collapse": args.string_list(
             description = "A regex; Bazel messages whose first line it matches collapse into the first of them, whatever their severity. Never matches action or test output, nor the `INFO: From …` header above it. Repeat for several.",

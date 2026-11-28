@@ -1,0 +1,34 @@
+[32mComputing main repo mapping:[0m 
+[1A[K[32mLoading:[0m 
+[1A[K[32mLoading:[0m 0 packages loaded
+[1A[K[32mAnalyzing:[0m 3 targets (0 packages loaded, 0 targets configured)
+[1A[K[31m[1mERROR: [0mno such package 'nowhere': BUILD file not found in any of the following directories. Add a BUILD file to a directory to mark it as a package.
+ - nowhere
+[32mAnalyzing:[0m 3 targets (0 packages loaded, 0 targets configured)
+
+[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/an/BUILD.bazel:3:8: no such package 'nowhere': BUILD file not found in any of the following directories. Add a BUILD file to a directory to mark it as a package.
+ - nowhere and referenced by '//an:badlabel'
+[32mAnalyzing:[0m 3 targets (0 packages loaded, 0 targets configured)
+
+[1A[K[1A[K[32mINFO: [0mAnalyzed 3 targets (0 packages loaded, 0 targets configured).
+[32m[0 / 1][0m [Prepa] BazelWorkspaceStatusAction stable-status.txt
+[1A[K[31m[1mERROR: [0m${WORKSPACE}/an/BUILD.bazel:1:8: Executing genrule //an:missing failed: missing input file '//an:nope.txt'
+[32m[0 / 3][0m [Prepa] BazelWorkspaceStatusAction stable-status.txt
+[1A[K[31m[1mERROR: [0m${WORKSPACE}/an/BUILD.bazel:1:8: Executing genrule //an:missing failed: 1 input file(s) do not exist
+[32m[1 / 3][0m checking cached actions
+[1A[K[35mWARNING: [0merrors encountered while analyzing target '//an:badlabel', it will not be built.
+Analysis failed
+[32m[3 / 3][0m no actions running
+[1A[K[32mINFO: [0mFound 2 targets...
+[32m[3 / 3][0m no actions running
+[1A[KUse --verbose_failures to see the command lines of failed build steps.
+[32m[3 / 3][0m no actions running
+[1A[K[32mINFO: [0mElapsed time: 0.042s, Critical Path: 0.00s
+[32m[3 / 3][0m no actions running
+[1A[K[32mINFO: [0m1 process: 1 internal.
+[32m[3 / 3][0m no actions running
+[1A[K[31m[1mERROR: [0mBuild did NOT complete successfully
+[31m[1mFAILED:[0m 
+[1A[K[31m[1mFAILED:[0m 
+[1A[K[32mINFO: [0mBuild Event Protocol files produced successfully.
+[0m

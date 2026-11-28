@@ -1,0 +1,8 @@
+def _impl(ctx):
+    outs = []
+    for name, cmd in [("one", ctx.attr.first), ("two", ctx.attr.second)]:
+        o = ctx.actions.declare_file(ctx.label.name + "." + name)
+        ctx.actions.run_shell(outputs = [o], command = cmd, progress_message = "Generating " + name + " for %{label}", mnemonic = "Gen")
+        outs.append(o)
+    return [DefaultInfo(files = depset(outs))]
+pair = rule(implementation = _impl, attrs = {"first": attr.string(), "second": attr.string()})

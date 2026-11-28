@@ -1,0 +1,11 @@
+load(":defs.bzl", "two")
+two(name = "c", cmds = [
+    "echo 'error: x' >&2; exit 1",
+    "sleep 0.5; echo 'error: x is bad' >&2; exit 1",
+])
+two(name = "d", cmds = [
+    "echo 'same line' >&2; exit 2",
+    "sleep 0.5; echo 'same line' >&2; exit 2",
+])
+genrule(name = "g1", outs = ["g1.txt"], cmd = "echo 'error: shared' >&2; exit 1")
+genrule(name = "g2", outs = ["g2.txt"], cmd = "echo 'error: shared' >&2; exit 1")

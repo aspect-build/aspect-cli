@@ -1,0 +1,23 @@
+exit 3
+── Failures (3) ──
+✗ //t:fail  test · failed 1 of 1 attempt
+  │ FAIL: always broken
+  log ${OUTPUT_BASE}/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t/fail/test.log
+
+✗ //t:rpt  test · run 2 of 3 · failed 1 of 1 attempt
+  │ rpt run failed
+  log ${OUTPUT_BASE}/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t/rpt/run_2_of_3/test.log
+
+✗ //t:shard  test · shard 2 of 3 · failed 1 of 1 attempt
+  │ shard 1
+  log ${OUTPUT_BASE}/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t/shard/shard_2_of_3/test.log
+5 built, 0 failed · 1 test passed, 3 failed, 1 flaky · Bazel's raw log: ${FIXTURE}/8.9.0.noall.console
+All of it: aspect history show t-replay
+--- Failures tab
+✗ //t:fail  test · failed 1 of 1 attempt
+  │ FAIL: always broken
+✗ //t:rpt  test · run 2 of 3 · failed 1 of 1 attempt
+  │ rpt run failed
+✗ //t:shard  test · shard 2 of 3 · failed 1 of 1 attempt
+  │ shard 1
+~ //t:flaky  test · failed 1 of 2 attempts · flaky, passed on a later attempt

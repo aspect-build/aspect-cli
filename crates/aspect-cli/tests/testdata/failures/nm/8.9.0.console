@@ -1,0 +1,41 @@
+[32mComputing main repo mapping:[0m 
+[1A[K[32mLoading:[0m 
+[1A[K[32mLoading:[0m 0 packages loaded
+[1A[K[31m[1mERROR: [0mTraceback (most recent call last):
+	File "${WORKSPACE}/nm/BUILD.bazel", line 2, column 6, in <toplevel>
+		outer(name = "m")
+	File "${WORKSPACE}/nm/defs.bzl", line 4, column 10, in outer
+		inner(name = name + "_i")
+	File "${WORKSPACE}/nm/defs.bzl", line 2, column 9, in inner
+		fail("inner refuses " + name)
+Error in fail: inner refuses m_i
+[32mLoading:[0m 0 packages loaded
+[1A[K[31m[1mERROR: [0mpackage contains errors: nm: Traceback (most recent call last):
+	File "${WORKSPACE}/nm/BUILD.bazel", line 2, column 6, in <toplevel>
+		outer(name = "m")
+	File "${WORKSPACE}/nm/defs.bzl", line 4, column 10, in outer
+		inner(name = name + "_i")
+	File "${WORKSPACE}/nm/defs.bzl", line 2, column 9, in inner
+		fail("inner refuses " + name)
+Error in fail: inner refuses m_i
+[32mLoading:[0m 0 packages loaded
+[1A[K[32mAnalyzing:[0m 0 targets (0 packages loaded, 0 targets configured)
+[1A[K[32mAnalyzing:[0m 0 targets (0 packages loaded, 0 targets configured)
+
+[1A[K[1A[K[32mINFO: [0mFound 0 targets...
+[32mAnalyzing:[0m 0 targets (0 packages loaded, 0 targets configured)
+
+[1A[K[1A[K[31m[1mERROR: [0mcommand succeeded, but there were errors parsing the target pattern
+[32mAnalyzing:[0m 0 targets (0 packages loaded, 0 targets configured)
+
+[1A[K[1A[K[32mINFO: [0mElapsed time: 0.038s, Critical Path: 0.00s
+[32mAnalyzing:[0m 0 targets (0 packages loaded, 0 targets configured)
+
+[1A[K[1A[K[32mINFO: [0m1 process: 1 internal.
+[32mAnalyzing:[0m 0 targets (0 packages loaded, 0 targets configured)
+
+[1A[K[1A[K[31m[1mERROR: [0mBuild did NOT complete successfully
+[31m[1mFAILED:[0m 
+[1A[K[31m[1mFAILED:[0m 
+[1A[K[32mINFO: [0mBuild Event Protocol files produced successfully.
+[0m

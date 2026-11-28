@@ -17,17 +17,36 @@
 
 mod common;
 
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufRead, BufReader};
 use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
-use common::{aspect_cli, base_env, basil_bin};
+use common::{aspect_cli, base_env, basil_bin, describe};
+
+/// How long a fixture may take to say it is ready: past a minute under a
+/// whole-repo `bazel test` on a laptop, where every CLI of a binary stalled
+/// at once and then went on.
+const READY_WITHIN: Duration = Duration::from_secs(120);
+
+/// How long a fixture may take to end once signalled.
+const END_WITHIN: Duration = Duration::from_secs(60);
+
+/// Kill `pid` and everything under it, the children first, as a test that
+/// gives up on a run leaves nothing behind.
+fn kill_tree(pid: u32) {
+    for p in common::descendants(pid).into_iter().rev() {
+        unsafe { libc::kill(p as libc::pid_t, libc::SIGKILL) };
+    }
+    unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+}
 
 /// A fixture task running in a scratch workspace.
 struct Run {
     _dir: tempfile::TempDir,
     child: Child,
-    stderr: BufReader<std::process::ChildStderr>,
+    /// Stderr's lines, read on a thread, so a wait for one has a deadline.
+    stderr: Receiver<String>,
     /// What the task printed before the signal, including the `ready` line.
     seen: String,
 }
@@ -84,20 +103,40 @@ impl Run {
             .stderr(Stdio::piped())
             .spawn()
             .expect("spawn aspect-cli");
-        let mut stderr = BufReader::new(child.stderr.take().expect("piped stderr"));
-        let mut seen = String::new();
-        let deadline = Instant::now() + Duration::from_secs(60);
-        loop {
-            let mut line = String::new();
-            let n = stderr.read_line(&mut line).expect("reading stderr");
-            seen.push_str(&line);
-            if n == 0 || line.contains("ready") {
-                break;
+        let mut pipe = BufReader::new(child.stderr.take().expect("piped stderr"));
+        let (lines, stderr) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            loop {
+                let mut line = String::new();
+                match pipe.read_line(&mut line) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {
+                        if lines.send(line).is_err() {
+                            break;
+                        }
+                    }
+                }
             }
-            assert!(
-                Instant::now() < deadline,
-                "the fixture never became ready:\n{seen}"
-            );
+        });
+        let mut seen = String::new();
+        let started = Instant::now();
+        loop {
+            let left = READY_WITHIN.saturating_sub(started.elapsed());
+            match stderr.recv_timeout(left) {
+                Ok(line) => {
+                    seen.push_str(&line);
+                    if line.contains("ready") {
+                        break;
+                    }
+                }
+                Err(RecvTimeoutError::Disconnected) => break,
+                Err(RecvTimeoutError::Timeout) => {
+                    let doing = describe(child.id());
+                    kill_tree(child.id());
+                    let _ = child.wait();
+                    panic!("the fixture never became ready in {READY_WITHIN:?}:\n{seen}\n{doing}");
+                }
+            }
         }
         assert!(seen.contains("ready"), "the fixture exited early:\n{seen}");
         Self {
@@ -124,14 +163,40 @@ impl Run {
         assert_eq!(rc, 0, "signalling aspect-cli");
     }
 
-    /// Read the rest of stderr and reap the CLI.
+    /// Read the rest of stderr and reap the CLI, within [`END_WITHIN`]: past
+    /// it, say what the CLI and its children were doing, kill them, and fail.
     fn finish(mut self) -> (ExitStatus, String) {
+        let deadline = Instant::now() + END_WITHIN;
         let mut rest = String::new();
-        self.stderr
-            .read_to_string(&mut rest)
-            .expect("draining stderr");
-        let status = self.child.wait().expect("waiting for aspect-cli");
-        (status, format!("{}{rest}", self.seen))
+        loop {
+            match self
+                .stderr
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            {
+                Ok(line) => rest.push_str(&line),
+                Err(RecvTimeoutError::Disconnected) => break,
+                Err(RecvTimeoutError::Timeout) => self.give_up(&rest),
+            }
+        }
+        loop {
+            if let Some(status) = self.child.try_wait().expect("waiting for aspect-cli") {
+                return (status, format!("{}{rest}", self.seen));
+            }
+            if Instant::now() >= deadline {
+                self.give_up(&rest);
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    fn give_up(&mut self, rest: &str) -> ! {
+        let doing = describe(self.child.id());
+        kill_tree(self.child.id());
+        let _ = self.child.wait();
+        panic!(
+            "the run did not end in {END_WITHIN:?}:\n{}{rest}\n{doing}",
+            self.seen
+        );
     }
 }
 
@@ -675,4 +740,45 @@ fn a_tool_a_signal_ends_ends_the_task_with_its_shell_code() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(output.status.code(), Some(128 + 9), "{stderr}");
     assert!(!stderr.contains("Traceback"), "{stderr}");
+}
+
+/// A task whose post-task hook is still running when Ctrl+C comes: the body
+/// had ended with 0.
+const HOOKED: &str = r#"
+load("@std//time.axl", "sleep")
+
+def _slow(ctx, outcome):
+    print("ready")
+    sleep(3000)
+
+def _impl(ctx):
+    ctx.hooks.post_task(_slow)
+    return 0
+
+hooked = task(summary = "Test fixture.", implementation = _impl)
+"#;
+
+/// Ctrl+C during a post-task hook, after the body has ended, changes no
+/// outcome: the task exits 0 and its record says it was not cancelled.
+#[test]
+fn a_signal_during_a_post_task_hook_leaves_the_outcome_alone() {
+    let run = Run::start(HOOKED, "hooked");
+    let given = run._dir.path().to_path_buf();
+    let here = std::fs::canonicalize(&given).expect("canonical");
+    run.signal(libc::SIGINT);
+    let (status, stderr) = run.finish();
+    assert_eq!(status.code(), Some(0), "{stderr}");
+    let record = std::fs::read_dir(common::test_history_dir())
+        .expect("the test's history")
+        .flatten()
+        .filter_map(|e| std::fs::read_to_string(e.path().join("task.json")).ok())
+        .filter_map(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+        .find(|t| {
+            t["cwd"].as_str().is_some_and(|c| {
+                std::path::Path::new(c) == here || std::path::Path::new(c) == given
+            })
+        })
+        .unwrap_or_else(|| panic!("no record for {here:?}"));
+    assert_eq!(record["exit_code"], 0, "{record}");
+    assert_eq!(record["cancelled"], false, "{record}");
 }

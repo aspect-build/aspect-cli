@@ -1,0 +1,30 @@
+ ⠋ aspect build · 12s                                                           3 of 9 actions done
+┌─ Keys · ↑↓ PgUp PgDn scroll · any other key closes ──────────────────────────────────────────────┐
+│ Scroll                                                                                           │
+│   ↑ ↓  k j             scroll a line; in a list, choose                                          │
+│   ⇧↑↓ ⌥↑↓  u d  ^U ^D  scroll half a page (macOS Terminal sends ⇧↑↓ as ↑↓)                       │
+│   PgUp PgDn  Space b   scroll a page (PgUp/PgDn are Fn+↑↓ on a Mac)                              │
+│   wheel                scroll                                                                    │
+│   K  J                 the top; the end, following the newest (Home, End too)                    │
+│ Search                                                                                           │
+│   /  ^F                find: jumps to the newest match; n the next one down, N the previous, ro… │
+│     Tab                in the bar: filter to the matches instead, and back                       │
+│     ^T  ^B             in the bar: match case (else a capital does), whole words                 │
+│     ^W                 in the bar: delete a word                                                 │
+│     ^U  Enter  Esc     in the bar: clear; keep and close; clear and go back                      │
+│   e                    every line, errors and warnings, errors only                              │
+│ Screen                                                                                           │
+│   ^L                   redraw the screen                                                         │
+│   1-5                  a tab: console, failures, metrics, invocation, tips                       │
+│   Tab  ⇧Tab            the next or previous tab: console, failures, metrics, invocation, tips (… │
+│   p                    the build panes open or folded, and back                                  │
+│   drag                 select, and copy on release                                               │
+│   click                a file's link shows the file here (o: in your editor); a web link opens;… │
+│   click a fold         an INFO: From or its +N count: show or fold its lines (^O all)            │
+│   ?                    these keys                                                                │
+│   o  O                 open the log (or the task's output) in your editor; pick the editor       │
+│   w                    wrap long lines (the default), or cut them at the edge                    │
+│   ^O                   show the lines under each INFO: From (a successful action's output, fold… │
+│ … 33 more: ↓                                                                                     │
+└──────────────────────────────────────────────────────────────────────────────────────────────────┘
+ ↑↓ PgUp PgDn scroll · any other key closes

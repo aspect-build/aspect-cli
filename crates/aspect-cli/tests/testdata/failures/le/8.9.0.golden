@@ -1,0 +1,25 @@
+exit 1
+── Failures (2) ──
+✗ //le/sub:nothere  loading · q/BUILD.bazel:2:8
+  │ no such target '//le/sub:nothere': target 'nothere' not declared in package 'le/sub' defined by
+  │   le/sub/BUILD.bazel
+  ○ blocked: //q:on_sub
+
+✗ //le:x  loading · q/BUILD.bazel:1:8
+  │ no such target '//le:x': target 'x' not declared in package 'le' defined by le/BUILD.bazel
+  ○ blocked: //q:on_le
+
+── Other errors from Bazel ──
+ERROR: le/BUILD.bazel:2:1: syntax error at 'newline': expected ,
+ERROR: package contains errors: le: syntax error at 'newline': expected ,
+0 built, 2 failed, 2 blocked · 0 tests passed, 0 failed · Bazel's raw log: ${FIXTURE}/8.9.0.console
+All of it: aspect history show t-replay
+--- Failures tab
+✗ //le/sub:nothere  loading · q/BUILD.bazel:2:8
+  │ no such target '//le/sub:nothere': target 'nothere' not declared in package 'le/sub' defined by le/sub/BUILD.bazel
+✗ //le:x  loading · q/BUILD.bazel:1:8
+  │ no such target '//le:x': target 'x' not declared in package 'le' defined by le/BUILD.bazel
+○ //q:on_sub  blocked by //le/sub:nothere
+○ //q:on_le  blocked by //le:x
+! le/BUILD.bazel:2:1: syntax error at 'newline': expected ,
+! package contains errors: le: syntax error at 'newline': expected ,

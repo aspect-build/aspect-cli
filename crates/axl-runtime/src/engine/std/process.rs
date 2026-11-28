@@ -1,3 +1,15 @@
+//! `ctx.std.process`: the child processes a task spawns.
+//!
+//! A stream the task does not set is the runtime's. An unmarked child reads
+//! `/dev/null` and has its stdout and stderr piped through the CLI, flushed
+//! as they come and copied to the task's output a line at a time; while a
+//! full screen holds the terminal it has no controlling terminal either. One
+//! marked `interactive(True)` gets the terminal, when there is one, and a
+//! line before and after it in the task's output. A process that should
+//! outlive the CLI sets its own stdout and stderr and leads its own group
+//! (`process_group(0)`); one backgrounded by an unmarked child keeps its pipe,
+//! and dies when it writes once the CLI, after a bounded wait, has gone.
+
 use std::cell::{Cell, RefCell};
 use std::process;
 use std::process::Stdio;
@@ -70,6 +82,11 @@ pub(crate) fn process_methods(registry: &mut MethodsBuilder) {
         Ok(Command {
             inner: RefCell::new(process::Command::new(program.as_str())),
             process_group: Cell::new(None),
+            interactive: Cell::new(false),
+            chosen: Cell::new(Chosen::default()),
+            added_env: RefCell::new(vec![]),
+            no_tty: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            pre_exec_set: Cell::new(false),
         })
     }
 
@@ -138,6 +155,32 @@ pub(crate) fn process_methods(registry: &mut MethodsBuilder) {
     }
 }
 
+/// Force colour on (`FORCE_COLOR`, `CLICOLOR_FORCE`) for one spawn of
+/// `cmd`, or take back what an earlier one forced. `added` lists the
+/// variables the runtime owns on `cmd`: set or removed by it, never by the
+/// task since (the task's `.env()` drops a variable from it), so a removal of
+/// the runtime's own is no task's choice and a later spawn forces it again.
+/// The task's values, and what the CLI inherited, are kept.
+fn set_colour(cmd: &mut process::Command, added: &mut Vec<String>, colour: bool) {
+    for var in ["FORCE_COLOR", "CLICOLOR_FORCE"] {
+        let ours = added.iter().any(|a| a == var);
+        let theirs = !ours
+            && (cmd.get_envs().any(|(k, _)| k.to_string_lossy() == var)
+                || std::env::var_os(var).is_some());
+        if theirs {
+            continue;
+        }
+        if colour {
+            cmd.env(var, "1");
+            if !ours {
+                added.push(var.to_string());
+            }
+        } else if ours {
+            cmd.env_remove(var);
+        }
+    }
+}
+
 #[derive(Debug, Display, Trace, ProvidesStaticType, NoSerialize, Allocative)]
 #[display("<std.process.Command>")]
 pub struct Command {
@@ -145,17 +188,151 @@ pub struct Command {
     inner: RefCell<process::Command>,
     #[allocative(skip)]
     process_group: Cell<Option<i32>>,
+    /// Marked `interactive(True)`: given the real terminal (see [`Command::try_spawn`]).
+    #[allocative(skip)]
+    interactive: Cell<bool>,
+    /// Which of its streams the task chose itself.
+    #[allocative(skip)]
+    chosen: Cell<Chosen>,
+    /// The colour variables a spawn added, for the next to take back.
+    #[allocative(skip)]
+    added_env: RefCell<Vec<String>>,
+    /// Whether this spawn drops the controlling terminal, read by the one
+    /// `pre_exec` closure the command gets ([`Command::unmarked`]).
+    #[allocative(skip)]
+    no_tty: Arc<std::sync::atomic::AtomicBool>,
+    #[allocative(skip)]
+    pre_exec_set: Cell<bool>,
+}
+
+/// How an unmarked child's output reaches the CLI ([`forward`]).
+enum Forward {
+    /// Its stdout and stderr in one pipe, the CLI's two being one file.
+    Merged(std::io::PipeReader),
+    /// Whether its stdout, and its stderr, are piped apart.
+    Each(bool, bool),
+}
+
+/// Which of a command's streams the task set (`stdin()`, `stdout()`,
+/// `stderr()`); the others are the runtime's to choose.
+#[derive(Debug, Clone, Copy, Default)]
+struct Chosen {
+    stdin: bool,
+    stdout: bool,
+    stderr: bool,
 }
 
 impl Command {
-    /// Wrap a command the runtime assembled. With `own_group` the child is
-    /// spawned as the leader of a new process group, so stopping it stops
-    /// everything it started.
+    /// Wrap a command the runtime assembled (a runnable's), spawned by the
+    /// same rules as any other. With `own_group` the child is spawned as the
+    /// leader of a new process group, so stopping it stops everything it
+    /// started.
     pub(crate) fn from_std(inner: process::Command, own_group: bool) -> Self {
         Self {
             inner: RefCell::new(inner),
             process_group: Cell::new(own_group.then_some(0)),
+            interactive: Cell::new(false),
+            chosen: Cell::new(Chosen::default()),
+            added_env: RefCell::new(vec![]),
+            no_tty: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            pre_exec_set: Cell::new(false),
         }
+    }
+
+    /// Set, for this spawn, what the task left to the runtime: every stream
+    /// it did not choose, the colour variables and whether the child drops
+    /// the controlling terminal, so a reused command keeps nothing of the
+    /// last spawn. An interactive child inherits the CLI's stdin, stdout and
+    /// stderr. An unmarked one reads `/dev/null`, has its stdout and stderr
+    /// piped (one pipe for both when the CLI's are one file, their order
+    /// kept), colour forced on (`FORCE_COLOR`, `CLICOLOR_FORCE`) when its
+    /// stdout reaches a colour terminal through the CLI unless the task set
+    /// them or the CLI inherited them, and while a full screen holds the
+    /// terminal, no controlling terminal.
+    fn streams(&self, interactive: bool) -> anyhow::Result<Forward> {
+        let chosen = self.chosen.get();
+        let mut cmd = self.inner.borrow_mut();
+        let forward = if interactive {
+            for (set, which) in [(chosen.stdin, 0), (chosen.stdout, 1), (chosen.stderr, 2)] {
+                if !set {
+                    match which {
+                        0 => cmd.stdin(Stdio::inherit()),
+                        1 => cmd.stdout(Stdio::inherit()),
+                        _ => cmd.stderr(Stdio::inherit()),
+                    };
+                }
+            }
+            Forward::Each(false, false)
+        } else {
+            if !chosen.stdin {
+                cmd.stdin(Stdio::null());
+            }
+            let merged = !chosen.stdout
+                && !chosen.stderr
+                && bazel::console::capture::stdout_is_stderrs_file();
+            if merged {
+                let (read, write) = std::io::pipe()?;
+                cmd.stdout(write.try_clone()?);
+                cmd.stderr(write);
+                Forward::Merged(read)
+            } else {
+                if !chosen.stdout {
+                    cmd.stdout(Stdio::piped());
+                }
+                if !chosen.stderr {
+                    cmd.stderr(Stdio::piped());
+                }
+                Forward::Each(!chosen.stdout, !chosen.stderr)
+            }
+        };
+
+        // Colour as the stream the child's stdout reaches through the CLI
+        // shows it; the task's own values, and what the CLI inherited, kept.
+        let colour = !interactive && !chosen.stdout && crate::color::stdout_supports_color();
+        set_colour(&mut cmd, &mut self.added_env.borrow_mut(), colour);
+
+        // One closure for the command's life, which reads at each fork
+        // whether this spawn drops the terminal.
+        #[cfg(unix)]
+        {
+            self.no_tty.store(
+                !interactive && crate::engine::std::term::screen_holds_terminal(),
+                std::sync::atomic::Ordering::SeqCst,
+            );
+            if !self.pre_exec_set.replace(true) {
+                let no_tty = self.no_tty.clone();
+                // SAFETY: only async-signal-safe calls between fork and exec.
+                // Dropping the controlling terminal leaves the process groups
+                // as they are, so cancellation reaches the child as before.
+                unsafe {
+                    cmd.pre_exec(move || {
+                        if no_tty.load(std::sync::atomic::Ordering::SeqCst) {
+                            let fd =
+                                libc::open(c"/dev/tty".as_ptr(), libc::O_RDWR | libc::O_NOCTTY);
+                            if fd >= 0 {
+                                libc::ioctl(fd, libc::TIOCNOTTY as _);
+                                libc::close(fd);
+                            }
+                        }
+                        Ok(())
+                    });
+                }
+            }
+        }
+        Ok(forward)
+    }
+
+    /// The command for a marker line: its executable's name only, as an
+    /// error names it ([`Command::describe`]); its arguments may hold a
+    /// credential any tool takes its own way.
+    fn summary(&self) -> String {
+        let cmd = self.inner.borrow();
+        let program = std::path::Path::new(cmd.get_program());
+        program
+            .file_name()
+            .unwrap_or(program.as_os_str())
+            .to_string_lossy()
+            .into_owned()
     }
 
     /// Only the executable is safe to include in errors: arguments and
@@ -179,6 +356,33 @@ impl Command {
             Some(token) => token.inner().clone(),
             None => signals.default_binding(),
         };
+        // An interactive child is the terminal's while it runs, in the CLI's
+        // own group, which the shell has in the foreground: Ctrl+Z, `fg` and
+        // `bg` are the shell's as for the CLI. One leading its own group is
+        // not in the foreground; a process meant to outlive the CLI is not
+        // interactive.
+        if self.interactive.get() && self.process_group.get().is_some() {
+            return Err(anyhow!(
+                "command {}: `interactive(True)` runs the child in the CLI's own process group, so it cannot take `process_group(...)`; a process meant to outlive the CLI sets its own stdout and stderr instead",
+                self.describe()
+            ));
+        }
+        // Interactive only where there is a terminal to give it: without one
+        // (CI) it runs as any other child, piped and copied.
+        let interactive = self.interactive.get() && has_terminal();
+        let plan = self.streams(interactive)?;
+        let marked = interactive.then(|| {
+            let summary = self.summary();
+            crate::errln!(
+                "{}",
+                marker_line(&format!("{summary} runs interactively"), false)
+            );
+            (
+                summary,
+                std::time::Instant::now(),
+                crate::engine::std::term::suspend(),
+            )
+        });
         // The spawn's borrow of `inner` ends with this statement, before
         // `describe` borrows it again for the error.
         let spawned = children::spawn(
@@ -188,11 +392,43 @@ impl Command {
             self.process_group.get(),
             children::Kind::Process,
         );
-        let (child, bound) =
-            spawned.map_err(|e| anyhow!("failed to spawn command {}: {}", self.describe(), e))?;
+        if let Forward::Merged(_) = plan {
+            // The command's own copies of the pipe's write end, closed so its
+            // reader ends with the child's.
+            let mut cmd = self.inner.borrow_mut();
+            cmd.stdout(Stdio::null());
+            cmd.stderr(Stdio::null());
+        }
+        let (mut child, bound) = match spawned {
+            Ok(spawned) => spawned,
+            Err(e) => {
+                if marked.as_ref().is_some_and(|(_, _, suspended)| *suspended) {
+                    crate::engine::std::term::resume();
+                }
+                return Err(anyhow!(
+                    "failed to spawn command {}: {}",
+                    self.describe(),
+                    e
+                ));
+            }
+        };
+        let mut forwarders = vec![];
+        match plan {
+            Forward::Merged(read) => forwarders.push(forward(read, true)),
+            Forward::Each(out, err) => {
+                if out && let Some(pipe) = child.stdout.take() {
+                    forwarders.push(forward(pipe, false));
+                }
+                if err && let Some(pipe) = child.stderr.take() {
+                    forwarders.push(forward(pipe, true));
+                }
+            }
+        }
         Ok(Child {
             inner: RefCell::new(Some(child)),
             bound,
+            forwarders: RefCell::new(forwarders),
+            interactive: RefCell::new(marked),
         })
     }
 
@@ -207,6 +443,217 @@ impl Command {
             .map_err(|e| anyhow!("failed to execute command {}: {}", self.describe(), e))?
             .ok_or_else(|| anyhow!("a wait without a timeout reports a status"))
     }
+}
+
+/// A muted `▹ text` line, as the console's updates are, in `error` for one
+/// saying something failed; plain without colour.
+fn marker_line(text: &str, failed: bool) -> String {
+    let palette = crate::color::console_supports_color().then(crate::theme::of_process);
+    let sgr = palette
+        .map(|p| p.sgr(if failed { "error" } else { "muted" }))
+        .unwrap_or_default();
+    if sgr.is_empty() {
+        format!("▹ {text}")
+    } else {
+        format!("{sgr}▹ {text}{}", aspect_theme::RESET)
+    }
+}
+
+/// Whether the CLI has a terminal to give an interactive child: stdin and
+/// stdout both one (through a full screen's capture, the screen's).
+fn has_terminal() -> bool {
+    use std::io::IsTerminal;
+    std::io::stdin().is_terminal() && crate::engine::stdout_is_terminal()
+}
+
+/// A thread passing a child's output on ([`forward`]).
+struct Forwarder {
+    handle: std::thread::JoinHandle<()>,
+    activity: Arc<Activity>,
+}
+
+/// What a [`forward`] thread is doing, for a wait deciding whether the
+/// child's output has all been passed on.
+#[derive(Default)]
+struct Activity {
+    /// Writing what it read: a slow reader is progress.
+    busy: std::sync::atomic::AtomicBool,
+    /// When it last read, in ms of [`Activity::now`].
+    read_ms: std::sync::atomic::AtomicU64,
+}
+
+impl Activity {
+    fn now() -> u64 {
+        static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+        START
+            .get_or_init(std::time::Instant::now)
+            .elapsed()
+            .as_millis() as u64
+    }
+
+    /// Neither writing nor having read for `grace`, counted from `since`
+    /// (the reap) at the earliest: what the child wrote before it exited is
+    /// in the pipe by then, so a quiet pipe after it is a grandchild's.
+    fn quiet_since(&self, since: u64, grace: Duration) -> bool {
+        use std::sync::atomic::Ordering::SeqCst;
+        let last = self.read_ms.load(SeqCst).max(since);
+        !self.busy.load(SeqCst) && Self::now().saturating_sub(last) >= grace.as_millis() as u64
+    }
+}
+
+/// How long a pipe stays quiet, after its child is reaped, before its wait
+/// stops waiting on it: a grandchild holding it, writing nothing.
+const FORWARD_GRACE: Duration = Duration::from_millis(250);
+
+impl std::fmt::Debug for Forwarder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Forwarder")
+    }
+}
+
+/// Forwarders a wait left running, a grandchild holding the pipe: finished
+/// at the CLI's exit ([`finish_forwarders`]).
+static LEFT: std::sync::Mutex<Vec<std::thread::JoinHandle<()>>> = std::sync::Mutex::new(Vec::new());
+
+/// How long the output of a child that has exited is passed on before what
+/// is left is let go: after its wait (a backgrounded grandchild holding the
+/// pipe, writing or not), and again at the CLI's exit.
+pub const FORWARD_BOUND: Duration = Duration::from_secs(2);
+
+/// Let the forwarders a wait left running finish, for [`FORWARD_BOUND`] at
+/// most: at the CLI's exit, so what they read reaches the terminal and
+/// output.log.
+pub fn finish_forwarders() {
+    let deadline = std::time::Instant::now() + FORWARD_BOUND;
+    let left = std::mem::take(&mut *LEFT.lock().unwrap());
+    for f in left {
+        while !f.is_finished() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+}
+
+/// The longest unended line a forwarder holds back from the output files.
+const MAX_FORWARD_LINE: usize = 64 * 1024;
+
+/// Pass what a child writes to `pipe` on to the CLI's stderr (or stdout),
+/// flushed as it comes, a partial line (a progress line) as soon as nothing
+/// more is waiting in the pipe,
+/// and copied to the task's output a whole line at a time (an unended one
+/// held back, up to [`MAX_FORWARD_LINE`], ended at the pipe's end), so it
+/// never lands inside the CLI's own line. While a full screen holds the
+/// terminal it goes into the screen's capture instead, whole lines too, so
+/// neither its console nor the output files splice it with the CLI's. A
+/// stream that takes no more (a closed pipe, `| head -1`) ends it and closes
+/// `pipe`, so the child's next write fails, as it would have written there
+/// itself.
+///
+/// - A screen takes whole lines (a line begun before it was taken, from its
+///   start); without one, what comes is shown as it comes, never while a
+///   screen is being released.
+/// - The route is decided, and a screen fed, under the order lock, which a
+///   release holds while it replays; a write to the terminal is made after,
+///   without it, so a stream nobody reads holds up only this child's
+///   output. A line fed to the screen is copied to the output under the
+///   same lock, so a release, which holds it for its dump, has it.
+/// - An unended tail waits while more is already there to read: it is shown
+///   once the child goes quiet (a progress line), so a flood leaves its
+///   stream at a line's end.
+fn forward(
+    mut pipe: impl std::io::Read + std::os::fd::AsRawFd + Send + 'static,
+    stderr: bool,
+) -> Forwarder {
+    use std::sync::atomic::Ordering::SeqCst;
+    let activity = Arc::new(Activity::default());
+    let mine = activity.clone();
+    let handle = std::thread::spawn(move || {
+        let mut buf = [0u8; 8192];
+        // Not yet copied; its first `shown` bytes written out already.
+        let mut line = Vec::new();
+        let mut shown = 0;
+        // Whether a show of the line being gathered went into a screen's
+        // capture, which copies it: then this forwarder does not.
+        let mut captured = false;
+        let show = |bytes: &[u8]| crate::engine::std::term::write_std_unit(stderr, bytes);
+        loop {
+            match pipe.read(&mut buf) {
+                Ok(0) => break,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => break,
+                Ok(n) => {
+                    mine.busy.store(true, SeqCst);
+                    mine.read_ms.store(Activity::now(), SeqCst);
+                    line.extend_from_slice(&buf[..n]);
+                    let whole = line
+                        .iter()
+                        .rposition(|&b| b == b'\n')
+                        .map(|end| end + 1)
+                        .or((line.len() > MAX_FORWARD_LINE).then_some(line.len()));
+                    let mut copied = false;
+                    let fed = crate::engine::std::term::forwarding(stderr, || {
+                        let fed = crate::engine::std::term::feed_screen(
+                            stderr,
+                            &line[..whole.unwrap_or(0)],
+                            shown,
+                        );
+                        if fed
+                            && let Some(end) = whole
+                            && !captured
+                        {
+                            crate::out::copy_only(&line[..end]);
+                            copied = true;
+                        }
+                        fed
+                    });
+                    let upto = if crate::engine::std::term::pipe_readable(
+                        pipe.as_raw_fd(),
+                        Duration::ZERO,
+                    ) {
+                        whole.unwrap_or(0).max(shown)
+                    } else {
+                        line.len()
+                    };
+                    let written = if fed || upto == shown {
+                        Ok(())
+                    } else {
+                        let r = show(&line[shown..upto]);
+                        shown = upto;
+                        r.map(|into_capture| captured |= into_capture)
+                    };
+                    if let Some(end) = whole {
+                        if !captured && !copied {
+                            crate::out::copy_only(&line[..end]);
+                        }
+                        captured = false;
+                        line.drain(..end);
+                        shown = shown.saturating_sub(end);
+                    }
+                    mine.busy.store(false, SeqCst);
+                    if written.is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+        if !line.is_empty() {
+            let mut ended = line.clone();
+            ended.push(b'\n');
+            let fed = crate::engine::std::term::forwarding(stderr, || {
+                let fed = crate::engine::std::term::feed_screen(stderr, &ended, shown);
+                if fed && !captured {
+                    crate::out::copy_only(&ended);
+                }
+                fed
+            });
+            if !fed && let Ok(into_capture) = show(&line[shown..]) {
+                captured |= into_capture;
+            }
+            if !fed && !captured {
+                crate::out::copy_only(&ended);
+            }
+        }
+    });
+    Forwarder { handle, activity }
 }
 
 impl<'v> AllocValue<'v> for Command {
@@ -279,6 +726,7 @@ pub(crate) fn command_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = pos)] value: NoneOr<values::StringValue>,
     ) -> anyhow::Result<values::Value<'v>> {
         let cmd = this.downcast_ref_err::<Command>().into_anyhow_result()?;
+        cmd.added_env.borrow_mut().retain(|a| a != key.as_str());
         match value {
             NoneOr::None => cmd.inner.borrow_mut().env_remove(key.as_str()),
             NoneOr::Other(v) => cmd.inner.borrow_mut().env(key.as_str(), v.as_str()),
@@ -315,15 +763,42 @@ pub(crate) fn command_methods(registry: &mut MethodsBuilder) {
         Ok(this)
     }
 
+    /// Mark the child interactive: it may prompt, so it gets the real
+    /// terminal on stdin, stdout and stderr. While a full screen (the
+    /// Dashboard) holds the terminal, the screen is given back for it as
+    /// it starts and taken again as its wait ends. Its output is then the
+    /// terminal's alone: a muted `▹ <program> runs interactively` line and
+    /// `▹ … ran interactively (exit N, 1.2s); its output is in the
+    /// terminal` after it are what the task's output keeps. An unmarked
+    /// child has no terminal: stdin from `/dev/null`, stdout and stderr
+    /// piped through the CLI (copied to the task's output, then passed on),
+    /// and while a full screen holds the terminal, no controlling terminal
+    /// either, so a surprise prompt fails rather than hangs. Mark a spawn
+    /// interactive if it may prompt. It runs in the CLI's own process group,
+    /// which the shell has in the foreground, so it cannot also take
+    /// `process_group(...)`: spawning both fails.
+    fn interactive<'v>(
+        this: values::Value<'v>,
+        #[starlark(require = pos)] on: bool,
+    ) -> anyhow::Result<values::Value<'v>> {
+        let cmd = this.downcast_ref_err::<Command>().into_anyhow_result()?;
+        cmd.interactive.set(on);
+        Ok(this)
+    }
+
     /// Configuration for the child process's standard input (stdin) handle.
     ///
-    /// Defaults to [`inherit`] when used with [`spawn`] or [`status`], and
-    /// defaults to [`piped`] when used with [`output`].
+    /// Unset, it is `"null"`, or for a child marked `interactive(True)` on a
+    /// terminal, `"inherit"`.
     fn stdin<'v>(
         this: values::Value<'v>,
         #[starlark(require = pos)] io: values::StringValue,
     ) -> anyhow::Result<values::Value<'v>> {
         let cmd = this.downcast_ref_err::<Command>().into_anyhow_result()?;
+        cmd.chosen.set(Chosen {
+            stdin: true,
+            ..cmd.chosen.get()
+        });
         match io.as_str() {
             "null" => cmd.inner.borrow_mut().stdin(Stdio::null()),
             "piped" => cmd.inner.borrow_mut().stdin(Stdio::piped()),
@@ -335,8 +810,11 @@ pub(crate) fn command_methods(registry: &mut MethodsBuilder) {
 
     /// Configuration for the child process's standard output (stdout) handle.
     ///
-    /// Defaults to [`inherit`] when used with [`spawn`] or [`status`], and
-    /// defaults to [`piped`] when used with [`output`].
+    /// Unset, it is piped through the CLI (copied to the task's output, then
+    /// passed on to the CLI's own), or for a child marked `interactive(True)`
+    /// on a terminal, `"inherit"`. A process that should outlive the CLI sets
+    /// it (a file, `"null"` or `"inherit"`): a piped one dies when it writes
+    /// once the CLI has gone.
     ///
     /// Accepts the strings `"null"`, `"piped"`, `"inherit"`, or a writable file
     /// stream from `fs.create(...)` to redirect output straight to that file —
@@ -347,14 +825,21 @@ pub(crate) fn command_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = pos)] io: Either<values::StringValue<'v>, stream::Writable>,
     ) -> anyhow::Result<values::Value<'v>> {
         let cmd = this.downcast_ref_err::<Command>().into_anyhow_result()?;
+        cmd.chosen.set(Chosen {
+            stdout: true,
+            ..cmd.chosen.get()
+        });
         cmd.inner.borrow_mut().stdout(stdio_from(io, "stdout")?);
         Ok(this)
     }
 
     /// Configuration for the child process's standard error (stderr) handle.
     ///
-    /// Defaults to [`inherit`] when used with [`spawn`] or [`status`], and
-    /// defaults to [`piped`] when used with [`output`].
+    /// Unset, it is piped through the CLI (copied to the task's output, then
+    /// passed on to the CLI's own), or for a child marked `interactive(True)`
+    /// on a terminal, `"inherit"`. A process that should outlive the CLI sets
+    /// it (a file, `"null"` or `"inherit"`): a piped one dies when it writes
+    /// once the CLI has gone.
     ///
     /// Accepts the same values as [`stdout`].
     fn stderr<'v>(
@@ -362,13 +847,20 @@ pub(crate) fn command_methods(registry: &mut MethodsBuilder) {
         #[starlark(require = pos)] io: Either<values::StringValue<'v>, stream::Writable>,
     ) -> anyhow::Result<values::Value<'v>> {
         let cmd = this.downcast_ref_err::<Command>().into_anyhow_result()?;
+        cmd.chosen.set(Chosen {
+            stderr: true,
+            ..cmd.chosen.get()
+        });
         cmd.inner.borrow_mut().stderr(stdio_from(io, "stderr")?);
         Ok(this)
     }
 
     /// Executes the command as a child process, returning a handle to it.
     ///
-    /// By default, stdin, stdout and stderr are inherited from the parent.
+    /// Stdin, stdout and stderr the task did not set are the runtime's: see
+    /// [`interactive`] and [`stdin`]/[`stdout`]/[`stderr`]. A process that
+    /// should outlive the CLI sets its stdout and stderr and leads its own
+    /// group (`process_group(0)`), so a Ctrl+C on the CLI does not reach it.
     ///
     /// The child is bound to `cancellation`, `ctx.cancellation.root` unless
     /// given: when that token is cancelled (Ctrl+C for the root) the child is
@@ -389,7 +881,7 @@ pub(crate) fn command_methods(registry: &mut MethodsBuilder) {
 
     /// Executes a command as a child process, waiting for it to finish and collecting its status.
     ///
-    /// By default, stdin, stdout and stderr are inherited from the parent.
+    /// Its streams are chosen as for [`spawn`].
     /// The child is bound to `cancellation` as in [`spawn`], and the wait
     /// ends the task if the root is cancelled meanwhile.
     fn status<'v>(
@@ -398,6 +890,13 @@ pub(crate) fn command_methods(registry: &mut MethodsBuilder) {
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<ExitStatus> {
         let cmd = this.downcast_ref_err::<Command>().into_anyhow_result()?;
+        if crate::engine::task_hooks::has_idle(eval) {
+            let child = cmd.try_spawn(&Env::from_eval(eval)?.signals, cancellation)?;
+            let status = child
+                .wait_idle(None, eval)?
+                .ok_or_else(|| anyhow!("a wait without a timeout reports a status"))?;
+            return Ok(ExitStatus(status));
+        }
         let status = cmd.try_status(&Env::from_eval(eval)?.signals, cancellation)?;
         Ok(ExitStatus(status))
     }
@@ -411,6 +910,14 @@ pub struct Child {
     /// The child's binding to its cancellation token; `child.cancellation`.
     #[allocative(skip)]
     bound: Bound,
+    /// The threads passing on its piped stdout and stderr ([`forward`]).
+    #[allocative(skip)]
+    forwarders: RefCell<Vec<Forwarder>>,
+
+    /// An interactive child's command, start, and whether it suspended a
+    /// screen: for the line after it, and to take the screen again.
+    #[allocative(skip)]
+    interactive: RefCell<Option<(String, std::time::Instant, bool)>>,
 }
 
 impl Child {
@@ -420,14 +927,89 @@ impl Child {
         Self {
             inner: RefCell::new(Some(child)),
             bound,
+            forwarders: RefCell::new(vec![]),
+            interactive: RefCell::new(None),
         }
     }
 
     /// Wait for the child to exit, a safe point: once the root is cancelled
     /// the task's exit comes back instead. `Ok(None)` when `timeout` passes
-    /// first.
+    /// first. Once it has exited, what it wrote is passed on in full, and an
+    /// interactive one's screen taken again and its line written.
     fn wait(&self, timeout: Option<Duration>) -> std::io::Result<Option<process::ExitStatus>> {
-        children::wait(&self.inner, &self.bound, timeout)
+        let status = children::wait(&self.inner, &self.bound, timeout)?;
+        if let Some(status) = &status {
+            self.ended(status);
+        }
+        Ok(status)
+    }
+
+    /// What follows the child's exit: its output passed on, and an
+    /// interactive one's screen back and the line after it.
+    fn ended(&self, status: &process::ExitStatus) {
+        // Its output passed on until its pipes end, a pipe still open (a
+        // grandchild holding it) until it has been quiet for [`FORWARD_GRACE`]
+        // since the reap, for [`FORWARD_BOUND`] at most, or until the wait is
+        // cancelled; what is left is finished at exit.
+        let reaped = Activity::now();
+        let deadline = std::time::Instant::now() + FORWARD_BOUND;
+        for f in self.forwarders.borrow_mut().drain(..) {
+            while !f.handle.is_finished()
+                && std::time::Instant::now() < deadline
+                && !f.activity.quiet_since(reaped, FORWARD_GRACE)
+                && !self.bound.token().is_cancelled()
+            {
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            if f.handle.is_finished() {
+                let _ = f.handle.join();
+            } else {
+                LEFT.lock().unwrap().push(f.handle);
+            }
+        }
+        if let Some((summary, started, suspended)) = self.interactive.borrow_mut().take() {
+            if suspended {
+                crate::engine::std::term::resume();
+            }
+            let code = status
+                .code()
+                .map_or_else(|| "signal".to_string(), |c| c.to_string());
+            let took = started.elapsed();
+            let text = format!(
+                "{summary} ran interactively (exit {code}, {}.{}s); its output is in the terminal",
+                took.as_secs(),
+                took.subsec_millis() / 100
+            );
+            crate::errln!("{}", marker_line(&text, !status.success()));
+        }
+    }
+
+    /// [`Child::wait`], running the task's idle hooks every
+    /// [`IDLE_EVERY`](crate::engine::task_hooks::IDLE_EVERY) meanwhile when
+    /// it has any.
+    fn wait_idle<'v>(
+        &self,
+        timeout: Option<Duration>,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> std::io::Result<Option<process::ExitStatus>> {
+        use crate::engine::task_hooks::{IDLE_EVERY, has_idle, idle};
+        if !has_idle(eval) {
+            return self.wait(timeout);
+        }
+        let deadline = timeout.map(|t| std::time::Instant::now() + t);
+        loop {
+            let slice = deadline.map_or(IDLE_EVERY, |d| {
+                d.saturating_duration_since(std::time::Instant::now())
+                    .min(IDLE_EVERY)
+            });
+            if let Some(status) = self.wait(Some(slice))? {
+                return Ok(Some(status));
+            }
+            if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                return Ok(None);
+            }
+            idle(eval);
+        }
     }
 
     /// [`Child::wait`], for runtime code outside this module.
@@ -597,11 +1179,15 @@ pub(crate) fn child_methods(registry: &mut MethodsBuilder) {
     ///
     /// The wait ends the task instead if `ctx.cancellation.root` is
     /// cancelled meanwhile and no `intercept()` is in effect; the child is
-    /// already stopping by then.
-    fn wait<'v>(this: values::Value<'v>) -> anyhow::Result<ExitStatus> {
+    /// already stopping by then. The task's idle hooks (`ctx.hooks.idle`)
+    /// run meanwhile, as in every wait on a child.
+    fn wait<'v>(
+        this: values::Value<'v>,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<ExitStatus> {
         let child = this.downcast_ref_err::<Child>().into_anyhow_result()?;
         child
-            .wait(None)?
+            .wait_idle(None, eval)?
             .map(ExitStatus)
             .ok_or_else(|| anyhow!("a wait without a timeout reports a status"))
     }
@@ -617,8 +1203,9 @@ pub(crate) fn child_methods(registry: &mut MethodsBuilder) {
     fn try_wait<'v>(
         this: values::Value<'v>,
         #[starlark(require = named, default = 0)] timeout_ms: i32,
-        heap: values::Heap<'v>,
+        eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<values::Value<'v>> {
+        let heap = eval.heap();
         let child = this.downcast_ref_err::<Child>().into_anyhow_result()?;
         if timeout_ms < 0 {
             anyhow::bail!("timeout_ms must not be negative: {timeout_ms}");
@@ -628,9 +1215,13 @@ pub(crate) fn child_methods(registry: &mut MethodsBuilder) {
             let inner = inner
                 .as_mut()
                 .ok_or(anyhow::anyhow!("child is no longer active"))?;
-            children::try_wait(inner, &child.bound)?
+            let status = children::try_wait(inner, &child.bound)?;
+            if let Some(status) = &status {
+                child.ended(status);
+            }
+            status
         } else {
-            child.wait(Some(Duration::from_millis(timeout_ms as u64)))?
+            child.wait_idle(Some(Duration::from_millis(timeout_ms as u64)), eval)?
         };
         Ok(match status {
             None => values::Value::new_none(),
@@ -650,17 +1241,26 @@ pub(crate) fn child_methods(registry: &mut MethodsBuilder) {
     /// child does not block waiting for input from the parent, while
     /// the parent waits for the child to exit.
     ///
-    /// By default, stdin, stdout and stderr are inherited from the parent.
-    /// In order to capture the output into this `Result<Output>` it is
-    /// necessary to create new pipes between parent and child. Use
-    /// `stdout('piped')` or `stderr('piped')`, respectively.
-    fn wait_with_output<'v>(this: values::Value<'v>) -> anyhow::Result<Output> {
+    /// A stream the task did not set is passed on through the CLI, not
+    /// collected: to collect it into this `Output`, set `stdout('piped')` or
+    /// `stderr('piped')`.
+    fn wait_with_output<'v>(
+        this: values::Value<'v>,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<Output> {
+        use crate::engine::task_hooks::{IDLE_EVERY, has_idle, idle};
         let child = this.downcast_ref_err::<Child>().into_anyhow_result()?;
         let inner = child
             .inner
             .replace(None)
             .ok_or(anyhow::anyhow!("child is no longer active"))?;
-        Ok(Output(children::wait_with_output(inner, &child.bound)?))
+        let output = if has_idle(eval) {
+            children::wait_with_output_while(inner, &child.bound, IDLE_EVERY, || idle(eval))?
+        } else {
+            children::wait_with_output(inner, &child.bound)?
+        };
+        child.ended(&output.status);
+        Ok(Output(output))
     }
 }
 
@@ -782,12 +1382,173 @@ pub(crate) fn output_methods(registry: &mut MethodsBuilder) {
 mod tests {
     use super::*;
 
+    /// A task's run of `script` under `sh`, as `command(...)` spawns it,
+    /// `chain` appended to the command; what the script wrote to its file.
+    fn run_child(script: &str, chain: &str) -> String {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("out");
+        let path = path.display();
+        let result = crate::test::eval(&format!(
+            r#"
+def _impl(ctx):
+    ctx.std.process.command("sh").args(["-c", """{script}""", "sh", "{path}"]){chain}.spawn().wait()
+    return 0
+
+t = task(implementation = _impl)
+"#
+        ))
+        .run_task(0);
+        assert_eq!(result.expect("run_task"), Some(0));
+        std::fs::read_to_string(dir.path().join("out")).unwrap_or_default()
+    }
+
+    /// An unmarked child reads no terminal: stdin is `/dev/null`, at its end
+    /// at once.
+    #[test]
+    fn an_unmarked_child_reads_dev_null() {
+        let got = run_child(
+            r#"if [ -t 0 ]; then echo tty; else echo notty; fi > "$1"; if read x; then echo read >> "$1"; else echo eof >> "$1"; fi"#,
+            "",
+        );
+        assert_eq!(got, "notty\neof\n");
+    }
+
+    /// A grandchild still holding the pipe does not hold the child's wait:
+    /// once the child exits its output is waited on only briefly.
+    #[test]
+    fn a_grandchild_holding_the_pipe_does_not_hold_the_wait() {
+        let started = std::time::Instant::now();
+        let got = run_child(r#"sleep 5 & echo started > $1"#, "");
+        assert_eq!(got, "started\n");
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "{:?}",
+            started.elapsed()
+        );
+    }
+
+    /// A grandchild that keeps writing holds the child's wait for
+    /// `FORWARD_BOUND` at most: the task moves on.
+    #[test]
+    fn a_chatty_grandchild_holds_the_wait_for_the_bound_at_most() {
+        let started = std::time::Instant::now();
+        let got = run_child(
+            r#"(i=0; while [ $i -lt 50 ]; do echo x; sleep 0.2; i=$((i+1)); done) & echo started > $1"#,
+            "",
+        );
+        assert_eq!(got, "started\n");
+        assert!(
+            started.elapsed() < FORWARD_BOUND + Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
+        );
+    }
+
+    /// An interactive child runs in the CLI's own group: one asked to lead
+    /// its own is refused at spawn, saying why.
+    #[test]
+    fn interactive_and_a_process_group_are_refused() {
+        let result = crate::test::eval(
+            r#"
+def _impl(ctx):
+    ctx.std.process.command("true").interactive(True).process_group(0).spawn().wait()
+    return 0
+
+t = task(implementation = _impl)
+"#,
+        )
+        .run_task(0);
+        let err = format!("{:#}", result.expect_err("refused"));
+        assert!(err.contains("cannot take `process_group(...)`"), "{err}");
+    }
+
+    /// A command spawned twice decides each spawn afresh, its exit polled
+    /// with `try_wait` as well as waited.
+    #[test]
+    fn a_reused_command_spawns_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("out");
+        let path = path.display();
+        let result = crate::test::eval(&format!(
+            r#"
+load("@std//time.axl", "sleep")
+
+def _impl(ctx):
+    cmd = ctx.std.process.command("sh").args(["-c", "echo x >> $1", "sh", "{path}"])
+    cmd.spawn().wait()
+    child = cmd.spawn()
+    for _ in range(1000):
+        if child.try_wait() != None:
+            break
+        sleep(5)
+    return 0
+
+t = task(implementation = _impl)
+"#
+        ))
+        .run_task(0);
+        assert_eq!(result.expect("run_task"), Some(0));
+        let got = std::fs::read_to_string(dir.path().join("out")).unwrap();
+        assert_eq!(got, "x\nx\n");
+    }
+
+    /// Colour forced, taken back, then forced again on one command: the
+    /// runtime's own removal is no task's choice. A task's own setting
+    /// after it is kept.
+    #[test]
+    fn colour_comes_back_on_a_reused_command() {
+        let forced = |cmd: &process::Command| {
+            cmd.get_envs()
+                .find(|(k, _)| *k == "FORCE_COLOR")
+                .and_then(|(_, v)| v)
+                .map(|v| v.to_string_lossy().into_owned())
+        };
+        let mut cmd = process::Command::new("true");
+        let mut added = vec![];
+        if std::env::var_os("FORCE_COLOR").is_some() {
+            return;
+        }
+        set_colour(&mut cmd, &mut added, true);
+        assert_eq!(forced(&cmd).as_deref(), Some("1"));
+        set_colour(&mut cmd, &mut added, false);
+        assert_eq!(forced(&cmd), None);
+        set_colour(&mut cmd, &mut added, true);
+        assert_eq!(forced(&cmd).as_deref(), Some("1"), "forced again");
+        added.retain(|a| a != "FORCE_COLOR");
+        cmd.env("FORCE_COLOR", "0");
+        set_colour(&mut cmd, &mut added, true);
+        assert_eq!(forced(&cmd).as_deref(), Some("0"), "the task's own kept");
+    }
+
+    /// A task's own `FORCE_COLOR` is the child's, never overridden.
+    #[test]
+    fn a_tasks_own_force_color_is_kept() {
+        let got = run_child(r#"echo "$FORCE_COLOR" > $1"#, r#".env("FORCE_COLOR", "0")"#);
+        assert_eq!(got, "0\n");
+    }
+
+    /// An interactive child's marker names only its executable: an argument
+    /// may hold a credential.
+    #[test]
+    fn a_marker_names_only_the_executable() {
+        let cmd = Command::from_std(process::Command::new("/usr/bin/curl"), false);
+        cmd.inner
+            .borrow_mut()
+            .args(["--user", "me:s3cret", "https://example.com"]);
+        assert_eq!(cmd.summary(), "curl");
+    }
+
     #[test]
     fn spawn_error_excludes_sensitive_args() {
         let program = "/nonexistent/program___axl_test";
         let cmd = Command {
             inner: RefCell::new(process::Command::new(program)),
             process_group: Cell::new(None),
+            interactive: Cell::new(false),
+            chosen: Cell::new(Chosen::default()),
+            added_env: RefCell::new(vec![]),
+            no_tty: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            pre_exec_set: Cell::new(false),
         };
         cmd.inner.borrow_mut().args([
             "--aws-sigv4",
@@ -814,6 +1575,11 @@ mod tests {
         let cmd = Command {
             inner: RefCell::new(process::Command::new(program)),
             process_group: Cell::new(None),
+            interactive: Cell::new(false),
+            chosen: Cell::new(Chosen::default()),
+            added_env: RefCell::new(vec![]),
+            no_tty: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            pre_exec_set: Cell::new(false),
         };
         cmd.inner
             .borrow_mut()
@@ -832,6 +1598,11 @@ mod tests {
         let cmd = Command {
             inner: RefCell::new(process::Command::new("program")),
             process_group: Cell::new(None),
+            interactive: Cell::new(false),
+            chosen: Cell::new(Chosen::default()),
+            added_env: RefCell::new(vec![]),
+            no_tty: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            pre_exec_set: Cell::new(false),
         };
         cmd.inner
             .borrow_mut()

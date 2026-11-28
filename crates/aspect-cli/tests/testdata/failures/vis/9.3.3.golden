@@ -1,0 +1,31 @@
+exit 1
+── Failures (3) ──
+✗ //nosuchpkg:x  analysis · vis/BUILD.bazel:3:8
+  │ no such package 'nosuchpkg': BUILD file not found in any of the following directories. Add a
+  │   BUILD file to a directory to mark it as a package.
+  │  - nosuchpkg
+  ○ blocked: //vis:mp
+
+✗ //vis:vis  analysis · vis/BUILD.bazel:1:8
+  │ in genrule rule //vis:vis: Visibility error:
+  │ target '//priv:priv' is not visible from
+  │ target '//vis:vis'
+  │ Recommendation: modify the visibility declaration if you think the dependency is legitimate.
+  │   For more info see https://bazel.build/concepts/visibility
+
+✗ //vis:mt  vis/BUILD.bazel:2:8
+  │ missing input file '//vis:nothere'
+0 built, 3 failed, 1 blocked · 0 tests passed, 0 failed · Bazel's raw log: ${FIXTURE}/9.3.3.console
+All of it: aspect history show t-replay
+--- Failures tab
+✗ //nosuchpkg:x  analysis · vis/BUILD.bazel:3:8
+  │ no such package 'nosuchpkg': BUILD file not found in any of the following directories. Add a BUILD file to a direct…
+  │  - nosuchpkg
+✗ //vis:vis  analysis · vis/BUILD.bazel:1:8
+  │ in genrule rule //vis:vis: Visibility error:
+  │ target '//priv:priv' is not visible from
+  │ target '//vis:vis'
+  │ Recommendation: modify the visibility declaration if you think the dependency is legitimate. For more info see http…
+✗ //vis:mt  vis/BUILD.bazel:2:8
+  │ missing input file '//vis:nothere'
+○ //vis:mp  blocked by //nosuchpkg:x

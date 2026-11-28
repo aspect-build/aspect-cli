@@ -1,0 +1,79 @@
+[32mComputing main repo mapping:[0m 
+[1A[K[32mLoading:[0m 
+[1A[K[32mLoading:[0m 0 packages loaded
+[1A[K[32mAnalyzing:[0m 6 targets (0 packages loaded, 0 targets configured)
+[1A[K[32mAnalyzing:[0m 6 targets (0 packages loaded, 0 targets configured)
+[32m[0 / 1][0m checking cached actions
+[1A[K[1A[K[32mINFO: [0mAnalyzed 6 targets (0 packages loaded, 0 targets configured).
+[32m[0 / 1][0m checking cached actions
+[1A[K[31m[1mERROR: [0m${WORKSPACE}/lc/BUILD.bazel:2:5: Checking item failed: (Exit 5): bash failed: error executing Check command (from target //lc:n4) /bin/bash -c 'echo '\''n4 broke'\'' >&2; exit 5'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+n4 broke
+[32m[1 / 7][0m 6 actions running
+    Checking item; 0s darwin-sandbox
+    Checking item; 0s darwin-sandbox
+    Checking item; 0s darwin-sandbox
+    Checking item; 0s darwin-sandbox
+    Checking item; 0s darwin-sandbox
+    Checking item; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/lc/BUILD.bazel:2:5: output 'lc/n1.out' was not created
+[32m[2 / 7][0m 5 actions running
+    Checking item; 0s darwin-sandbox
+    Checking item; 0s darwin-sandbox
+    Checking item; 0s darwin-sandbox
+    Checking item; 0s darwin-sandbox
+    Checking item; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/lc/BUILD.bazel:2:5: Checking item failed: not all outputs were created or valid
+[32m[2 / 7][0m 5 actions running
+    Checking item; 0s darwin-sandbox
+    Checking item; 0s darwin-sandbox
+    Checking item; 0s darwin-sandbox
+    Checking item; 0s darwin-sandbox
+    Checking item; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/lc/BUILD.bazel:2:5: output 'lc/n5.out' was not created
+[32m[3 / 7][0m 4 actions running
+    Checking item; 0s darwin-sandbox
+    Checking item; 0s darwin-sandbox
+    Checking item; 0s darwin-sandbox
+    Checking item; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/lc/BUILD.bazel:2:5: Checking item failed: not all outputs were created or valid
+[32m[3 / 7][0m 4 actions running
+    Checking item; 0s darwin-sandbox
+    Checking item; 0s darwin-sandbox
+    Checking item; 0s darwin-sandbox
+    Checking item; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/lc/BUILD.bazel:2:5: Checking item failed: (Exit 3): bash failed: error executing Check command (from target //lc:n2) /bin/bash -c 'echo '\''n2 broke'\'' >&2; exit 3'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+n2 broke
+[32m[4 / 7][0m 3 actions running
+    Checking item; 0s darwin-sandbox
+    Checking item; 0s darwin-sandbox
+    Checking item; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/lc/BUILD.bazel:2:5: output 'lc/n3.out' was not created
+[32m[5 / 7][0m 2 actions running
+    Checking item; 0s darwin-sandbox
+    Checking item; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/lc/BUILD.bazel:2:5: Checking item failed: not all outputs were created or valid
+[32m[5 / 7][0m 2 actions running
+    Checking item; 0s darwin-sandbox
+    Checking item; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/lc/BUILD.bazel:2:5: Checking item failed: (Exit 1): bash failed: error executing Check command (from target //lc:n0) /bin/bash -c 'echo '\''n0 broke'\'' >&2; exit 1'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+n0 broke
+[32m[6 / 7][0m Checking item; 0s darwin-sandbox
+[1A[K[32mINFO: [0mFound 6 targets...
+[32m[7 / 7][0m no actions running
+[1A[KUse --verbose_failures to see the command lines of failed build steps.
+[32m[7 / 7][0m no actions running
+[1A[K[32mINFO: [0mElapsed time: 0.072s, Critical Path: 0.03s
+[32m[7 / 7][0m no actions running
+[1A[K[32mINFO: [0m7 processes: 4 internal, 3 darwin-sandbox.
+[32m[7 / 7][0m no actions running
+[1A[K[31m[1mERROR: [0mBuild did NOT complete successfully
+[31m[1mFAILED:[0m 
+[1A[K[31m[1mFAILED:[0m 
+[1A[K[32mINFO: [0mBuild Event Protocol files produced successfully.
+[0m

@@ -1,0 +1,33 @@
+[32mComputing main repo mapping:[0m 
+[1A[K[32mLoading:[0m 
+[1A[K[32mLoading:[0m 0 packages loaded
+[1A[K[32mAnalyzing:[0m target //asp:x (0 packages loaded, 0 targets configured)
+[1A[K[31m[1mERROR: [0m${WORKSPACE}/asp/BUILD.bazel:1:8: in //asp:defs.bzl%bad_aspect aspect on genrule rule //asp:x: 
+Traceback (most recent call last):
+	File "${WORKSPACE}/asp/defs.bzl", line 2, column 9, in _a
+		fail("aspect refuses " + str(target.label))
+Error in fail: aspect refuses @@//asp:x
+[32mAnalyzing:[0m target //asp:x (0 packages loaded, 0 targets configured)
+
+[1A[K[1A[K[32mINFO: [0mAnalyzed target //asp:x (0 packages loaded, 0 targets configured).
+
+[1A[K[35mWARNING: [0merrors encountered while analyzing target '//asp:x', it will not be built.
+Analysis of target '//asp:x' (config: 2d89340) failed
+[32m[2 / 2][0m no actions running
+[1A[K[32mINFO: [0mFound 1 target...
+[32m[2 / 2][0m no actions running
+[1A[KTarget //asp:x up-to-date:
+[32m[2 / 2][0m no actions running
+[1A[K  bazel-bin/asp/x.txt
+[32m[2 / 2][0m no actions running
+[1A[K[31m[1mERROR: [0mcommand succeeded, but not all targets were analyzed
+[32m[2 / 2][0m no actions running
+[1A[K[32mINFO: [0mElapsed time: 0.067s, Critical Path: 0.02s
+[32m[2 / 2][0m no actions running
+[1A[K[32mINFO: [0m2 processes: 1 internal, 1 darwin-sandbox.
+[32m[2 / 2][0m no actions running
+[1A[K[31m[1mERROR: [0mBuild did NOT complete successfully
+[31m[1mFAILED:[0m 
+[1A[K[31m[1mFAILED:[0m 
+[1A[K[32mINFO: [0mBuild Event Protocol files produced successfully.
+[0m

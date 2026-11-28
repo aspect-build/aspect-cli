@@ -346,10 +346,13 @@ impl History {
         }
     }
 
-    /// The task has ended: its record says how, with the summaries of its
-    /// builds whose streams are over (one never waited for may not be).
+    /// The task has ended: its record says how long it ran (`duration`, as
+    /// its closing line says, the screen held for its reader left out) and
+    /// how it ended, with the summaries of its builds whose streams are
+    /// over (one never waited for may not be).
     pub fn end_task(
         &self,
+        duration: Duration,
         exit_code: Option<u8>,
         conclusion: String,
         error: String,
@@ -364,7 +367,7 @@ impl History {
         let Some(file) = self.task_record.lock().unwrap().take() else {
             return;
         };
-        file.end(exit_code, conclusion, error, cancelled);
+        file.end(duration, exit_code, conclusion, error, cancelled);
         // A run that started no prune (it kept no build's files, or another
         // task had pruned) still caps the records, which runs like it add,
         // unless one did within `every`: a walk of the root's names, cheap
@@ -857,6 +860,13 @@ fn stamp(time: SystemTime) -> String {
 
 /// An invocation directory's name: a [`stamp`], `-`, and a task ID, which is a
 /// UUID. Nothing else under the root is the history's to prune.
+/// The task ID a history entry's folder is named for (`<stamp>-<id>`), as
+/// `aspect history show` takes it; None for a folder that is not one.
+pub fn entry_task_id(dir: &Path) -> Option<String> {
+    let name = dir.file_name()?;
+    is_invocation_name(name).then(|| name.to_str().unwrap_or("")[STAMP_LEN + 1..].to_string())
+}
+
 fn is_invocation_name(name: &std::ffi::OsStr) -> bool {
     let Some(name) = name.to_str() else {
         return false;
@@ -1088,7 +1098,13 @@ mod tests {
         h.retention.records = 1;
         h.retention.record_age = Duration::from_secs(u32::MAX as u64 * 100);
         h.begin_task(&id(99), TaskStart::default());
-        h.end_task(Some(0), String::new(), String::new(), false);
+        h.end_task(
+            Duration::from_millis(5),
+            Some(0),
+            String::new(),
+            String::new(),
+            false,
+        );
         let kept: Vec<bool> = (1..=3)
             .map(|n| root.path().join(name(n)).exists())
             .collect();
@@ -1386,6 +1402,12 @@ mod tests {
         );
         assert!(!is_invocation_name("logs".as_ref()));
         assert!(!is_invocation_name("é".as_ref()));
+    }
+
+    #[test]
+    fn an_entrys_folder_names_its_task_id() {
+        assert_eq!(entry_task_id(&Path::new("/h").join(name(1))), Some(id(1)));
+        assert_eq!(entry_task_id(Path::new("/h/logs")), None);
     }
 
     #[cfg(unix)]

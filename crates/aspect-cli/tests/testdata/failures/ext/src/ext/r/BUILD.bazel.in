@@ -1,0 +1,2 @@
+load(":defs.bzl", "m")
+m(name = "y")

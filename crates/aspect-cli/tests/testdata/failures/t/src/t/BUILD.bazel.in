@@ -1,0 +1,8 @@
+load("@rules_cc//cc:defs.bzl", "cc_test")
+cc_test(name = "fail", srcs = ["fail.cc"])
+cc_test(name = "shard", srcs = ["shard.cc"], shard_count = 3)
+[cc_test(name = "ok%d" % i, srcs = ["ok.cc"]) for i in range(3)]
+cc_test(name = "slow", srcs = ["ok.cc"], tags = ["slow"])
+cc_test(name = "rpt", srcs = ["rpt.cc"])
+genrule(name = "slowgen", outs = ["slowgen.txt"], cmd = "sleep 6; echo $(V) > $@")
+cc_test(name = "flaky", srcs = ["flaky.cc"], tags = ["no-sandbox"])

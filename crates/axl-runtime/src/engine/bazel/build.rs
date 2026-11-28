@@ -855,6 +855,9 @@ struct Console {
     stdout: Option<Forwarder>,
     /// The feed `output_feed()` drains, with `bazel::console::Output::Hidden`.
     feed: Option<Arc<bazel::console::feed::Feed>>,
+    /// Lines the console writes between Bazel's: the history's note of where
+    /// it kept each failed action's log.
+    notes: bazel::console::forward::Notes,
     observations: Arc<Observations>,
     events: Option<std::sync::mpsc::Receiver<HeldLine>>,
     log: Option<std::path::PathBuf>,
@@ -940,22 +943,33 @@ impl Console {
         }
         let mut pipeline = config.pipeline();
         pipeline.shape.copy = Some(crate::out::copy_console_output);
+        // The copy and the write under one turn of stderr's target.
+        pipeline.shape.hold = Some(axl_types::terminal::hold_stderr);
         let log = pipeline.log.as_ref().map(|l| l.path().to_path_buf());
         let feed = pipeline.feed.clone();
+        let notes = pipeline.notes.clone();
         let forwarder = Forwarder::spawn_reported(
             Box::new(reader),
-            Box::new(std::io::stderr()),
+            Box::new(axl_types::terminal::Routed::new(std::io::stderr(), 2)),
             pipeline.chain,
             pipeline.log,
             pipeline.shape,
             Some(activity),
         )?;
+        // Whether Bazel's stdout is in the console's stream, for the
+        // summary's ties to an action's output.
+        pipeline
+            .observations
+            .set_stdout_shared(shared_stdout.is_some());
         let (child_stdout, stdout) = match shared_stdout {
             Some(shared) => (Some(shared), None),
             None if stdout_inherited => {
                 let (child, out) = capture::open(bazel::console::Mode::Pipe)?;
                 let out = bazel::stream::fd::Fd::follow(out, gate())?;
-                let after = forwarder.ordered_after(Box::new(std::io::stdout()), probe.into());
+                // The wait for stderr's forwarder runs before stdout's
+                // target is held (`gate`), the write and its copy under it.
+                let gate = std::sync::Arc::new(forwarder.gate(probe.into()));
+                let after = axl_types::terminal::Routed::new(std::io::stdout(), 1);
                 // Colour asked for the stages' sake is shown as the user
                 // asked, else as the CLI's own stdout would carry it, as it
                 // is for stderr.
@@ -965,7 +979,9 @@ impl Console {
                         .unwrap_or_else(|| crate::color::stdout_supports_color()),
                     // A stdout of its own is the program's output, not the
                     // console UI: shown as written even when nothing else is.
-                    copy: Some(crate::out::copy_output),
+                    copy: Some(crate::out::copy_only),
+                    hold: Some(axl_types::terminal::hold_stdout),
+                    gate: Some(gate),
                     ..Default::default()
                 };
                 (
@@ -989,6 +1005,7 @@ impl Console {
                 links_written: pipeline.links_written,
                 stdout,
                 feed,
+                notes,
                 observations: pipeline.observations,
                 events: pipeline.events,
                 log,
@@ -1090,6 +1107,11 @@ pub struct Build {
     #[allocative(skip)]
     console_ended: std::cell::Cell<bool>,
 
+    /// The client's exit code once `wait()` has reaped it, for the
+    /// `output_end` hooks (`exit_code`); None before, or for a signal.
+    #[allocative(skip)]
+    exited: std::cell::Cell<Option<i32>>,
+
     /// What is shown, for `output_feed()`, when the console shows nothing
     /// itself (`display = "none"`).
     #[allocative(skip)]
@@ -1134,6 +1156,11 @@ pub struct Build {
     /// by `history_slot` instead when there is one.
     #[allocative(skip)]
     keep_sink: RefCell<Option<JoinHandle<SinkOutcome>>>,
+
+    /// What the keep sink has kept of each action so far, when action logs
+    /// are asked for (`kept_action_log()`).
+    #[allocative(skip)]
+    kept_actions: Option<bazel::bes::sink::keep::KeptActions>,
 
     /// Its place in the task's record (`task.json`): its exit noted at the
     /// reap, its summary once `wait()` has joined the stream and the keep
@@ -1247,6 +1274,10 @@ fn execlog_demand(
     let asked = (listed && !record_only) || requested;
     (asked, record_only || history_records)
 }
+
+/// Whether a task's own execution-log iterator was said to get no entries
+/// beside the caller's own log: once a process.
+static OWN_LOG_WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Whether a build writes its compact execution log: when something `asked`
 /// for it, or when it is only `recording` on Bazel 7.4 or later (or a version
@@ -1417,16 +1448,43 @@ impl Build {
                 .is_some_and(|v| !v.is_empty());
         let profile_kept =
             rc_visible && !profile_unplaced && !bazel::profile::turned_off(&flags, verb);
+        // Bazel refuses a build naming more than one log format. Beside the
+        // caller's binary or JSON one, iterators that only read entries (with
+        // no file of the compact log asked for) get none: every handle, a
+        // hook's or a task's own, ends at once, rather than the build be
+        // refused; a task's own with a warning, once.
+        let other_format = bazel::execlog::other_format(&flags, verb);
+        let mut execlog_iters = execlog_iters;
+        if other_format
+            && requested_execlog_path.is_none()
+            && execlog_sinks
+                .iter()
+                .all(|s| matches!(s, ExecLogSink::Record))
+        {
+            if execlog_iters.iter().any(|i| !i.is_hook())
+                && !OWN_LOG_WARNED.swap(true, std::sync::atomic::Ordering::SeqCst)
+            {
+                crate::diag::warn(
+                    "an execution_log iterator gets no entries: the build writes the caller's own execution log (--execution_log_binary_file or --execution_log_json_file), and Bazel writes only one format",
+                );
+            }
+            execlog_iters.iter().for_each(ExecLogIter::release);
+            execlog_iters.clear();
+        }
         let (asked, recording) = execlog_demand(
-            execlog_enabled,
+            execlog_enabled
+                && !(other_format
+                    && execlog_iters.is_empty()
+                    && execlog_sinks
+                        .iter()
+                        .all(|s| matches!(s, ExecLogSink::Record))),
             &execlog_sinks,
             !execlog_iters.is_empty(),
             requested_execlog_path.is_some(),
             history_asked || history.records_every_build(),
         );
-        // Bazel refuses a build naming more than one log format, so a log
-        // only recorded is skipped beside the caller's binary or JSON one.
-        let other_format = bazel::execlog::other_format(&flags, verb);
+        // A log only recorded is skipped beside the caller's binary or JSON
+        // one too (`other_format`, above).
         let recording = recording && rc_visible && !other_format;
 
         // Asked with the same startup flags the build below will use, because
@@ -1449,6 +1507,12 @@ impl Build {
         let (log_on, execlog_telemetry) = telemetry
             .execution_log()
             .resolve(asked || recording, telemetry.exporting());
+        // Nor does telemetry turn on a second format beside the caller's.
+        let (log_on, execlog_telemetry) = if other_format && !asked {
+            (false, false)
+        } else {
+            (log_on, execlog_telemetry)
+        };
         let asked = asked || (log_on && !recording);
         let execlog_enabled = writes_execution_log(asked, recording, version.as_ref());
         // Every file below that stays goes into this one folder, made only
@@ -1462,6 +1526,7 @@ impl Build {
         // stages folded beside it; without a folder, in a private temp one,
         // and with neither, none: never at a name another user could take.
         let console = console.map(|mut config| {
+            config.relay_cap = bazel::console::report::relay_cap(&flags, verb);
             if config.keeps_log() {
                 config.log = history_dir
                     .clone()
@@ -1507,9 +1572,29 @@ impl Build {
             && !bazel::bes::sink::downstream::asks_for_all_actions(&flags, verb);
         let trim_downstream = cli_publishes_all_actions && rc_visible;
 
+        // Reserve the BEP path now, before `cmd.spawn()`, so it can go on the
+        // command line; bazel creates the file. The reader is started later,
+        // once the spawned child's pid is in hand and every subscriber is bound.
+        let bes_file = build_events.then(BuildEventStream::reserve);
+
         let mut cmd = super::runner::CancellableRunner(&signals).command();
         cmd.args(startup_flags);
         cmd.arg(verb);
+        // The BEP flags go before the caller's too: Bazel 7 and 8 stop at a
+        // flag they do not know and write no stream for one after it, so a
+        // build refused for a bad flag still has its events. They go again
+        // after, where they outrank a caller's own.
+        let bep_args: Vec<std::ffi::OsString> = bes_file
+            .iter()
+            .flat_map(|file| {
+                [
+                    "--build_event_binary_file_upload_mode=fully_async".into(),
+                    bazel::bes::binary_file::FLAG.into(),
+                    file.path().as_os_str().to_owned(),
+                ]
+            })
+            .collect();
+        cmd.args(&bep_args);
         cmd.args(flags);
 
         if let Some(directory) = directory {
@@ -1550,25 +1635,13 @@ impl Build {
             ));
         }
 
-        // Reserve the BEP path now, before `cmd.spawn()`, so it can go on the
-        // command line; bazel creates the file. The reader is started later,
-        // once the spawned child's pid is in hand and every subscriber is bound.
-        //
         // Bazel's default action publishing (failed actions only) is left
         // alone, per-action data coming from the execution log, unless the
         // CLI's own readers need every action (above).
-        let bes_file = if build_events {
-            let file = BuildEventStream::reserve();
-            cmd.arg("--build_event_binary_file_upload_mode=fully_async")
-                .arg(bazel::bes::binary_file::FLAG)
-                .arg(file.path());
-            if cli_publishes_all_actions {
-                cmd.arg(bazel::bes::sink::downstream::PUBLISH_ALL_ACTIONS);
-            }
-            Some(file)
-        } else {
-            None
-        };
+        cmd.args(&bep_args);
+        if bes_file.is_some() && cli_publishes_all_actions {
+            cmd.arg(bazel::bes::sink::downstream::PUBLISH_ALL_ACTIONS);
+        }
 
         // Bazel writes the profile into the history, where it stays, as the
         // execution log does below; a profile the caller asked for is copied
@@ -1696,6 +1769,7 @@ impl Build {
             console_events,
             console_log,
             console_feed,
+            console_notes,
         ) = match console {
             Some(console) => {
                 console
@@ -1711,9 +1785,10 @@ impl Build {
                     console.events,
                     console.log,
                     console.feed,
+                    Some(console.notes),
                 )
             }
-            None => (None, None, None, None, None, None, None),
+            None => (None, None, None, None, None, None, None, None),
         };
         let build_event_stream =
             Unstarted::new(bes_file, pids.gate(), file_sinks, max_message_bytes);
@@ -1721,6 +1796,10 @@ impl Build {
         // Everything that can fail once bazel runs. A failure abandons the
         // stream (see `Unstarted`), and releases the handles this spawn bound.
         let mut execlog_bound = false;
+        // What the keep sink has kept of each action so far, when action
+        // logs are asked for: empty if no history folder could be made.
+        let kept_actions = (keep_logs.actions != bazel::bes::sink::keep::ActionLogs::None)
+            .then(bazel::bes::sink::keep::KeptActions::default);
         let parts = (|| -> io::Result<_> {
             // Started first: Bazel already has the path, so a stream dropped on
             // a later failure still reads to the client's exit, which `abandon`
@@ -1845,10 +1924,15 @@ impl Build {
             // Without a history folder (none can be made) nothing is kept;
             // `history_dir` has said why.
             let keep_sink = match (keep_logs.any(), &history_dir, build_event_stream.stream()) {
-                (true, Some(dir), Some(stream)) => Some(keep_logs.spawn(
-                    stream.subscribe_filtered(Some(keep_logs.filter())),
-                    dir.clone(),
-                )),
+                (true, Some(dir), Some(stream)) => {
+                    let published = kept_actions.clone().unwrap_or_default();
+                    Some(keep_logs.spawn(
+                        stream.subscribe_filtered(Some(keep_logs.filter())),
+                        dir.clone(),
+                        published,
+                        console_notes.clone(),
+                    ))
+                }
                 _ => None,
             };
             // With a record, the record's slot joins the keep sink, first,
@@ -1931,6 +2015,7 @@ impl Build {
             console_events: RefCell::new(console_events),
             hook_error: RefCell::new(None),
             console_ended: std::cell::Cell::new(false),
+            exited: std::cell::Cell::new(None),
             console_feed,
             last_frame: std::cell::Cell::new(None),
             has_frames: std::cell::Cell::new(None),
@@ -1939,6 +2024,7 @@ impl Build {
             signals,
             trace_sink: RefCell::new(trace_sink),
             keep_sink: RefCell::new(keep_sink),
+            kept_actions,
             history_slot,
             span: RefCell::new(span),
         })
@@ -2007,6 +2093,12 @@ impl<'v> values::StarlarkValue<'v> for Build {
                 Some(path) => heap.alloc_str(&path.to_string_lossy()).to_value(),
                 None => Value::new_none(),
             }),
+            // The client's exit code once `wait()` has it (the `output_end`
+            // hooks run after), None before or for a signal.
+            "exit_code" => Some(match self.exited.get() {
+                Some(code) => heap.alloc(code),
+                None => Value::new_none(),
+            }),
             _ => None,
         }
     }
@@ -2019,6 +2111,7 @@ impl<'v> values::StarlarkValue<'v> for Build {
                 | "output_fatal_line"
                 | "output_idle_ms"
                 | "output_log"
+                | "exit_code"
         )
     }
 }
@@ -2072,7 +2165,7 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
                 }
             };
             if let Err(e) = console.answer(held, eval) {
-                build.hook_failed(e);
+                build.hook_failed("intercept", e);
                 break;
             }
             wait = HOOK_FOLLOW;
@@ -2086,6 +2179,22 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
     /// escape sequences stripped, a carriage return's redraw kept at its
     /// newest state, and other control characters but a tab removed (a
     /// backspace too, not applied);
+    /// `links`, each line's links at the same index, as `[start, end, url]`
+    /// with `start` and `end` characters of the line: the URLs and the paths
+    /// to files the console linked (`--console:file-hyperlink-format` says
+    /// what a file's opens), for a screen to draw as links and open;
+    /// `colours`, each line with its colour kept; `kinds`, each line's kind,
+    /// `error`, `warning` or `` (its own: Bazel's `ERROR:`, `FAIL:`,
+    /// `TIMEOUT:` and `WARNING:`, a test summary's `FAILED` and `TIMEOUT`,
+    /// after any `--show_timestamps` prefix or indent; else, for a line that
+    /// starts no line of Bazel's own, the kind of the last that did when it
+    /// was an `ERROR:`, so a compiler's diagnostic under its action's
+    /// `ERROR:` is an error, across calls too); `bazel`, whether each line
+    /// is one of Bazel's own: one starting as Bazel's do (`INFO:`, `ERROR:`,
+    /// `Loading:`, `//`, `[`, …), not coloured as a tool colours `INFO:`;
+    /// `seqs`, each line's place in the order lines arrived, counted with
+    /// `std.term`'s `output()` (`seq`), for a screen merging both to keep
+    /// that order;
     /// `dropped`, how many older lines were let go to keep at most 10000
     /// between calls; and `progress`, the rows of Bazel's progress area as it
     /// was before its latest redraw (at most one redraw behind), its status
@@ -2102,6 +2211,11 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
         let got = feed.drain();
         Ok(heap.alloc(serde_json::json!({
             "lines": got.lines,
+            "links": got.links,
+            "colours": got.colours,
+            "kinds": got.kinds,
+            "bazel": got.bazel,
+            "seqs": got.seqs,
             "dropped": got.dropped,
             "progress": got.progress,
         })))
@@ -2115,6 +2229,67 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
     fn output_links_written<'v>(this: values::Value<'v>) -> anyhow::Result<u64> {
         let build = this.downcast_ref_err::<Build>().into_anyhow_result()?;
         Ok(build.console_links_written.as_ref().map_or(0, |w| w.get()))
+    }
+
+    /// The logs this build's history has kept, so far, of the action whose
+    /// primary output (`ActionCompleted`'s `primary_output`) is `output`: a
+    /// dict of `{"stdout": path, "stderr": path}`, each stream it kept, empty
+    /// when it kept neither (a retry's action replaces its earlier
+    /// attempt's). Kept as each one arrives, so a log Bazel has since
+    /// replaced can still be read. None when the build keeps no action logs
+    /// (`keep_action_logs = "none"`, `--history:action-logs=none`).
+    fn kept_action_log<'v>(
+        this: values::Value<'v>,
+        #[starlark(require = pos)] output: &str,
+        heap: values::Heap<'v>,
+    ) -> anyhow::Result<values::Value<'v>> {
+        let build = this.downcast_ref_err::<Build>().into_anyhow_result()?;
+        let Some(kept) = &build.kept_actions else {
+            return Ok(values::Value::new_none());
+        };
+        let mut streams = serde_json::Map::new();
+        if let Some(k) = kept.lock().unwrap().get(output) {
+            for (name, path) in [("stdout", &k.stdout), ("stderr", &k.stderr)] {
+                if let Some(p) = path {
+                    streams.insert(name.into(), p.to_string_lossy().into_owned().into());
+                }
+            }
+        }
+        Ok(heap.alloc(serde_json::Value::Object(streams)))
+    }
+
+    /// What a `collect_errors()` stage kept of the console for the failure
+    /// summary, once the console has ended: `{"blocks": [{"kind", "text",
+    /// "body_len", "last_line"}], "not_kept": n, "froms_not_kept": n,
+    /// "stdout": bool, "color": bool, "relay_cap": n}`, each block one of Bazel's own
+    /// `ERROR:` messages (`error`), an action's `INFO: From …:` header with
+    /// its body's length (`body_len`) and last line (`last_line`) (`from`),
+    /// or a record that may be an output's held last line (`tail`), with
+    /// what followed it before Bazel's next message or redraw, as Bazel
+    /// wrote it. A block whose first line is an `ERROR:` also has that
+    /// line's `location` (as Bazel wrote it, "" for none), `message` (the
+    /// text after the location), `coloured` (Bazel coloured its `ERROR:`),
+    /// `boilerplate` (one of Bazel's closing lines) and `body` (the lines
+    /// Bazel wrote with it, escapes left out, up to a blank line or one of
+    /// Bazel's own; a `Traceback`'s frames). `not_kept` counts
+    /// the bytes of Bazel's own the caps left out and `froms_not_kept` the
+    /// `INFO: From` blocks; `stdout` says whether the console's stream
+    /// carried Bazel's stdout too (a terminal both share), `color` whether
+    /// Bazel coloured its console (not `--color=no`), and `relay_cap` the
+    /// most of an action's stdout or stderr Bazel relays to it (the build's
+    /// `--experimental_ui_max_stdouterr_bytes`, else Bazel's default of 1
+    /// MiB; None for no limit). None without such a stage, or before the
+    /// console ends.
+    fn output_collected_errors<'v>(
+        this: values::Value<'v>,
+        heap: values::Heap<'v>,
+    ) -> anyhow::Result<values::Value<'v>> {
+        let build = this.downcast_ref_err::<Build>().into_anyhow_result()?;
+        let kept = build
+            .console_observations
+            .as_ref()
+            .and_then(|o| super::output::collected_errors(o));
+        Ok(kept.map_or(values::Value::new_none(), |v| heap.alloc(v)))
     }
 
     /// The `(id, line)` hits of the `output` processor's `observe` stages:
@@ -2236,14 +2411,17 @@ pub(crate) fn build_methods(registry: &mut MethodsBuilder) {
         let build = this.downcast_ref_err::<Build>().into_anyhow_result()?;
         let console = TraitConsole::of(eval);
         build.answer_until_the_console_ends(console.as_ref(), this, eval);
-        let status = build.wait_status()?;
+        let status = build.wait_status().inspect_err(|_| {
+            build.release_frames_screen();
+        })?;
+        build.exited.set(status.code);
         if let Some(console) = &console
             && build.console_observations.is_some()
             && !build.console_ended.replace(true)
         {
             build.frame(console, this, eval, true);
             if let Err(e) = console.ended(this, eval) {
-                build.hook_failed(e);
+                build.hook_failed("end", e);
             }
         }
         match build.hook_error.take() {
@@ -2266,10 +2444,35 @@ const HOOK_BUDGET: usize = 1000;
 /// one before is answered.
 const HOOK_FOLLOW: Duration = Duration::from_millis(20);
 
+/// What an AXL error says went wrong: its `error:` line (a traceback's
+/// frames come first), else its last line.
+fn cause(e: &anyhow::Error) -> String {
+    let text = format!("{e:#}");
+    let line = text
+        .lines()
+        .map(str::trim)
+        .find_map(|l| l.strip_prefix("error: "))
+        .or_else(|| text.lines().map(str::trim).filter(|l| !l.is_empty()).last())
+        .unwrap_or_default();
+    line.to_string()
+}
+
 impl Build {
-    /// Keep `e`, the first a console hook raised, for `wait()`, and let go
-    /// of the held lines: the rest are shown at once.
-    fn hook_failed(&self, e: anyhow::Error) {
+    /// Keep `e`, the first a console hook of `kind` (`frame`, `intercept`,
+    /// `end`) raised, for `wait()`, and let go of the held lines: the rest
+    /// are shown at once. No frame runs after it, so a screen the build's
+    /// frame hooks took is given back ([`Build::release_frames_screen`]),
+    /// saying so at once when one was and the build goes on: a console
+    /// hidden for that screen stays hidden, and the error is raised only
+    /// once the build ends.
+    fn hook_failed(&self, kind: &str, e: anyhow::Error) {
+        let released = self.release_frames_screen();
+        if released && self.hook_error.borrow().is_none() && !self.console_done() {
+            errln!(
+                "WARNING: a console {kind} hook failed ({}); the build goes on without its screen, and the error follows when it ends.",
+                cause(&e)
+            );
+        }
         drop(self.console_events.take());
         self.hook_error.borrow_mut().get_or_insert(e);
     }
@@ -2319,7 +2522,7 @@ impl Build {
             match next {
                 Recv::Item(held) => {
                     if let Err(e) = console.answer(held, eval) {
-                        self.hook_failed(e);
+                        self.hook_failed("intercept", e);
                         return;
                     }
                 }
@@ -2352,7 +2555,8 @@ impl Build {
     /// Run the `output_frame` hooks with `this` build when one is due, or
     /// now with `force` (the last frame, as the console ends). After any
     /// console hook's error, `output_intercept`'s too, no frame runs: the
-    /// error is kept for `wait()`.
+    /// error is kept for `wait()`, and the screen is given back at once
+    /// ([`Build::release_frames_screen`]).
     fn frame<'v>(
         &self,
         console: &TraitConsole<'v>,
@@ -2369,8 +2573,16 @@ impl Build {
         }
         self.last_frame.set(Some(std::time::Instant::now()));
         if let Err(e) = console.framed(this, eval) {
-            self.hook_error.borrow_mut().get_or_insert(e);
+            self.hook_failed("frame", e);
         }
+    }
+
+    /// No frame will run for this build any more (a hook failed, or the wait
+    /// did): with frame hooks, give back the terminal a screen holds, which
+    /// is process-wide, rather than leave it frozen until the CLI exits.
+    /// Whether a screen was given back.
+    fn release_frames_screen(&self) -> bool {
+        self.has_frames.get() == Some(true) && crate::engine::release_terminal()
     }
 
     /// The client's token, the one `handle.cancellation` wraps.
@@ -2521,6 +2733,15 @@ mod tests {
     //! binary, selected per-test via `--scenario=<name>`.
 
     use crate::engine::history::bazel_dir;
+
+    #[test]
+    fn a_hook_errors_cause_is_its_error_line() {
+        let traceback = anyhow::anyhow!(
+            "Traceback (most recent call last):\n  File <builtin>, in <module>\n  * a.axl:3, in _frame\n      fail(\"boom\")\nerror: fail: boom at frame 5\n --> a.axl:3:5"
+        );
+        assert_eq!(super::cause(&traceback), "fail: boom at frame 5");
+        assert_eq!(super::cause(&anyhow::anyhow!("plain\nlast")), "last");
+    }
 
     #[test]
     fn a_workspace_is_found_from_a_relative_or_symlinked_directory() {
@@ -3190,6 +3411,54 @@ Test = task(implementation = _impl)
             !args.contains("--build_event_publish_all_actions"),
             "`failed` needs Bazel's default publishing"
         );
+    }
+
+    /// A failed build through a console processor that collects errors:
+    /// its exit code once waited on; the errors its console collected, the
+    /// action's error with its stderr relayed under it, then, after Bazel's
+    /// redraw, its closing line, each header read (where, what, Bazel's
+    /// boilerplate); and the copy the history kept of the failed action's
+    /// stderr, by its output.
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_builds_exit_code_collected_errors_and_kept_log() {
+        let history = tempfile::tempdir().unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        let script = r#"
+def _impl(ctx):
+    processor = bazel.output.processor(display = "lines", stages = [bazel.output.collect_errors()])
+    build = ctx.bazel.build(
+        flags = ["--scenario=action_and_test_logs_console", "--basil-scratch=SCRATCH"] + processor.flags,
+        output = processor,
+        keep_action_logs = "failed",
+        build_events = True,
+    )
+    if build.exit_code != None:
+        fail("an exit code before wait(): %r" % build.exit_code)
+    status = build.wait()
+    if status.code != 1 or build.exit_code != 1:
+        fail("exit: %r %r" % (status.code, build.exit_code))
+    got = build.output_collected_errors()
+    said = [(b["kind"], b["location"], b["message"], b["boilerplate"]) for b in got["blocks"] if "message" in b]
+    want = [
+        ("error", "/ws/pkg/BUILD:3:8", "Executing genrule //pkg:broken failed: (Exit 1): bash failed: error executing Genrule command", False),
+        ("tail", "", "Build did NOT complete successfully", True),
+    ]
+    if said != want or not got["blocks"][0]["text"].endswith("broken\n"):
+        fail("collected: %r" % got)
+    if not got["color"] or got["not_kept"] != 0 or got["relay_cap"] != 1024 * 1024:
+        fail("collected: %r" % got)
+    kept = build.kept_action_log("bazel-out/bin/broken.out")
+    if sorted(kept.keys()) != ["stderr"] or ctx.std.fs.read_to_string(kept["stderr"]) != "ERROR: broken\n":
+        fail("kept: %r" % kept)
+    if build.kept_action_log("no/such/output") != {}:
+        fail("kept for another output")
+    return 0
+
+Test = task(implementation = _impl)
+"#
+        .replace("SCRATCH", scratch.path().to_str().unwrap());
+        run_task_with_history(&script, history.path());
     }
 
     /// The task's record notes each build: its command, its exit, and the
@@ -4826,6 +5095,86 @@ Test = task(implementation = _impl)
             compact_entry_count(&asked),
             SCENARIO_ENTRIES,
             "this build's log"
+        );
+    }
+
+    /// The CLI's BEP flags come before the caller's as well as after: Bazel 7
+    /// and 8 stop parsing at a flag they do not know and write no stream for
+    /// a BEP flag after it, so a build refused for a bad flag would have no
+    /// events. The copy after still outranks a caller's own BEP flag.
+    #[cfg(unix)]
+    #[test]
+    fn the_bep_flags_come_before_the_callers_flags_too() {
+        let dir = tempfile::tempdir().unwrap();
+        let argv_log = dir.path().join("argv.log");
+        let marker = format!("--aspect_argv_marker_{}", uuid::Uuid::new_v4().simple());
+        let script = format!(
+            r#"
+def _impl(ctx):
+    build = ctx.bazel.build(
+        flags = ["--scenario=success", {marker:?}],
+        build_events = True,
+        stderr = None,
+    )
+    status = build.wait()
+    return 0 if status.success else 1
+
+Test = task(implementation = _impl)
+"#,
+        );
+        /// `BASIL_ARGV_LOG` as it was, put back when dropped, should the
+        /// task panic too.
+        struct Restore(Option<std::ffi::OsString>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                // SAFETY: as where it was set, under the basil tests' lock.
+                unsafe {
+                    match self.0.take() {
+                        Some(was) => std::env::set_var("BASIL_ARGV_LOG", was),
+                        None => std::env::remove_var("BASIL_ARGV_LOG"),
+                    }
+                }
+            }
+        }
+        let exit = with_daemon_stand_in(|| {
+            let _restore = Restore(std::env::var_os("BASIL_ARGV_LOG"));
+            // SAFETY: process-wide, but `with_daemon_stand_in` holds the lock that
+            // serializes the basil tests for the whole closure.
+            unsafe {
+                std::env::set_var("BASIL_ARGV_LOG", &argv_log);
+            }
+            crate::test::eval(&script).with_fake_bazel().run_task(0)
+        });
+        assert_eq!(
+            exit.expect("run_task"),
+            Some(0),
+            "the build should have run"
+        );
+        let recorded = std::fs::read_to_string(&argv_log).expect("basil should have logged argv");
+        let line = recorded
+            .lines()
+            .find(|line| line.contains(&marker))
+            .unwrap_or_else(|| panic!("no build invocation in:\n{recorded}"));
+        let args: Vec<&str> = line.split_whitespace().collect();
+        let at = |flag: &str| {
+            args.iter()
+                .position(|a| *a == flag || a.starts_with(&format!("{flag}=")))
+        };
+        let mine = args
+            .iter()
+            .position(|a| *a == marker)
+            .expect("the caller's flag");
+        let first = at(bazel::bes::binary_file::FLAG).expect("a BEP flag");
+        let last = args
+            .iter()
+            .rposition(|a| {
+                *a == bazel::bes::binary_file::FLAG
+                    || a.starts_with(&format!("{}=", bazel::bes::binary_file::FLAG))
+            })
+            .expect("a BEP flag");
+        assert!(
+            first < mine && mine < last,
+            "the BEP flag before and after the caller's: {line}"
         );
     }
 

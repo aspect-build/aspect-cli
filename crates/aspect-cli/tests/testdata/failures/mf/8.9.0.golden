@@ -1,0 +1,19 @@
+exit 1
+── Failures (1) ──
+✗ //mf:x  loading · q/BUILD.bazel:1:8
+  │ no such target '//mf:x': target 'x' not declared in package 'mf' defined by mf/BUILD.bazel
+  ○ blocked: //q:on_mf
+
+── Other errors from Bazel ──
+ERROR: Traceback (most recent call last):
+  │         File "mf/BUILD.bazel", line 2, column 10, in <toplevel>
+  │                 bad_macro(name = "m")
+  │ …
+  │ Error in fail: bad_macro refuses m
+0 built, 1 failed, 1 blocked · 0 tests passed, 0 failed · Bazel's raw log: ${FIXTURE}/8.9.0.console
+All of it: aspect history show t-replay
+--- Failures tab
+✗ //mf:x  loading · q/BUILD.bazel:1:8
+  │ no such target '//mf:x': target 'x' not declared in package 'mf' defined by mf/BUILD.bazel
+○ //q:on_mf  blocked by //mf:x
+! Traceback (most recent call last):

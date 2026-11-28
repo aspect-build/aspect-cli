@@ -1,0 +1,54 @@
+[32mComputing main repo mapping:[0m 
+[1A[K[32mLoading:[0m 
+[1A[K[32mLoading:[0m 0 packages loaded
+[1A[K[32mAnalyzing:[0m 3 targets (0 packages loaded, 0 targets configured)
+[1A[K[32mAnalyzing:[0m 3 targets (0 packages loaded, 0 targets configured)
+[32m[0 / 1][0m checking cached actions
+[1A[K[1A[K[32mINFO: [0mAnalyzed 3 targets (0 packages loaded, 0 targets configured).
+[32m[0 / 1][0m checking cached actions
+[1A[K[31m[1mERROR: [0m${WORKSPACE}/xt/BUILD.bazel:3:5: Processing xt/b.out failed: (Exit 4): bash failed: error executing Proc command (from target //xt:b) /bin/bash -c 'echo '\''proc 1.0 starting'\'' >&2; echo '\''error: BBB broke in b.dat'\'' >&2; exit 4'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+proc 1.0 starting
+error: BBB broke in b.dat
+[32m[1 / 5][0m 4 actions running
+    Processing xt/a.out; 0s darwin-sandbox
+    Processing xt/c.1; 0s darwin-sandbox
+    Processing xt/b.out; 0s darwin-sandbox
+    Processing xt/c.0; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/xt/BUILD.bazel:5:4: Processing xt/c.0 failed: (Exit 3): bash failed: error executing Proc command (from target //xt:c) /bin/bash -c 'echo '\''proc 1.0 starting'\'' >&2; echo '\''error: CCC0 broke in c0.dat'\'' >&2; exit 3'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+proc 1.0 starting
+error: CCC0 broke in c0.dat
+[32m[2 / 5][0m 3 actions running
+    Processing xt/a.out; 0s darwin-sandbox
+    Processing xt/c.1; 0s darwin-sandbox
+    Processing xt/c.0; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/xt/BUILD.bazel:5:4: Processing xt/c.1 failed: (Exit 4): bash failed: error executing Proc command (from target //xt:c) /bin/bash -c 'echo '\''proc 1.0 starting'\'' >&2; echo '\''error: CCC1 broke in c1.dat'\'' >&2; exit 4'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+proc 1.0 starting
+error: CCC1 broke in c1.dat
+[32m[3 / 5][0m 2 actions running
+    Processing xt/a.out; 0s darwin-sandbox
+    Processing xt/c.1; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/xt/BUILD.bazel:2:5: Processing xt/a.out failed: (Exit 3): bash failed: error executing Proc command (from target //xt:a) /bin/bash -c 'echo '\''proc 1.0 starting'\'' >&2; echo '\''error: AAA broke in a.dat'\'' >&2; exit 3'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+proc 1.0 starting
+error: AAA broke in a.dat
+[32m[4 / 5][0m Processing xt/a.out; 0s darwin-sandbox
+[1A[K[32mINFO: [0mFound 3 targets...
+[32m[5 / 5][0m no actions running
+[1A[KUse --verbose_failures to see the command lines of failed build steps.
+[32m[5 / 5][0m no actions running
+[1A[K[32mINFO: [0mElapsed time: 0.070s, Critical Path: 0.03s
+[32m[5 / 5][0m no actions running
+[1A[K[32mINFO: [0m5 processes: 5 internal.
+[32m[5 / 5][0m no actions running
+[1A[K[31m[1mERROR: [0mBuild did NOT complete successfully
+[31m[1mFAILED:[0m 
+[1A[K[31m[1mFAILED:[0m 
+[1A[K[32mINFO: [0mBuild Event Protocol files produced successfully.
+[0m

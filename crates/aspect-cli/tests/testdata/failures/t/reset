@@ -1,0 +1,2 @@
+# The flaky and the repeated tests keep a marker between runs: each recording starts without.
+rm -rf /tmp/bepfx-flaky.marker /tmp/bepfx-rpt.lock

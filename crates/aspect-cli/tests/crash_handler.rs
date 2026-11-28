@@ -125,7 +125,7 @@ fn opt_out_env_skips_the_report_but_not_the_crash() {
 /// must be self-contained (marker included), not just a partial tee.
 #[test]
 fn crash_log_env_captures_the_full_report() {
-    let path = scratch_dir().join(format!("aspect-crash-{}.log", std::process::id()));
+    let path = common::scratch_root().join(format!("aspect-crash-{}.log", std::process::id()));
     let path_str = path.to_str().unwrap();
 
     let out = run_with_trigger("segv", &[("ASPECT_CRASH_LOG", path_str)]);
@@ -163,7 +163,8 @@ fn crash_log_env_absent_reports_to_stderr_only() {
 /// is that write which wedges, and the process stays hung (hence the kill).
 #[test]
 fn crash_log_is_written_when_stderr_blocks() {
-    let path = scratch_dir().join(format!("aspect-crash-blocked-{}.log", std::process::id()));
+    let path =
+        common::scratch_root().join(format!("aspect-crash-blocked-{}.log", std::process::id()));
     let _ = std::fs::remove_file(&path);
 
     // A pipe nobody reads, pre-filled so the child's first stderr write blocks.
@@ -192,8 +193,12 @@ fn crash_log_is_written_when_stderr_blocks() {
         .spawn()
         .expect("failed to spawn aspect-cli");
 
+    // The marker, not the file: the handler opens the log before it writes
+    // to it, and a kill between the two leaves it empty.
     let start = std::time::Instant::now();
-    while !path.exists() && start.elapsed() < CRASH_TIMEOUT {
+    while !std::fs::read_to_string(&path).is_ok_and(|l| l.contains("fatal signal"))
+        && start.elapsed() < CRASH_TIMEOUT
+    {
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
 
@@ -215,14 +220,6 @@ fn crash_log_is_written_when_stderr_blocks() {
         log.contains("fatal signal: SIGSEGV"),
         "crash log missing the signal marker: {log}"
     );
-}
-
-/// Bazel gives each test a private scratch dir; fall back to the system temp
-/// dir under plain `cargo test`.
-fn scratch_dir() -> std::path::PathBuf {
-    std::env::var("TEST_TMPDIR")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| std::env::temp_dir())
 }
 
 /// A fresh `pipe(2)` as `(read, write)` raw fds.

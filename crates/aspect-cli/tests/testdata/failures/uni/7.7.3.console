@@ -1,0 +1,43 @@
+[32mComputing main repo mapping:[0m 
+[1A[K[32mLoading:[0m 
+[1A[K[32mLoading:[0m 0 packages loaded
+[1A[K[32mAnalyzing:[0m 3 targets (0 packages loaded, 0 targets configured)
+[1A[K[32mAnalyzing:[0m 3 targets (0 packages loaded, 0 targets configured)
+[32m[0 / 1][0m checking cached actions
+[1A[K[1A[K[32mINFO: [0mAnalyzed 3 targets (0 packages loaded, 0 targets configured).
+[32m[0 / 1][0m checking cached actions
+[1A[K[31m[1mERROR: [0m${WORKSPACE}/uni/BUILD.bazel:2:8: Executing genrule //uni:привет failed: (Exit 3): bash failed: error executing Genrule command (from target //uni:привет) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo '\''ошибка: всё сломалось ✗ 中文'\'' >&2; exit 3'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+ошибка: всё сломалось ✗ 中文
+[32m[9 / 13][0m 3 actions running
+    Executing genrule //uni:привет; 0s darwin-sandbox
+    Executing genrule //uni:café; 0s darwin-sandbox
+    Compiling uni/t.cc; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/uni/BUILD.bazel:3:8: Executing genrule //uni:café failed: (Exit 2): bash failed: error executing Genrule command (from target //uni:café) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo '\''café broke'\'' >&2; exit 2'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+café broke
+[32m[10 / 13][0m 2 actions running
+    Executing genrule //uni:café; 0s darwin-sandbox
+    Compiling uni/t.cc; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/uni/BUILD.bazel:4:8: Testing //uni:тест failed: (Exit -1): test-setup.sh failed: error executing TestRunner command (from target //uni:тест) external/bazel_tools/tools/test/test-setup.sh 'uni/тест'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+[32m[13 / 14][0m Testing //uni:тест; 0s darwin-sandbox
+[1A[K[32mINFO: [0mFound 2 targets and 1 test target...
+[32m[14 / 14][0m no actions running
+[1A[KUse --verbose_failures to see the command lines of failed build steps.
+[32m[14 / 14][0m no actions running
+[1A[K[32mINFO: [0mElapsed time: 0.284s, Critical Path: 0.16s
+[32m[14 / 14][0m no actions running
+[1A[K[32mINFO: [0m14 processes: 12 internal, 2 darwin-sandbox.
+[32m[14 / 14][0m no actions running
+[1A[K[31m[1mERROR: [0mBuild did NOT complete successfully
+[31m[1mFAILED:[0m 
+[1A[K[31m[1mFAILED:[0m 
+[1A[K[31m[1mFAILED:[0m 
+[1A[K[31m[1mFAILED:[0m 
+[1A[K[31m[1mFAILED:[0m 
+[1A[K[32mINFO: [0mBuild Event Protocol files produced successfully.
+[0m

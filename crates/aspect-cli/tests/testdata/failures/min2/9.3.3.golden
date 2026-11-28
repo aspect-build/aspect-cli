@@ -1,0 +1,13 @@
+exit 1
+── Failures (2) ──
+✗ //min2:a_silent  Genrule · exit 4 · min2/BUILD.bazel:1:8
+
+✗ //min2:b_loud  Genrule · exit 1 · min2/BUILD.bazel:2:8
+  │ b_loud: real error text
+  log ${OUTPUT_BASE}/execroot/_main/bazel-out/_tmp/actions/stderr-3
+0 built, 2 failed · 0 tests passed, 0 failed · Bazel's raw log: ${FIXTURE}/9.3.3.console
+All of it: aspect history show t-replay
+--- Failures tab
+✗ //min2:a_silent  Genrule · exit 4 · min2/BUILD.bazel:1:8
+✗ //min2:b_loud  Genrule · exit 1 · min2/BUILD.bazel:2:8
+  │ b_loud: real error text

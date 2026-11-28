@@ -32,6 +32,10 @@ common:release --@rules_rust//rust/settings:lto=fat
 # CI is set.
 common:ci --keep_going
 
+# A test that hangs on CI reports what each process it left running was
+# doing, past this many seconds (crates/aspect-cli/tests/common/hang_diag.rs).
+test:ci --test_env=HANG_DIAG_AFTER_SECS=45
+
 # Use Go's internal linker rather than the cc_toolchain — required when
 # building gazelle from source on Linux because the `@llvm` toolchain's
 # lld can't accept Go's non-PIC relocations (relocation R_X86_64_64 ...

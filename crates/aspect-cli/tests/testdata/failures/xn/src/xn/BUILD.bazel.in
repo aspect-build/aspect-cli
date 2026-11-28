@@ -1,0 +1,5 @@
+load(":defs.bzl", "chk")
+chk(name = "a", msg = "Checking against //xn:b", cmd = "echo 'error: AAA mismatch in a' >&2; exit 3")
+chk(name = "b", msg = "Checking against //xn:a", cmd = "sleep 0.3; echo 'error: BBB mismatch in b' >&2; exit 3")
+chk(name = "c", msg = "Checking against //xn:d", cmd = "echo 'error: CCC alone' >&2; exit 5")
+chk(name = "d", msg = "Checking d", cmd = "echo ok > $@ ; touch bazel-out/x 2>/dev/null; true")

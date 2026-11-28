@@ -2,17 +2,23 @@
 //! stream as it arrives.
 //!
 //! An action's stdout and stderr are files Bazel writes under
-//! `bazel-out/_tmp/actions/` and names in the `ActionExecuted` event; the next
-//! build replaces them (a new file at the same name). They are hard-linked
-//! here, which costs nothing and leaves Bazel's path alone for anything that
-//! still reads it (a BES upload finishing after the client exits), and copied
-//! when a link cannot be made (another filesystem). A test's logs live in the
-//! output tree, which a later run may rewrite in place, so they are copied.
-//! A `file://` log is kept from its path and inline contents are written
-//! out. A remote cache names logs by `bytestream://` instead: a test's
+//! `bazel-out/_tmp/actions/` and names in the `ActionExecuted` event, and a
+//! test's logs are files in the output tree (`testlogs/`, an earlier
+//! attempt's under `test_attempts/`); the next build replaces each (a new
+//! file at the same name, on Bazel 7, 8 and 9, sandboxed, `local` or
+//! `standalone`), never rewriting one in place. Both are hard-linked here,
+//! which costs nothing until Bazel replaces its own and leaves Bazel's path
+//! alone for anything that still reads it (a BES upload finishing after the
+//! client exits), and copied when a link cannot be made (another
+//! filesystem). A `file://` log is kept from its path and inline contents
+//! are written out. A remote cache names logs by `bytestream://` instead: a test's
 //! `test.log` and `test.xml` are then found where Bazel's output tree has
 //! them, once the stream ends or the build is retried in it; any other such
 //! log (an action's, with a remote cache) is counted as `not_local`.
+//!
+//! An action's kept logs are also published as they are placed
+//! ([`KeptActions`]), for a screen that shows a running build's failures
+//! after Bazel has replaced its own files.
 //!
 //! What is kept is listed in an index per kind beside its folder, out of
 //! reach of any label, written when the stream ends; a build the CLI was
@@ -32,8 +38,8 @@ use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::mpsc::RecvError;
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 
 use axl_proto::build_event_stream::build_event::Payload;
@@ -108,6 +114,18 @@ pub struct Keep {
     pub tests: TestLogs,
 }
 
+/// Each action's kept logs so far, by its primary output: the paths, in the
+/// history folder, of its `stdout` and `stderr` that were kept. A retry's
+/// action replaces the earlier attempt's.
+pub type KeptActions = Arc<Mutex<HashMap<String, KeptAction>>>;
+
+/// An action's kept `stdout` and `stderr`, where each was kept.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct KeptAction {
+    pub stdout: Option<PathBuf>,
+    pub stderr: Option<PathBuf>,
+}
+
 impl Keep {
     /// Whether anything is kept.
     pub fn any(&self) -> bool {
@@ -135,14 +153,20 @@ impl Keep {
         )
     }
 
-    /// Start keeping logs from `recv` in `dir`, the build's history folder.
+    /// Start keeping logs from `recv` in `dir`, the build's history folder,
+    /// each action's as it is kept published to `published`, and for a
+    /// failed one an `INFO:` line naming where to `notes` (the console's).
     pub fn spawn(
         self,
         recv: Subscriber<Arc<BuildEventEnvelope>>,
         dir: PathBuf,
+        published: KeptActions,
+        notes: Option<crate::console::forward::Notes>,
     ) -> JoinHandle<SinkOutcome> {
         thread::spawn(move || {
             let mut kept = Kept::new(self, dir);
+            kept.published = Some(published);
+            kept.notes = notes;
             loop {
                 match recv.recv() {
                     Ok(envelope) => kept.event(&envelope.event),
@@ -159,6 +183,10 @@ impl Keep {
 struct Kept {
     keep: Keep,
     dir: PathBuf,
+    /// Where each action's kept logs are published as they are kept.
+    published: Option<KeptActions>,
+    /// Where a failed action's kept logs are told, as `INFO:` lines.
+    notes: Option<crate::console::forward::Notes>,
     actions: Vec<Value>,
     tests: Vec<Value>,
     /// Per `<label>/<mnemonic>`, how many actions have been kept.
@@ -213,6 +241,8 @@ impl Kept {
         Self {
             keep,
             dir,
+            published: None,
+            notes: None,
             actions: vec![],
             tests: vec![],
             action_counts: HashMap::new(),
@@ -304,14 +334,37 @@ impl Kept {
             let rel = Path::new("actions")
                 .join(&base)
                 .join(format!("{stem}.{stream}"));
-            if let Some(kept) = keep_file(
-                &self.dir,
-                file,
-                &rel,
-                Placement::Link,
-                &mut self.actions_not_kept,
-            ) {
+            if let Some(kept) = keep_file(&self.dir, file, &rel, &mut self.actions_not_kept) {
                 entry[stream] = json!(kept);
+            }
+        }
+        if let Some(published) = &self.published {
+            let at = |stream: &str| entry[stream].as_str().map(|rel| self.dir.join(rel));
+            let kept = KeptAction {
+                stdout: at("stdout"),
+                stderr: at("stderr"),
+            };
+            if kept != KeptAction::default() {
+                published
+                    .lock()
+                    .unwrap()
+                    .insert(id.primary_output.clone(), kept);
+            }
+        }
+        if !action.success {
+            let streams: Vec<(String, String)> = ["stderr", "stdout"]
+                .into_iter()
+                .filter_map(|stream| {
+                    let rel = entry[stream].as_str()?;
+                    Some((stream.to_string(), self.dir.join(rel).display().to_string()))
+                })
+                .collect();
+            if let Some(notes) = &self.notes {
+                // Bazel's events spell a non-ASCII label as Latin-1.
+                let label = crate::bes::repaired(label).unwrap_or_else(|| label.to_string());
+                for (stream, path) in &streams {
+                    notes.push(format!("INFO: {label} {mnemonic} {stream}: {path}").into_bytes());
+                }
             }
         }
         self.actions.push(entry);
@@ -363,13 +416,7 @@ impl Kept {
                 });
                 continue;
             }
-            if let Some(kept) = keep_file(
-                &self.dir,
-                file,
-                &rel,
-                Placement::Copy,
-                &mut self.tests_not_kept,
-            ) {
+            if let Some(kept) = keep_file(&self.dir, file, &rel, &mut self.tests_not_kept) {
                 files.insert(name.to_string(), json!(kept));
             }
         }
@@ -395,7 +442,7 @@ impl Kept {
         self.tests.push(entry);
     }
 
-    /// Copy the test logs a remote URI named from where Bazel left them, with
+    /// Keep the test logs a remote URI named from where Bazel left them, with
     /// the run and shard counts and last attempts known so far (unknown
     /// counts resolve only the first run and shard).
     fn find_remote_test_logs(&mut self) {
@@ -404,12 +451,7 @@ impl Kept {
                 self.tests_not_kept.not_local += 1;
                 continue;
             };
-            match place(
-                &Source::Path(source.clone()),
-                &self.dir,
-                &log.rel,
-                Placement::Copy,
-            ) {
+            match place(&Source::Path(source.clone()), &self.dir, &log.rel) {
                 Ok(kept) => {
                     self.tests[log.entry]["files"][log.name.as_str()] =
                         json!(kept.to_string_lossy());
@@ -497,14 +539,11 @@ impl Kept {
 
 /// Keep `file` at `rel` under `dir`; the relative path, or None when it was
 /// remote, inline or could not be kept (counted in `not_kept`).
-fn keep_file(
-    dir: &Path,
-    file: &File,
-    rel: &Path,
-    how: Placement,
-    not_kept: &mut NotKept,
-) -> Option<String> {
-    let source = match (crate::bes::local_path(file), file.file.as_ref()) {
+fn keep_file(dir: &Path, file: &File, rel: &Path, not_kept: &mut NotKept) -> Option<String> {
+    let source = match (
+        crate::bes::uri_of(file).and_then(crate::bes::local_path),
+        file.file.as_ref(),
+    ) {
         (Some(path), _) => Source::Path(path),
         (None, Some(file::File::Contents(bytes))) => Source::Bytes(bytes),
         _ => {
@@ -512,7 +551,7 @@ fn keep_file(
             return None;
         }
     };
-    match place(&source, dir, rel, how) {
+    match place(&source, dir, rel) {
         Ok(kept) => Some(kept.to_string_lossy().into_owned()),
         Err(e) => {
             tracing::debug!("could not keep {}: {e}", source.describe());
@@ -520,13 +559,6 @@ fn keep_file(
             None
         }
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Placement {
-    /// A hard link, else a copy.
-    Link,
-    Copy,
 }
 
 /// What a log is kept from: a local file, or the contents Bazel sent inline.
@@ -554,11 +586,12 @@ fn config_of(id: &Option<ConfigurationId>) -> String {
     id.as_ref().map(|c| c.id.clone()).unwrap_or_default()
 }
 
-/// Put `from` at `rel` under `dir`, making its folders; the path it took,
-/// relative to `dir`. Nothing is overwritten: two labels can map to one
-/// folder (`//a:b/c`, `//a/b:c`), so a taken name gets a numbered sibling
+/// Put `from` at `rel` under `dir`, making its folders: a file hard-linked,
+/// else copied, inline contents written; the path it took, relative to
+/// `dir`. Nothing is overwritten: two labels can map to one folder
+/// (`//a:b/c`, `//a/b:c`), so a taken name gets a numbered sibling
 /// (`test.log` → `test.2.log`).
-fn place(from: &Source, dir: &Path, rel: &Path, how: Placement) -> io::Result<PathBuf> {
+fn place(from: &Source, dir: &Path, rel: &Path) -> io::Result<PathBuf> {
     if let Some(parent) = dir.join(rel).parent() {
         fs::create_dir_all(parent)?;
     }
@@ -569,7 +602,7 @@ fn place(from: &Source, dir: &Path, rel: &Path, how: Placement) -> io::Result<Pa
             numbered(rel, n)
         };
         let to = dir.join(&candidate);
-        if let (Placement::Link, Source::Path(from)) = (how, from) {
+        if let Source::Path(from) = from {
             match fs::hard_link(from, &to) {
                 Ok(()) => return Ok(candidate),
                 Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
@@ -634,9 +667,11 @@ fn write_index(path: &Path, value: Value) {
 
 /// The folder a label's logs go in: its repository, package and name, each
 /// a path component that cannot climb out (`//a/b:c` → `a/b/c`,
-/// `@repo//a/b:c` → `external/repo/a/b/c`).
+/// `@repo//a/b:c` → `external/repo/a/b/c`), a non-ASCII name as meant
+/// (`crate::bes::repaired`), not as Bazel's events spell it.
 fn label_dir(label: &str) -> PathBuf {
-    let label = label.trim_start_matches('@');
+    let meant = crate::bes::repaired(label);
+    let label = meant.as_deref().unwrap_or(label).trim_start_matches('@');
     let (repo, rest) = match label.split_once("//") {
         Some((repo, rest)) => (repo, rest),
         None => ("", label),
@@ -767,6 +802,132 @@ mod tests {
         serde_json::from_slice(&fs::read(path).unwrap()).unwrap()
     }
 
+    /// A failed action's kept log is told to the console as an `INFO:`
+    /// line naming its label, mnemonic, stream and path; a successful
+    /// one's (`all`) is not.
+    #[test]
+    fn a_failed_actions_kept_log_is_noted_for_the_console() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(src.join("stderr-1"), "ERROR: broken\n").unwrap();
+        fs::write(src.join("stdout-2"), "ok\n").unwrap();
+        let dir = tmp.path().join("history");
+        let mut kept = Kept::new(
+            Keep {
+                actions: ActionLogs::All,
+                tests: TestLogs::None,
+            },
+            dir.clone(),
+        );
+        let notes = crate::console::forward::Notes::default();
+        kept.notes = Some(notes.clone());
+        kept.event(&action_event(
+            "//pkg:broken",
+            "Genrule",
+            false,
+            None,
+            Some(uri_file("stderr", &src.join("stderr-1"))),
+        ));
+        kept.event(&action_event(
+            "//pkg:fine",
+            "Genrule",
+            true,
+            Some(uri_file("stdout", &src.join("stdout-2"))),
+            None,
+        ));
+        let got: Vec<String> = notes
+            .take()
+            .into_iter()
+            .map(|n| String::from_utf8(n).unwrap())
+            .collect();
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert!(
+            got[0].starts_with("INFO: //pkg:broken Genrule stderr: "),
+            "{got:?}"
+        );
+        assert!(got[0].ends_with("Genrule-1.stderr"), "{got:?}");
+    }
+
+    /// The note spells a label as meant, not as Bazel's events do (a
+    /// non-ASCII label's UTF-8 bytes read as Latin-1).
+    #[test]
+    fn a_kept_logs_note_repairs_its_label() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(src.join("stderr-1"), "broke\n").unwrap();
+        let mut kept = Kept::new(
+            Keep {
+                actions: ActionLogs::Failed,
+                tests: TestLogs::None,
+            },
+            tmp.path().join("history"),
+        );
+        let notes = crate::console::forward::Notes::default();
+        kept.notes = Some(notes.clone());
+        let latin1: String = "//uni:café".bytes().map(char::from).collect();
+        kept.event(&action_event(
+            &latin1,
+            "Genrule",
+            false,
+            None,
+            Some(uri_file("stderr", &src.join("stderr-1"))),
+        ));
+        let got: Vec<String> = notes
+            .take()
+            .into_iter()
+            .map(|n| String::from_utf8(n).unwrap())
+            .collect();
+        assert!(
+            got[0].starts_with("INFO: //uni:café Genrule stderr: "),
+            "{got:?}"
+        );
+    }
+
+    /// Each kept action is published by its primary output as it is kept,
+    /// before the index is written, at the path it was kept at.
+    #[test]
+    fn kept_actions_are_published_as_they_are_kept() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(src.join("stderr-1"), "ERROR: broken\n").unwrap();
+        let dir = tmp.path().join("history");
+        let mut kept = Kept::new(
+            Keep {
+                actions: ActionLogs::Failed,
+                tests: TestLogs::None,
+            },
+            dir.clone(),
+        );
+        let published = KeptActions::default();
+        kept.published = Some(published.clone());
+        kept.event(&action_event(
+            "//pkg:broken",
+            "Genrule",
+            false,
+            None,
+            Some(uri_file("stderr", &src.join("stderr-1"))),
+        ));
+        let got = published
+            .lock()
+            .unwrap()
+            .get("bazel-out/bin/Genrule.out")
+            .cloned()
+            .unwrap();
+        assert!(got.stdout.is_none());
+        let stderr = got.stderr.unwrap();
+        assert!(stderr.starts_with(&dir), "{stderr:?}");
+        // Bazel replacing its own file leaves the kept one as it was.
+        fs::remove_file(src.join("stderr-1")).unwrap();
+        assert_eq!(fs::read_to_string(&stderr).unwrap(), "ERROR: broken\n");
+        assert!(
+            !dir.join("actions.json").exists(),
+            "published before the index"
+        );
+    }
+
     #[test]
     fn failed_actions_are_linked_and_indexed() {
         let tmp = tempfile::tempdir().unwrap();
@@ -885,7 +1046,7 @@ mod tests {
     }
 
     #[test]
-    fn test_logs_are_copied_by_status_and_cache() {
+    fn test_logs_are_linked_by_status_and_cache() {
         let tmp = tempfile::tempdir().unwrap();
         let log = tmp.path().join("test.log");
         fs::write(&log, "FAIL\n").unwrap();
@@ -931,15 +1092,15 @@ mod tests {
                 })
                 .collect();
             assert_eq!(labels, kept_labels, "{which:?}");
-            let copy = dir.join("testlogs/t/fails/run_1/shard_1/attempt_1/test.log");
-            assert_eq!(fs::read_to_string(&copy).unwrap(), "FAIL\n");
+            let kept = dir.join("testlogs/t/fails/run_1/shard_1/attempt_1/test.log");
+            assert_eq!(fs::read_to_string(&kept).unwrap(), "FAIL\n");
             #[cfg(unix)]
             {
                 use std::os::unix::fs::MetadataExt;
-                assert_ne!(
-                    fs::metadata(&copy).unwrap().ino(),
+                assert_eq!(
+                    fs::metadata(&kept).unwrap().ino(),
                     fs::metadata(&log).unwrap().ino(),
-                    "copied"
+                    "hard-linked, as an action's"
                 );
             }
             assert!(
@@ -1021,7 +1182,7 @@ mod tests {
         );
     }
 
-    /// A test log a remote cache names by `bytestream://` is copied from
+    /// A test log a remote cache names by `bytestream://` is kept from
     /// where Bazel left it: the last attempt's `test.log`, an earlier one's
     /// under `test_attempts/`, a sharded test's in its shard's folder.
     #[test]
@@ -1177,7 +1338,7 @@ mod tests {
     }
 
     /// A retry of the build in one stream: the abandoned attempt's remote log
-    /// is found before the retry rewrites it.
+    /// is found before the retry replaces it.
     #[test]
     fn a_retried_build_keeps_each_attempts_own_test_log() {
         use axl_proto::build_event_stream::{BuildStarted, Configuration, WorkspaceConfig};
@@ -1226,6 +1387,8 @@ mod tests {
         fs::write(logs.join("test.log"), "first\n").unwrap();
         kept.event(&result);
         kept.event(&started);
+        // As Bazel runs a test again: its log a new file at the same name.
+        fs::remove_file(logs.join("test.log")).unwrap();
         fs::write(logs.join("test.log"), "retry\n").unwrap();
         kept.event(&result);
         kept.finish();
@@ -1317,7 +1480,6 @@ mod tests {
             &Source::Path(tmp.path().join("gone")),
             &dir,
             Path::new("a/x.stderr"),
-            Placement::Link,
         );
         assert!(err.is_err());
         assert!(!dir.join("a/x.stderr").exists());
@@ -1330,6 +1492,9 @@ mod tests {
         assert_ne!(label_dir("@foo//x:t"), label_dir("//foo/x:t"));
         assert_eq!(label_dir("//:../../etc"), PathBuf::from("_/_/etc"));
         assert_eq!(label_dir(""), PathBuf::from("_"));
+        // A non-ASCII label as Bazel's events spell it (UTF-8 as Latin-1).
+        let spelled: String = "//uni:тест".bytes().map(char::from).collect();
+        assert_eq!(label_dir(&spelled), PathBuf::from("uni/тест"));
     }
 
     #[test]
@@ -1339,7 +1504,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            crate::bes::local_path(&f),
+            crate::bes::uri_of(&f).and_then(crate::bes::local_path),
             Some(PathBuf::from("/tmp/a b/c"))
         );
         assert_eq!(rfc3339(0, 5_000_000), "1970-01-01T00:00:00.005Z");

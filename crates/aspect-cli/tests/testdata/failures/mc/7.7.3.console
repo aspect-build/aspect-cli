@@ -1,0 +1,43 @@
+[32mComputing main repo mapping:[0m 
+[1A[K[32mLoading:[0m 
+[1A[K[32mLoading:[0m 0 packages loaded
+[1A[K[32mAnalyzing:[0m 3 targets (0 packages loaded, 0 targets configured)
+[1A[K[32mAnalyzing:[0m 3 targets (0 packages loaded, 0 targets configured)
+
+[1A[K[1A[K[32mINFO: [0mAnalyzed 3 targets (0 packages loaded, 0 targets configured).
+[32m[0 / 1][0m [Prepa] BazelWorkspaceStatusAction stable-status.txt
+[1A[K[31m[1mERROR: [0m${WORKSPACE}/mc/BUILD.bazel:2:5: output 'mc/d0.out' was not created
+[32m[1 / 4][0m 3 actions running
+    Checking d0; 0s darwin-sandbox
+    Checking e; 0s darwin-sandbox
+    Checking d1; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/mc/BUILD.bazel:2:5: Checking d0 failed: not all outputs were created or valid
+[32m[1 / 4][0m 3 actions running
+    Checking d0; 0s darwin-sandbox
+    Checking e; 0s darwin-sandbox
+    Checking d1; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/mc/BUILD.bazel:2:5: output 'mc/d1.out' was not created
+[32m[2 / 4][0m 2 actions running
+    Checking e; 0s darwin-sandbox
+    Checking d1; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/mc/BUILD.bazel:2:5: Checking d1 failed: not all outputs were created or valid
+[32m[2 / 4][0m 2 actions running
+    Checking e; 0s darwin-sandbox
+    Checking d1; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/mc/BUILD.bazel:3:4: output 'mc/e.out' was not created
+[32m[3 / 4][0m Checking e; 0s darwin-sandbox
+[1A[K[31m[1mERROR: [0m${WORKSPACE}/mc/BUILD.bazel:3:4: Checking e failed: not all outputs were created or valid
+[32m[3 / 4][0m Checking e; 0s darwin-sandbox
+[1A[K[32mINFO: [0mFound 3 targets...
+[32m[4 / 4][0m no actions running
+[1A[KUse --verbose_failures to see the command lines of failed build steps.
+[32m[4 / 4][0m no actions running
+[1A[K[32mINFO: [0mElapsed time: 0.061s, Critical Path: 0.02s
+[32m[4 / 4][0m no actions running
+[1A[K[32mINFO: [0m4 processes: 1 internal, 3 darwin-sandbox.
+[32m[4 / 4][0m no actions running
+[1A[K[31m[1mERROR: [0mBuild did NOT complete successfully
+[31m[1mFAILED:[0m 
+[1A[K[31m[1mFAILED:[0m 
+[1A[K[32mINFO: [0mBuild Event Protocol files produced successfully.
+[0m

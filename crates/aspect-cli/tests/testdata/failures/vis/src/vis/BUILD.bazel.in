@@ -1,0 +1,3 @@
+genrule(name = "vis", srcs = ["//priv:priv"], outs = ["vis.txt"], cmd = "true")
+genrule(name = "mt", srcs = [":nothere"], outs = ["mt.txt"], cmd = "true")
+genrule(name = "mp", srcs = ["//nosuchpkg:x"], outs = ["mp.txt"], cmd = "true")

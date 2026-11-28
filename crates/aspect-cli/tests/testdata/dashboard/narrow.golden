@@ -1,0 +1,12 @@
+ ⠋ aspect build · 12s
+┌─ Running (2) ────┐┌─ Results ────────┐
+│ Compilin…a.cc 3s ││ Targets ✗0 ✓0/0  │
+│ Linking …:bin 1s ││ Actions          │
+│                  ││  ? 3 unreported  │
+│                  ││  ─ 2 running     │
+└──────────────────┘└──────────────────┘
+┌─ Console ──────────────── following ─┐
+│ le                                   │
+│ Building...                          ┃
+└──────────────────────────────────────┘
+ q cancel · / find · e filter · ? keys

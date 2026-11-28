@@ -1,0 +1,56 @@
+exit 1
+── Failures (5) ──
+✗ //at:ok  loading · q/BUILD.bazel:1:8
+  │ Target '//at:ok' contains an error and its package is in error
+  ○ blocked: //q:on_at
+
+✗ //at2:t1  loading · at2/BUILD.bazel:1:8
+  │ its package has an error
+  │ //at2:t1: expected value of type 'list(output)' for attribute 'outs' of 'genrule', but got
+  │   "a.txt" (string)
+  │ //at2:t1: missing value for mandatory attribute 'outs' in 'genrule' rule
+
+✗ //at2:t2  loading · at2/BUILD.bazel:2:8
+  │ its package has an error
+  │ //at2:t2: expected value of type 'string' for attribute 'cmd' of 'genrule', but got 5 (int)
+  ○ blocked: //q3:u2
+
+✗ //at2:ok2  loading · q3/BUILD.bazel:3:8
+  │ its package has an error
+  │ Target '//at2:ok2' contains an error and its package is in error
+  ○ blocked: //q3:u3
+
+✗ //at2:ok  loading · q3/BUILD.bazel:1:8
+  │ its package has an error
+  │ Target '//at2:ok' contains an error and its package is in error
+  ○ blocked: //q3:u1, //q2:u
+
+── Other errors from Bazel ──
+ERROR: at/BUILD.bazel:1:8: //at:t: expected value of type 'list(output)' for attribute 'outs' of
+         'genrule', but got "notalist.txt" (string)
+ERROR: at/BUILD.bazel:1:8: //at:t: missing value for mandatory attribute 'outs' in 'genrule' rule
+0 built, 5 failed, 5 blocked · 0 tests passed, 0 failed · Bazel's raw log: ${FIXTURE}/9.3.3.console
+All of it: aspect history show t-replay
+--- Failures tab
+✗ //at:ok  loading · q/BUILD.bazel:1:8
+  │ Target '//at:ok' contains an error and its package is in error
+✗ //at2:t1  loading · at2/BUILD.bazel:1:8
+  │ its package has an error
+  │ //at2:t1: expected value of type 'list(output)' for attribute 'outs' of 'genrule', but got "a.txt" (string)
+  │ //at2:t1: missing value for mandatory attribute 'outs' in 'genrule' rule
+✗ //at2:t2  loading · at2/BUILD.bazel:2:8
+  │ its package has an error
+  │ //at2:t2: expected value of type 'string' for attribute 'cmd' of 'genrule', but got 5 (int)
+✗ //at2:ok2  loading · q3/BUILD.bazel:3:8
+  │ its package has an error
+  │ Target '//at2:ok2' contains an error and its package is in error
+✗ //at2:ok  loading · q3/BUILD.bazel:1:8
+  │ its package has an error
+  │ Target '//at2:ok' contains an error and its package is in error
+○ //q:on_at  blocked by //at:ok
+○ //q3:u1  blocked by //at2:ok
+○ //q2:u  blocked by //at2:ok
+○ //q3:u2  blocked by //at2:t2
+○ //q3:u3  blocked by //at2:ok2
+! at/BUILD.bazel:1:8: //at:t: expected value of type 'list(output)' for attribu…enrule', but got "notalist.txt" (string)
+! at/BUILD.bazel:1:8: //at:t: missing value for mandatory attribute 'outs' in 'genrule' rule

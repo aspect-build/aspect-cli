@@ -668,7 +668,8 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     ///   nothing is trimmed.
     /// * `keep_test_logs` - Keep test logs in the history (`bazel/<n>/testlogs/`,
     ///   listed in `bazel/<n>/testlogs.json`): `none` (the default), `failed`, `executed`
-    ///   (attempts this build ran, not cached) or `all`. Copied.
+    ///   (attempts this build ran, not cached) or `all`. Hard-linked from where
+    ///   Bazel wrote them, else copied.
     /// * `execution_log` - Enable Bazel execution log collection by passing a list of
     ///   consumers: sinks such as `execution_log.compact_file(path = "out.binpb.zst")`
     ///   or `execution_log.file(path = ...)`, and `execution_log.iterator(kinds = [...])`
@@ -678,6 +679,10 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     ///   undrained one cannot hang the build. `[]` writes the log with no consumer;
     ///   `[execution_log.record()]` only records it in the task invocation's
     ///   history, which is skipped where recording cannot be done (see `record`).
+    ///   Beside the caller's own binary or JSON log (`--execution_log_binary_file`,
+    ///   `--execution_log_json_file`), which Bazel will not write with a compact
+    ///   one, a list of only iterators (and `record()`) writes none: each
+    ///   iterator ends with no entries, a task's own with a warning.
     ///
     /// **Examples**
     ///
@@ -883,7 +888,8 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     ///   nothing is trimmed.
     /// * `keep_test_logs` - Keep test logs in the history (`bazel/<n>/testlogs/`,
     ///   listed in `bazel/<n>/testlogs.json`): `none` (the default), `failed`, `executed`
-    ///   (attempts this build ran, not cached) or `all`. Copied.
+    ///   (attempts this build ran, not cached) or `all`. Hard-linked from where
+    ///   Bazel wrote them, else copied.
     /// * `execution_log` - Enable Bazel execution log collection by passing a list of
     ///   consumers: sinks such as `execution_log.compact_file(path = "out.binpb.zst")`
     ///   or `execution_log.file(path = ...)`, and `execution_log.iterator(kinds = [...])`
@@ -893,6 +899,10 @@ pub(crate) fn bazel_methods(registry: &mut MethodsBuilder) {
     ///   undrained one cannot hang the build. `[]` writes the log with no consumer;
     ///   `[execution_log.record()]` only records it in the task invocation's
     ///   history, which is skipped where recording cannot be done (see `record`).
+    ///   Beside the caller's own binary or JSON log (`--execution_log_binary_file`,
+    ///   `--execution_log_json_file`), which Bazel will not write with a compact
+    ///   one, a list of only iterators (and `record()`) writes none: each
+    ///   iterator ends with no entries, a task's own with a warning.
     ///
     /// **Examples**
     ///
@@ -1591,7 +1601,10 @@ fn register_build_events(globals: &mut GlobalsBuilder) {
 
     /// Read a build event stream kept on disk: a `--build_event_binary_file`,
     /// such as the `build_events.binpb` the task history keeps in each
-    /// build's folder (`ctx.std.history`'s records name the folders). Iterate
+    /// build's folder (`ctx.std.history`'s records name the folders), or,
+    /// with `format = "json"`, a `--build_event_json_file`, each line an
+    /// event in proto3's JSON form (a field newer than the CLI's protos left
+    /// out, as from the binary form). Iterate
     /// it for the same `BuildEvent` values a live build's `iterator()`
     /// yields, so code written for a build's events reads an earlier one's.
     /// `kinds=` filters as `iterator()`'s does. Read lazily as iterated, it
@@ -1609,7 +1622,11 @@ fn register_build_events(globals: &mut GlobalsBuilder) {
         #[starlark(require = named, default = NoneOr::None)] kinds: NoneOr<
             UnpackList<values::Value>,
         >,
+        #[starlark(require = named, default = "binary")] format: &str,
     ) -> anyhow::Result<stored_events::StoredBuildEvents> {
+        let format = bazel::bes::stored::Format::parse(format).ok_or_else(|| {
+            anyhow::anyhow!("format must be \"binary\" or \"json\", got {format:?}")
+        })?;
         let kinds = match kinds {
             NoneOr::None => None,
             NoneOr::Other(list) => {
@@ -1625,7 +1642,27 @@ fn register_build_events(globals: &mut GlobalsBuilder) {
                 Some(set)
             }
         };
-        stored_events::StoredBuildEvents::open(std::path::Path::new(path), kinds)
+        stored_events::StoredBuildEvents::open(std::path::Path::new(path), kinds, format)
+    }
+
+    /// `text` from a build event (a label, a description, a failure's
+    /// message) as Bazel meant it: Bazel's build events carry a non-ASCII
+    /// string's UTF-8 bytes each as a Latin-1 character (`Ã©` for `é`), and
+    /// text that is all such characters, at least one past ASCII, and
+    /// decodes as UTF-8 comes back decoded; any other text as it is.
+    fn repaired(#[starlark(require = pos)] text: &str) -> anyhow::Result<String> {
+        Ok(bazel::bes::repaired(text).unwrap_or_else(|| text.to_string()))
+    }
+
+    /// The local path a build event's `file://` URI (a `File`'s `uri`) names:
+    /// its `%XX` escapes decoded, and of Bazel's two spellings of a
+    /// non-ASCII name (its UTF-8 bytes each as a Latin-1 character, or as
+    /// meant, by Bazel version) the URI's, unless only the one meant exists
+    /// on disk. None for any other scheme (`bytestream://`).
+    fn local_path(#[starlark(require = pos)] uri: &str) -> anyhow::Result<NoneOr<String>> {
+        Ok(NoneOr::from_option(
+            bazel::bes::local_path(uri).map(|p| p.to_string_lossy().into_owned()),
+        ))
     }
 
     /// Create a handle iterating this build's BES stream. Pass it in
@@ -1745,7 +1782,9 @@ fn register_execlog_sinks(globals: &mut GlobalsBuilder) {
     /// `type(entry.type)` returns — before the entry becomes a Starlark value. This
     /// is worth reaching for: a log holds one entry per spawn *plus* one per file,
     /// directory, input set and runfiles tree, so `kinds = ["spawn"]` is commonly a
-    /// few percent of the stream.
+    /// few percent of the stream. Optional `file_paths=` keeps of the `file`
+    /// entries only those whose path contains one of its strings
+    /// (`file_paths = ["/testlogs/"]` for a test's logs), in Rust too.
     ///
     /// The handle must be drained before `build.wait()`, which releases any still-bound
     /// handle so a task that forgets cannot hang. Because Bazel writes the log to a
@@ -1766,32 +1805,68 @@ fn register_execlog_sinks(globals: &mut GlobalsBuilder) {
     #[starlark(as_type = iter::ExecLogIter)]
     fn iterator<'v>(
         #[starlark(require = named, default = NoneOr::None)] kinds: NoneOr<
-            UnpackList<values::Value>,
+            UnpackList<values::Value<'v>>,
         >,
+        #[starlark(require = named, default = NoneOr::None)] file_paths: NoneOr<UnpackList<String>>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<iter::ExecLogIter> {
-        let kinds = match kinds {
-            NoneOr::None => None,
-            NoneOr::Other(list) => {
-                if list.items.is_empty() {
-                    anyhow::bail!(
-                        "kinds=[] is not valid; omit `kinds` to receive every entry kind"
-                    );
-                }
-                let mut set = std::collections::HashSet::new();
-                for item in &list.items {
-                    set.insert(iter::execlog::parse_entry_kind(*item)?);
-                }
-                Some(set)
-            }
-        };
-        // The run's signals travel with the handle, so blocking iteration over it
-        // stays a safe point on a cancel (see `ExecLogIter::iter_next`).
-        Ok(iter::ExecLogIter::new(
-            Env::from_eval(eval)?.signals.clone(),
-            kinds,
-        ))
+        exec_log_iterator(kinds, file_paths, false, eval)
     }
+
+    /// `iterator`, marked as the one `bazel/exec_log.axl` feeds
+    /// `exec_log_event` hooks from: beside the caller's own execution log it
+    /// ends with no entries without the warning a task's own iterator gets.
+    /// Private to the builtins.
+    #[starlark(as_type = iter::ExecLogIter)]
+    fn _hook_iterator<'v>(
+        #[starlark(require = named, default = NoneOr::None)] kinds: NoneOr<
+            UnpackList<values::Value<'v>>,
+        >,
+        #[starlark(require = named, default = NoneOr::None)] file_paths: NoneOr<UnpackList<String>>,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<iter::ExecLogIter> {
+        exec_log_iterator(kinds, file_paths, true, eval)
+    }
+}
+
+/// An execution-log handle for `kinds` (every kind when None), its `file`
+/// entries only those whose path contains one of `file_paths` (every one
+/// when None), `hook` if the `exec_log_event` hooks' (see
+/// `ExecLogIter::is_hook`).
+fn exec_log_iterator<'v>(
+    kinds: NoneOr<UnpackList<values::Value<'v>>>,
+    file_paths: NoneOr<UnpackList<String>>,
+    hook: bool,
+    eval: &mut Evaluator<'v, '_, '_>,
+) -> anyhow::Result<iter::ExecLogIter> {
+    let file_paths = match file_paths {
+        NoneOr::None => None,
+        NoneOr::Other(list) if list.items.is_empty() => {
+            anyhow::bail!(
+                "file_paths=[] is not valid; omit `file_paths` to receive every file entry"
+            )
+        }
+        NoneOr::Other(list) => Some(list.items),
+    };
+    let kinds = match kinds {
+        NoneOr::None => None,
+        NoneOr::Other(list) => {
+            if list.items.is_empty() {
+                anyhow::bail!("kinds=[] is not valid; omit `kinds` to receive every entry kind");
+            }
+            let mut set = std::collections::HashSet::new();
+            for item in &list.items {
+                set.insert(iter::execlog::parse_entry_kind(*item)?);
+            }
+            Some(set)
+        }
+    };
+    // The run's signals travel with the handle, so blocking iteration over it
+    // stays a safe point on a cancel (see `ExecLogIter::iter_next`).
+    Ok(
+        iter::ExecLogIter::with_hook(Env::from_eval(eval)?.signals.clone(), kinds, hook)
+            .with_file_paths(file_paths),
+    )
 }
 
 #[starlark_module]
@@ -1861,8 +1936,29 @@ fn register_types(globals: &mut GlobalsBuilder) {
         StarlarkValueAsType::new();
 }
 
+#[starlark_module]
+fn register_functions(globals: &mut GlobalsBuilder) {
+    /// `flags` as a screen may show them, what may be a secret hidden: the
+    /// rules the build event stream is redacted by (a header's value, an
+    /// env var's not on the `ALLOW_ENV` allowlist, a URL's login), and
+    /// what a setting named like a secret holds, whatever flag carries it
+    /// (`--define=API_TOKEN=x`, `--test_arg=--password=x`, and the next
+    /// `--test_arg=` after a bare `--test_arg=--password`). A `key=value`
+    /// string is redacted as such a setting, so a workspace status or build
+    /// metadata entry passed as one comes back with its value hidden when
+    /// its key reads as a secret's. One string out per string in.
+    fn redact_flags(
+        #[starlark(require = pos)] flags: UnpackList<String>,
+    ) -> anyhow::Result<Vec<String>> {
+        Ok(bazel::bes::redact::redact_shown_args(
+            flags.items.iter().map(String::as_str),
+        ))
+    }
+}
+
 pub fn register_globals(globals: &mut GlobalsBuilder) {
     register_types(globals);
+    register_functions(globals);
 
     globals.namespace("query", |globals| {
         register_query_types(globals);
@@ -1978,6 +2074,78 @@ mod tests {
                 ["--plain"]
             );
         });
+    }
+
+    /// `bazel.redact_flags` gives one string per string, flags and
+    /// `key=value` settings redacted as a screen shows them.
+    #[test]
+    fn redact_flags_hides_secret_named_settings() {
+        let got = crate::test::eval(
+            r#"bazel.redact_flags(["--define=API_TOKEN=x", "--jobs=4", "STABLE_KEY=k", "//a:b"])"#,
+        )
+        .repr()
+        .unwrap();
+        assert_eq!(
+            got,
+            r#"["--define=API_TOKEN=<REDACTED>", "--jobs=4", "STABLE_KEY=<REDACTED>", "//a:b"]"#
+        );
+    }
+
+    /// Bazel's Latin-1 spelling of UTF-8 decoded, other text as it is; a
+    /// `file://` URI's path decoded, none for another scheme.
+    #[test]
+    fn build_events_repaired_and_local_path() {
+        let got = crate::test::eval(
+            r#"(
+    bazel.build_events.repaired("cafÃ©"),
+    bazel.build_events.repaired("café"),
+    bazel.build_events.local_path("file:///nowhere/a%20b.log"),
+    bazel.build_events.local_path("bytestream://cache/blobs/x/1"),
+)"#,
+        )
+        .repr()
+        .unwrap();
+        assert_eq!(got, r#"("caf\xe9", "caf\xe9", "/nowhere/a b.log", None)"#);
+    }
+
+    /// A `--build_event_json_file` reads as the binary stream's events; a
+    /// format neither is refused.
+    #[test]
+    fn build_events_read_takes_a_json_stream() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bep.json");
+        std::fs::write(
+            &path,
+            concat!(
+                r#"{"id":{"actionCompleted":{"primaryOutput":"bazel-out/a","label":"//a:b"}},"action":{"success":false,"type":"Genrule","exitCode":1}}"#,
+                "\n",
+                r#"{"id":{"buildFinished":{}},"finished":{"exitCode":{"name":"BUILD_FAILURE","code":1}},"lastMessage":true}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        let got = crate::test::eval(&format!(
+            r#"
+events = bazel.build_events.read({path:?}, format = "json")
+read = [(e.kind, getattr(e.payload, "type", None)) for e in events]
+(read, events.complete, events.error)
+"#,
+            path = path.display().to_string()
+        ))
+        .repr()
+        .unwrap();
+        assert_eq!(
+            got,
+            r#"([("action_completed", "Genrule"), ("build_finished", None)], True, None)"#
+        );
+        let err = crate::test::eval(&format!(
+            "bazel.build_events.read({:?}, format = \"xml\")",
+            path.display().to_string()
+        ))
+        .repr()
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("format must be"), "{err}");
     }
 
     #[test]

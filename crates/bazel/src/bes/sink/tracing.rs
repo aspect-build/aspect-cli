@@ -203,10 +203,6 @@ fn action_span(action: &ActionExecuted, id: &ActionCompletedId) -> Option<Comple
             debug_attribute("stderr", action.stderr.as_ref()),
             debug_attribute("primary_output", action.primary_output.as_ref()),
             debug_attribute("failure_detail", action.failure_detail.as_ref()),
-            debug_attribute(
-                "action_metadata_logs",
-                non_empty(&action.action_metadata_logs),
-            ),
             debug_attribute("strategy_details", non_empty(&action.strategy_details)),
         ]
         .into_iter()

@@ -1,0 +1,1 @@
+build --nokeep_going --build_event_publish_all_actions //nk2:all

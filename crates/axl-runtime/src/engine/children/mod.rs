@@ -460,6 +460,30 @@ pub fn wait_with_output(mut child: Child, bound: &Bound) -> io::Result<Output> {
     })
 }
 
+/// [`wait_with_output`], calling `between` each `every` while the child runs.
+pub fn wait_with_output_while(
+    mut child: Child,
+    bound: &Bound,
+    every: Duration,
+    mut between: impl FnMut(),
+) -> io::Result<Output> {
+    drop(child.stdin.take());
+    let stdout = child.stdout.take().map(drain_on_thread);
+    let stderr = child.stderr.take().map(drain_on_thread);
+    let cell = RefCell::new(Some(child));
+    let status = loop {
+        if let Some(status) = wait(&cell, bound, Some(every))? {
+            break status;
+        }
+        between();
+    };
+    Ok(Output {
+        status,
+        stdout: join_drained(stdout)?,
+        stderr: join_drained(stderr)?,
+    })
+}
+
 fn drain_on_thread<R: Read + Send + 'static>(
     mut reader: R,
 ) -> std::thread::JoinHandle<io::Result<Vec<u8>>> {

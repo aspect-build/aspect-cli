@@ -166,16 +166,15 @@ impl Severity {
 }
 
 /// Format a severity line: `<LABEL>: <msg>`, the label in its role of
-/// `palette`. The colon and message sit outside the label's style, so with no
-/// palette it is a plain `LABEL:` (a non-rendering log gets no stray escapes).
+/// `palette` ([`aspect_theme::label_line`], as the console's own notes are).
+/// The colon and message sit outside the label's style, so with no palette
+/// it is a plain `LABEL:` (a non-rendering log gets no stray escapes).
 ///
 /// Pure (no I/O) so both the wording and the color gating are unit-testable;
 /// [`emit`] wraps it for the stderr side effect.
 fn format_line(sev: Severity, palette: Option<&aspect_theme::Palette>, msg: &str) -> String {
-    match palette {
-        Some(p) => format!("{}: {msg}", p.paint(sev.role(), sev.label())),
-        None => format!("{}: {msg}", sev.label()),
-    }
+    let sgr = palette.map(|p| p.sgr(sev.role())).unwrap_or_default();
+    aspect_theme::label_line(&sgr, sev.label(), &format!(" {msg}"))
 }
 
 /// The process's theme when stderr takes color
@@ -225,6 +224,25 @@ pub fn error(msg: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A note the console writes (a kept log's path) is the CLI's line: the
+    /// same bytes as `diag::info`'s, with the same palette and without one.
+    #[test]
+    fn a_console_note_is_a_diag_info_line() {
+        let dark = aspect_theme::Palette::aspect_dark(aspect_theme::Depth::Ansi256);
+        for palette in [Some(&dark), None] {
+            let style = match palette {
+                Some(p) => bazel::console::report::Style::themed(p),
+                None => bazel::console::report::Style::default(),
+            };
+            let notes = bazel::console::forward::Notes::styled(style.info);
+            notes.push(b"INFO: //a:b Genrule stderr: /h/x".to_vec());
+            assert_eq!(
+                String::from_utf8(notes.take().remove(0)).unwrap(),
+                format_line(Severity::Info, palette, "//a:b Genrule stderr: /h/x"),
+            );
+        }
+    }
 
     #[test]
     fn colorized_matches_axl_severity_style() {

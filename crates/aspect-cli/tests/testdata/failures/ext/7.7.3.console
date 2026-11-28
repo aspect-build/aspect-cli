@@ -1,0 +1,75 @@
+[32mComputing main repo mapping:[0m 
+[1A[K[32mLoading:[0m 
+[1A[K[32mLoading:[0m 0 packages loaded
+[1A[K[31m[1mERROR: [0m${OUTPUT_BASE}/external/ext~/q/BUILD.bazel:1:8: @@ext~//q:x: no such attribute 'bogus' in 'genrule' rule
+[32mLoading:[0m 0 packages loaded
+[1A[K[31m[1mERROR: [0mpackage contains errors: q: @@ext~//q:x: no such attribute 'bogus' in 'genrule' rule
+[32mLoading:[0m 0 packages loaded
+[1A[K[31m[1mERROR: [0mTraceback (most recent call last):
+	File "${OUTPUT_BASE}/external/ext~/s/BUILD.bazel", line 2, column 10, in <toplevel>
+		bad_macro(name = "m")
+	File "${OUTPUT_BASE}/external/ext~/s/defs.bzl", line 2, column 9, in bad_macro
+		fail("bad_macro refuses " + name)
+Error in fail: bad_macro refuses m
+[32mLoading:[0m 0 packages loaded
+[1A[K[31m[1mERROR: [0mpackage contains errors: s: Traceback (most recent call last):
+	File "${OUTPUT_BASE}/external/ext~/s/BUILD.bazel", line 2, column 10, in <toplevel>
+		bad_macro(name = "m")
+	File "${OUTPUT_BASE}/external/ext~/s/defs.bzl", line 2, column 9, in bad_macro
+		fail("bad_macro refuses " + name)
+Error in fail: bad_macro refuses m
+[32mLoading:[0m 0 packages loaded
+[1A[K[32mAnalyzing:[0m 4 targets (0 packages loaded, 0 targets configured)
+[1A[K[31m[1mERROR: [0m${WORKSPACE}/d/BUILD.bazel:1:8: Target '@@ext~//q:x' contains an error and its package is in error and referenced by '//d:d'
+[32mAnalyzing:[0m 4 targets (0 packages loaded, 0 targets configured)
+
+[1A[K[1A[K[31m[1mERROR: [0m${OUTPUT_BASE}/external/ext~/s/BUILD.bazel: no such target '@@ext~//s:z': target 'z' not declared in package 's' defined by ${OUTPUT_BASE}/external/ext~/s/BUILD.bazel
+[32mAnalyzing:[0m 4 targets (0 packages loaded, 0 targets configured)
+
+[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/d/BUILD.bazel:3:8: no such target '@@ext~//s:z': target 'z' not declared in package 's' defined by ${OUTPUT_BASE}/external/ext~/s/BUILD.bazel and referenced by '//d:f'
+[32mAnalyzing:[0m 4 targets (0 packages loaded, 0 targets configured)
+
+[1A[K[1A[K[31m[1mERROR: [0mTraceback (most recent call last):
+	File "${OUTPUT_BASE}/external/ext~/r/BUILD.bazel", line 2, column 2, in <toplevel>
+		m(name = "y")
+	File "${OUTPUT_BASE}/external/ext~/r/defs.bzl", line 2, column 9, in m
+		fail("ext macro refuses " + name)
+Error in fail: ext macro refuses y
+[32mAnalyzing:[0m 4 targets (0 packages loaded, 0 targets configured)
+
+[1A[K[1A[K[31m[1mERROR: [0m${OUTPUT_BASE}/external/ext~/r/BUILD.bazel: no such target '@@ext~//r:y': target 'y' not declared in package 'r' defined by ${OUTPUT_BASE}/external/ext~/r/BUILD.bazel
+[32mAnalyzing:[0m 4 targets (0 packages loaded, 0 targets configured)
+
+[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/d/BUILD.bazel:2:8: no such target '@@ext~//r:y': target 'y' not declared in package 'r' defined by ${OUTPUT_BASE}/external/ext~/r/BUILD.bazel and referenced by '//d:e'
+[32mAnalyzing:[0m 4 targets (0 packages loaded, 0 targets configured)
+
+[1A[K[1A[K[35mWARNING: [0merrors encountered while analyzing target '//d:e', it will not be built.
+Analysis failed
+[32mAnalyzing:[0m 4 targets (0 packages loaded, 0 targets configured)
+
+[1A[K[1A[K[35mWARNING: [0merrors encountered while analyzing target '@@ext~//q:x', it will not be built.
+Analysis failed
+[32mAnalyzing:[0m 4 targets (0 packages loaded, 0 targets configured)
+
+[1A[K[1A[K[35mWARNING: [0merrors encountered while analyzing target '//d:f', it will not be built.
+Analysis failed
+[32mAnalyzing:[0m 4 targets (0 packages loaded, 0 targets configured)
+
+[1A[K[1A[K[32mINFO: [0mAnalyzed 4 targets (0 packages loaded, 0 targets configured).
+
+[1A[K[35mWARNING: [0merrors encountered while analyzing target '//d:d', it will not be built.
+Analysis failed
+
+[1A[K[32mINFO: [0mFound 0 targets...
+
+[1A[K[31m[1mERROR: [0mcommand succeeded, but there were errors parsing the target pattern
+
+[1A[K[32mINFO: [0mElapsed time: 0.111s, Critical Path: 0.01s
+
+[1A[K[32mINFO: [0m1 process: 1 internal.
+
+[1A[K[31m[1mERROR: [0mBuild did NOT complete successfully
+[31m[1mFAILED:[0m 
+[1A[K[31m[1mFAILED:[0m 
+[1A[K[32mINFO: [0mBuild Event Protocol files produced successfully.
+[0m

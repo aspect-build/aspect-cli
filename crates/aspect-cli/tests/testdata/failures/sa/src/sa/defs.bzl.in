@@ -1,0 +1,6 @@
+def _impl(ctx):
+    o = ctx.actions.declare_file("shared.txt")
+    ctx.actions.run_shell(outputs = [o], command = "echo same > " + o.path, mnemonic = "Shared")
+    return [DefaultInfo(files = depset([o]))]
+
+same = rule(implementation = _impl)

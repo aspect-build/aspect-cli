@@ -1,0 +1,16 @@
+exit 1
+── Failures (1) ──
+✗ //nk2:m2  nk2/BUILD.bazel:2:8
+  │ missing input file '//nk2:gone2.txt'
+
+── Other errors from Bazel ──
+ERROR: nk2/BUILD.bazel:1:8: Executing genrule //nk2:m1 failed: missing input file
+         '//nk2:gone1.txt'
+ERROR: nk2/BUILD.bazel:1:8: Executing genrule //nk2:m1 failed: 1 input file(s) do not exist
+0 built, 1 failed · 0 tests passed, 0 failed · Bazel's raw log: ${FIXTURE}/7.7.3.console
+All of it: aspect history show t-replay
+--- Failures tab
+✗ //nk2:m2  nk2/BUILD.bazel:2:8
+  │ missing input file '//nk2:gone2.txt'
+! nk2/BUILD.bazel:1:8: Executing genrule //nk2:m1 failed: missing input file '//nk2:gone1.txt'
+! nk2/BUILD.bazel:1:8: Executing genrule //nk2:m1 failed: 1 input file(s) do not exist

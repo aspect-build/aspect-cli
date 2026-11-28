@@ -1,0 +1,121 @@
+exit 1
+── Failures (first 10 of 37) ──
+✗ //kgo/p02:x  loading · kgo/p02/BUILD.bazel:1:8
+  │ its package has an error
+  │ //kgo/p02:x: no such attribute 'bogus_attr_2' in 'genrule' rule
+
+✗ //kgo/p01:x  loading · kgo/p01/BUILD.bazel:1:8
+  │ its package has an error
+  │ //kgo/p01:x: no such attribute 'bogus_attr_1' in 'genrule' rule
+
+✗ //kgo/p04:x  loading · kgo/p04/BUILD.bazel:1:8
+  │ its package has an error
+  │ //kgo/p04:x: no such attribute 'bogus_attr_4' in 'genrule' rule
+
+✗ //kgo/p03:x  loading · kgo/p03/BUILD.bazel:1:8
+  │ its package has an error
+  │ //kgo/p03:x: no such attribute 'bogus_attr_3' in 'genrule' rule
+
+✗ //kgo/p07:x  loading · kgo/p07/BUILD.bazel:1:8
+  │ its package has an error
+  │ //kgo/p07:x: no such attribute 'bogus_attr_7' in 'genrule' rule
+
+✗ //kgo/p05:x  loading · kgo/p05/BUILD.bazel:1:8
+
+✗ //kgo/p00:x  loading · kgo/p00/BUILD.bazel:1:8
+
+✗ //kgo/p06:x  loading · kgo/p06/BUILD.bazel:1:8
+
+✗ //kgo/p11:x  loading · kgo/p11/BUILD.bazel:1:8
+
+✗ //kgo/p10:x  loading · kgo/p10/BUILD.bazel:1:8
+… and 27 more failures · aspect history show t-replay
+0 built, 37 failed · 0 tests passed, 0 failed · Bazel's raw log: ${FIXTURE}/8.9.0.console
+All of it: aspect history show t-replay
+--- Failures tab
+✗ //kgo/p02:x  loading · kgo/p02/BUILD.bazel:1:8
+  │ its package has an error
+  │ //kgo/p02:x: no such attribute 'bogus_attr_2' in 'genrule' rule
+✗ //kgo/p01:x  loading · kgo/p01/BUILD.bazel:1:8
+  │ its package has an error
+  │ //kgo/p01:x: no such attribute 'bogus_attr_1' in 'genrule' rule
+✗ //kgo/p04:x  loading · kgo/p04/BUILD.bazel:1:8
+  │ its package has an error
+  │ //kgo/p04:x: no such attribute 'bogus_attr_4' in 'genrule' rule
+✗ //kgo/p03:x  loading · kgo/p03/BUILD.bazel:1:8
+  │ its package has an error
+  │ //kgo/p03:x: no such attribute 'bogus_attr_3' in 'genrule' rule
+✗ //kgo/p07:x  loading · kgo/p07/BUILD.bazel:1:8
+  │ its package has an error
+  │ //kgo/p07:x: no such attribute 'bogus_attr_7' in 'genrule' rule
+✗ //kgo/p05:x  loading · kgo/p05/BUILD.bazel:1:8
+  │ its package has an error
+  │ //kgo/p05:x: no such attribute 'bogus_attr_5' in 'genrule' rule
+✗ //kgo/p00:x  loading · kgo/p00/BUILD.bazel:1:8
+  │ its package has an error
+  │ //kgo/p00:x: no such attribute 'bogus_attr_0' in 'genrule' rule
+✗ //kgo/p06:x  loading · kgo/p06/BUILD.bazel:1:8
+  │ its package has an error
+  │ //kgo/p06:x: no such attribute 'bogus_attr_6' in 'genrule' rule
+✗ //kgo/p11:x  loading · kgo/p11/BUILD.bazel:1:8
+  │ its package has an error
+  │ //kgo/p11:x: no such attribute 'bogus_attr_11' in 'genrule' rule
+✗ //kgo/p10:x  loading · kgo/p10/BUILD.bazel:1:8
+  │ its package has an error
+  │ //kgo/p10:x: no such attribute 'bogus_attr_10' in 'genrule' rule
+✗ //kgo/p08:x  loading · kgo/p08/BUILD.bazel:1:8
+  │ its package has an error
+  │ //kgo/p08:x: no such attribute 'bogus_attr_8' in 'genrule' rule
+✗ //kgo/p09:x  loading · kgo/p09/BUILD.bazel:1:8
+  │ its package has an error
+  │ //kgo/p09:x: no such attribute 'bogus_attr_9' in 'genrule' rule
+✗ //kg:f10  Genrule · exit 4 · kg/BUILD.bazel:11:8
+  │ failure 10 here
+✗ //kg:f15  Genrule · exit 2 · kg/BUILD.bazel:16:8
+  │ failure 15 here
+✗ //kg:f02  Genrule · exit 3 · kg/BUILD.bazel:3:8
+  │ failure 2 here
+✗ //kg:f14  Genrule · exit 1 · kg/BUILD.bazel:15:8
+  │ failure 14 here
+✗ //kg:f12  Genrule · exit 6 · kg/BUILD.bazel:13:8
+  │ failure 12 here
+✗ //kg:f09  Genrule · exit 3 · kg/BUILD.bazel:10:8
+  │ failure 9 here
+✗ //kg:f06  Genrule · exit 7 · kg/BUILD.bazel:7:8
+  │ failure 6 here
+✗ //kg:f01  Genrule · exit 2 · kg/BUILD.bazel:2:8
+  │ failure 1 here
+✗ //kg:f00  Genrule · exit 1 · kg/BUILD.bazel:1:8
+  │ failure 0 here
+✗ //kg:f05  Genrule · exit 6 · kg/BUILD.bazel:6:8
+  │ failure 5 here
+✗ //kg:f07  Genrule · exit 1 · kg/BUILD.bazel:8:8
+  │ failure 7 here
+✗ //kg:f03  Genrule · exit 4 · kg/BUILD.bazel:4:8
+  │ failure 3 here
+✗ //kg:f13  Genrule · exit 7 · kg/BUILD.bazel:14:8
+  │ failure 13 here
+✗ //kg:f04  Genrule · exit 5 · kg/BUILD.bazel:5:8
+  │ failure 4 here
+✗ //kg:f08  Genrule · exit 2 · kg/BUILD.bazel:9:8
+  │ failure 8 here
+✗ //kg:f11  Genrule · exit 5 · kg/BUILD.bazel:12:8
+  │ failure 11 here
+✗ //kg:f21  Genrule · exit 1 · kg/BUILD.bazel:22:8
+  │ failure 21 here
+✗ //kg:f20  Genrule · exit 7 · kg/BUILD.bazel:21:8
+  │ failure 20 here
+✗ //kg:f22  Genrule · exit 2 · kg/BUILD.bazel:23:8
+  │ failure 22 here
+✗ //kg:f17  Genrule · exit 4 · kg/BUILD.bazel:18:8
+  │ failure 17 here
+✗ //kg:f16  Genrule · exit 3 · kg/BUILD.bazel:17:8
+  │ failure 16 here
+✗ //kg:f19  Genrule · exit 6 · kg/BUILD.bazel:20:8
+  │ failure 19 here
+✗ //kg:f18  Genrule · exit 5 · kg/BUILD.bazel:19:8
+  │ failure 18 here
+✗ //kg:f24  Genrule · exit 4 · kg/BUILD.bazel:25:8
+  │ failure 24 here
+✗ //kg:f23  Genrule · exit 3 · kg/BUILD.bazel:24:8
+  │ failure 23 here

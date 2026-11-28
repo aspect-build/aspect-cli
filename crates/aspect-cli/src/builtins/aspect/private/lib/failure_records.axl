@@ -1,0 +1,913 @@
+"""A build's failure records, from its build events (`collect_event`): the
+counts, every failed action, test and target with its logs, and the root
+causes that block other targets."""
+
+load("./bazel_results.axl", "bes_get", "testlog_path", "testlogs_dir", "testlogs_rel", "uri_to_path_under_root")
+load("./term_text.axl", "term_text")
+
+_counts = term_text.counts
+_plain = term_text.plain
+
+# The most of a failure's log read into its view: the end, where the failure
+# usually is.
+_MAX_LOG_BYTES = 1024 * 1024
+
+# Test statuses that are failures; `no_status`, `incomplete` and the like are
+# not.
+_FAILED_TEST_STATUSES = ["failed", "timeout", "failed_to_build", "remote_failure", "tool_halted_before_testing"]
+
+# The Aborted reasons a target counts as failed for: the rest (skipped, an
+# interrupt) are skipped.
+_FAILED_ABORTS = ["analysis_failure", "loading_failure"]
+
+def progress_counts(status: str) -> tuple | None:
+    """`(done, total)` from Bazel's status line (`[5,619 / 13,381] …`), or
+    None when it has none."""
+    status = bazel_line(status)
+    if not status.startswith("[") or " / " not in status or "]" not in status:
+        return None
+    inner = status[1:status.index("]")]
+    done, _, total = inner.partition(" / ")
+    done = done.replace(",", "").strip()
+    total = total.replace(",", "").strip()
+    if not done.isdigit() or not total.isdigit():
+        return None
+    return (int(done), int(total))
+
+# `text` from a build event as Bazel meant it: a non-ASCII string's UTF-8
+# bytes come each as a Latin-1 character.
+_repaired = bazel.build_events.repaired
+
+def _label_of(event_id) -> str:
+    """The label a build event's id names, decoded (`repaired`)."""
+    return _repaired(str(bes_get(event_id, "label", "") or ""))
+
+def _config_id(event_id) -> str:
+    """The id of the configuration a build event's id names, else ""."""
+    return str(bes_get(bes_get(event_id, "configuration", None), "id", "") or "")
+
+def test_shape(state: dict, label: str, config: str) -> tuple:
+    """`(runs, shards)` of a test: the most its summary counts (`test_counts`)
+    or its results have been seen to name (`spread`)."""
+    runs, shards = state["test_counts"].get((label, config), (0, 0))
+    seen_runs, seen_shards = state["spread"].get((label, config), (1, 1))
+    return (max(runs, seen_runs), max(shards, seen_shards))
+
+def failure_of(kind: str, event_id, payload) -> dict | None:
+    """A record for the Failures list from a build event, or None: a failed
+    action (`action_completed`, which Bazel sends for every failure) with its
+    stderr and stdout, or a test attempt that did not pass (`test_result`;
+    flaky ones did not) with its `test.log`. Each log is a BES `File.file`: a
+    URI, or the contents inline."""
+    label = _label_of(event_id)
+    if kind == "action_completed":
+        if bes_get(payload, "success", False):
+            return None
+        return _action_record(label, payload, event_id)
+    if kind == "test_result":
+        if str(bes_get(payload, "status", "") or "").lower() not in _FAILED_TEST_STATUSES:
+            return None
+        attempt = bes_get(event_id, "attempt", 1) or 1
+        return {
+            "kind": "test",
+            "label": label,
+            "detail": "attempt %d" % attempt,
+            "run": bes_get(event_id, "run", 1) or 1,
+            "shard": bes_get(event_id, "shard", 1) or 1,
+            "attempt": attempt,
+            "config": _config_id(event_id),
+            "status": str(bes_get(payload, "status", "") or "").lower(),
+            "duration_ms": _attempt_ms(payload),
+            "files": [("test.log", bounded_log(bes_get(f, "file", None))) for f in (bes_get(payload, "test_action_output", None) or []) if str(bes_get(f, "name", "") or "") == "test.log"],
+        }
+    return None
+
+def _attempt_ms(payload) -> int:
+    """How long a test attempt ran, in milliseconds."""
+    ms = bes_get(payload, "test_attempt_duration_millis", 0) or 0
+    if ms:
+        return ms
+    d = bes_get(payload, "test_attempt_duration", None)
+    return (bes_get(d, "seconds", 0) or 0) * 1000 + (bes_get(d, "nanos", 0) or 0) // 1000000 if d != None else 0
+
+def _action_record(label: str, payload, event_id = None) -> dict:
+    """An action's record for a list: its label, mnemonic, logs, primary
+    output (which the history keeps its logs by), whether it succeeded,
+    what its command exited with (`spawn_exit_code`), what Bazel's
+    `failure_detail` says of it (`failure`, decoded, `repaired`) and its
+    category (`failure_category`)."""
+    files = []
+    for name in ("stderr", "stdout"):
+        f = bes_get(payload, name, None)
+        if f != None:
+            files.append((name, bounded_log(bes_get(f, "file", None))))
+    return {
+        "kind": "action",
+        "label": _repaired(label),
+        "detail": str(bes_get(payload, "type", "") or "") or "Action",
+        "failure": _repaired(str(bes_get(bes_get(payload, "failure_detail", None), "message", "") or "")),
+        "files": files,
+        "output": str(bes_get(event_id, "primary_output", "") or ""),
+        "config": _config_id(event_id),
+        "success": bool(bes_get(payload, "success", False)),
+        "exit_code": spawn_exit_code(payload),
+        "failure_category": failure_category(payload),
+    }
+
+# The failures whose `failure_detail` message is only Bazel's command and its
+# hints (`--sandbox_debug`), by category and code (`failure_category`): the
+# command exited non-zero, timed out, ran out of memory, or its sandbox could
+# not start it.
+_COMMAND_FAILURES = {"spawn": ["non_zero_exit", "timeout", "out_of_memory"], "sandbox": ["subprocess_start_failed"]}
+
+def failure_category(payload) -> tuple:
+    """`(kind, code)` of a failed action's `failure_detail`: which message
+    of its `category` oneof it has (`spawn`, `sandbox`, `test_action`,
+    `execution`, …) and that message's code, lowercase
+    (`non_zero_exit`); `("", "")` without one."""
+    category = bes_get(bes_get(payload, "failure_detail", None), "category", None)
+    if category == None:
+        return ("", "")
+    return (type(category), str(bes_get(category, "code", "") or "").lower())
+
+def spawn_exit_code(payload) -> int:
+    """What a failed action's command exited with (its `failure_detail`'s
+    `spawn_exit_code`, as `(Exit 3)` says), else 0. The event's own
+    `exit_code` is 1 for every failed spawn."""
+    category = bes_get(bes_get(payload, "failure_detail", None), "category", None)
+    return bes_get(category, "spawn_exit_code", 0) or 0
+
+# An action the events say failed, as `count_event` tallies it: its primary
+# output, whether Bazel counts it among `runner_count`'s internal actions
+# (`counted_internal`, None where it said nothing), and its mnemonic.
+_ActionFailure = record(
+    output = field(str),
+    counted_internal = field(bool | None),
+    mnemonic = field(str),
+)
+
+def counted_internal(payload) -> bool | None:
+    """Whether Bazel counts a failed action among `runner_count`'s internal
+    ones: every failure but one whose outputs were not created or which
+    failed finalizing (`failure_detail`'s `ACTION_OUTPUTS_NOT_CREATED`,
+    `ACTION_FINALIZATION_FAILURE`), which it counts under the runner its
+    spawn ran in; None when it said nothing. Only where not every action's
+    events say it (the Dashboard's `action_split`)."""
+    category = bes_get(bes_get(payload, "failure_detail", None), "category", None)
+    if category == None:
+        return None
+    return str(bes_get(category, "code", "") or "").upper() not in ("ACTION_OUTPUTS_NOT_CREATED", "ACTION_FINALIZATION_FAILURE")
+
+def output_of(kind: str, event_id, payload) -> dict | None:
+    """A record for the actions list from a build event, or None: an action
+    that succeeded and wrote a stdout or stderr, which Bazel reports only
+    with `--build_event_publish_all_actions` (`actions = "all"`)."""
+    if kind != "action_completed" or not bes_get(payload, "success", False):
+        return None
+    record = _action_record(str(bes_get(event_id, "label", "") or ""), payload, event_id)
+    return record if record["files"] else None
+
+def cut_text(text: str) -> str:
+    """An inline log's end, cut anywhere, the byte before the cut first (see
+    `bounded_log`), started where `std.fs.try_read_tail` starts a file's: at
+    the cut when it falls at a line's start, else the next line when one
+    follows, else the first whole character."""
+    if text.startswith("\n"):
+        return text[1:]
+    head, newline, rest = text.partition("\n")
+    return rest if newline and rest else text[1:].lstrip("\ufffd")
+
+def bounded_log(value, cap: int = _MAX_LOG_BYTES):
+    """A log's BES `File.file`: a URI as it is, or inline contents as
+    `(bytes, cut)`, cut to their last `cap` bytes and the one before (to see
+    whether the cut falls at a line's start, as `cut_text` reads it), so the
+    rest of a failed action's tens of MB never stays on the heap."""
+    if type(value) == "bytes" and len(value) > cap:
+        return (value[-(cap + 1):], True)
+    if type(value) == "bytes":
+        return (value, False)
+    return value
+
+def local_test_logs(state: dict, record: dict) -> list:
+    """Where Bazel's output tree has a test attempt's `test.log`, for one a
+    remote cache named by `bytestream://`: `<exec root>/bazel-out/<output
+    dir>/testlogs/[external/<repo>/]<package>/<name>/[shard_<s>_of_<n>][_]
+    [run_<r>_of_<m>]/`, `test_attempts/attempt_<a>.log` for an attempt
+    Bazel retried, `test.log` for its last. Both the folder (its shard and
+    run counts) and which attempt was last come from the test's summary,
+    sent after its last attempt: before it, no path, rather than a guess
+    that could name an older build's log."""
+    key = (record["label"], record["config"])
+    logs = testlogs_dir(state["exec_root"], state["output_dirs"].get(record["config"], ""), record["label"])
+    if not logs or key not in state["test_counts"]:
+        return []
+    runs, shards = state["test_counts"][key]
+    run, shard, attempt = record["run"], record["shard"], record["attempt"]
+    last = state["last_attempts"].get((record["label"], record["config"], run, shard), attempt)
+    path = testlog_path(logs, run, shard, attempt, runs, shards, attempt >= last, "log")
+    return [path] if path else []
+
+def log_paths(state: dict, record: dict, uri) -> list:
+    """Where a log named by `uri` may be on disk, likeliest first: a
+    `file://` one's path (`bazel.build_events.local_path`: decoded, in the
+    spelling on disk); a remote cache's (`bytestream://`) a test's own in
+    the output tree, then under the runner's bb_clientd mount
+    (`state["bb_root"]`) where there is one."""
+    if type(uri) != "string" or not uri:
+        return []
+    if uri.startswith("file://"):
+        local = bazel.build_events.local_path(uri)
+        return [local] if local else []
+    paths = local_test_logs(state, record) if uri.startswith("bytestream://") and record["kind"] == "test" else []
+    out = []
+    for p in paths + [uri_to_path_under_root(uri, state.get("bb_root"))]:
+        if p and p not in out:
+            out.append(p)
+    return out
+
+def note_event(state: dict, kind: str, event_id, payload, aborted: bool) -> None:
+    """Gather from one build event Bazel's last count (a `progress` one's
+    stderr, `bep_progress`), and what the Failures list needs: a failure's
+    record (`failure_of`), and what finding a test's log in the output tree
+    takes (the exec root, each configuration's output folder, each test's
+    run and shard counts, each run and shard's last attempt, and the most
+    runs and shards it has been seen to have, `spread`). A summary
+    the build announced but did not get to (`aborted`, an interrupt) has no
+    counts. An Aborted event of a root cause is a target's
+    failure record (`kind` `target`), once per label, its `description`
+    Bazel's (decoded, `repaired`): one that failed analysis (a
+    `configured_label`, or a target's own with a description) or loading
+    (an `unconfigured_label`, a pattern with a description)."""
+    if kind == "progress":
+        counts = bep_progress(str(bes_get(payload, "stderr", "") or ""))
+        if counts:
+            state["bep_done_total"] = counts
+    if aborted:
+        reason = str(bes_get(payload, "reason", "") or "").lower()
+        pattern = kind == "pattern_expanded"
+        label = " ".join([str(p) for p in (bes_get(event_id, "pattern", None) or [])]) if pattern else _label_of(event_id)
+        description = _repaired(str(bes_get(payload, "description", "") or ""))
+        failing = reason in _FAILED_ABORTS
+        detail = None
+        if kind == "unconfigured_label":
+            detail = "loading"
+        elif kind == "configured_label" and failing:
+            detail = "analysis"
+        elif pattern and failing and description:
+            detail = "loading"
+        elif kind in ("target_configured", "target_completed") and failing and description and not bes_get(event_id, "aspect", ""):
+            detail = "analysis"
+        if detail != None and label and not _has_target_record(state, label):
+            _add_failure(state, _target_record(label, detail, description, pattern, event_id))
+        return
+    if kind == "workspace_config":
+        state["exec_root"] = str(bes_get(payload, "local_exec_root", "") or "")
+    elif kind == "configuration":
+        state["output_dirs"][str(bes_get(event_id, "id", "") or "")] = str(bes_get(payload, "mnemonic", "") or "")
+    elif kind == "test_summary":
+        key = (_label_of(event_id), _config_id(event_id))
+        state["test_counts"][key] = (bes_get(payload, "run_count", 0) or 0, bes_get(payload, "shard_count", 0) or 0)
+    elif kind == "test_result":
+        key = (
+            _label_of(event_id),
+            _config_id(event_id),
+            bes_get(event_id, "run", 1) or 1,
+            bes_get(event_id, "shard", 1) or 1,
+        )
+        state["last_attempts"][key] = max(state["last_attempts"].get(key, 0), bes_get(event_id, "attempt", 1) or 1)
+        runs, shards = state["spread"].get(key[:2], (1, 1))
+        state["spread"][key[:2]] = (max(runs, key[2]), max(shards, key[3]))
+    record = failure_of(kind, event_id, payload)
+    if record != None:
+        _add_failure(state, record)
+    record = output_of(kind, event_id, payload)
+    if record != None:
+        state["outputs"].append(record)
+
+def collect_event(state: dict, event) -> None:
+    """Gather one build event into `state` as the failure summary and the
+    Failures list read it, the same in the plain console, the Dashboard and
+    the replay test: the invocation's own events (`_INVOCATION_KINDS`), the
+    counts (`count_event`), the failures (`note_event`) and the root
+    causes (`note_blocked`). An event is Aborted when its payload is (the
+    fake events of the tests say so as `payload_kind`)."""
+    kind = event.kind
+    event_id, payload = bes_get(event, "id"), bes_get(event, "payload")
+    aborted = (bes_get(event, "payload_kind") or type(payload)) == "aborted"
+    if kind in _INVOCATION_KINDS:
+        state["inv"][kind] = payload
+    count_event(state["counts"], kind, event_id, payload, aborted)
+    note_event(state, kind, event_id, payload, aborted)
+    note_blocked(state, event)
+
+def _test_key(record: dict) -> tuple:
+    """Which attempt of which test a record is: one Bazel posts twice is one."""
+    return (record["label"], record["config"], record["run"], record["shard"], record["attempt"])
+
+def _test_runner(record: dict) -> bool:
+    """Whether `record` is a test's own failed action (`TestRunner`)."""
+    return record["kind"] == "action" and record["detail"] == "TestRunner"
+
+def _runner_place(record: dict) -> tuple | None:
+    """The run and shard a `TestRunner` action ran, `(run, shard)`, from the
+    one folder its output (always that run's `test.log`) has after
+    `testlogs/<package>/<name>/`: `shard_<s>_of_<n>` and `run_<r>_of_<m>`,
+    either or both (`shard_1_of_2_run_2_of_2`), 1 for one not named; None
+    where its output is no such test log."""
+    own = testlogs_rel(record["label"])
+    marker = "/testlogs/" + own + "/" if own else None
+    out = "/" + record.get("output", "")
+    if marker == None or marker not in out:
+        return None
+    rest = out.partition(marker)[2].split("/")
+    if rest[-1] != "test.log" or len(rest) > 2:
+        return None
+    words = rest[0].split("_") if len(rest) == 2 else []
+
+    def number(word: str) -> int:
+        for i in range(len(words) - 3):
+            if words[i] == word and words[i + 1].isdigit() and words[i + 2] == "of" and words[i + 3].isdigit():
+                return int(words[i + 1])
+        return 1
+
+    return (number("run"), number("shard"))
+
+def _runner_key(record: dict) -> tuple | None:
+    """Which run and shard of which test a `TestRunner` action ran,
+    `(label, config, run, shard)`, from its output (`_runner_place`); None
+    where its output names no test log."""
+    place = _runner_place(record)
+    if place == None:
+        return None
+    run, shard = place
+    return (record["label"], record.get("config", ""), run, shard)
+
+def _same_place(runner: dict, test: dict) -> bool:
+    """Whether a `TestRunner` action failure ran `test`'s run and shard."""
+    at = runner.get("attempt_key")
+    return at != None and at == (test["label"], test["config"], test["run"], test["shard"])
+
+def _add_failure(state: dict, record: dict) -> None:
+    """List a failure once. A test attempt Bazel posts again (Bazel 9 posts
+    attempt 1 failed with its log, then failed to build without one) is one
+    row, the one with a log kept. A failed `TestRunner` action stands for
+    its run and shard (`_runner_key`, from its output's path) until an
+    attempt of them comes with a log, which drops it, and is not listed
+    once one has; while it stands, an attempt of them with no log (a shard
+    that failed to build) is not listed beside it, the action's log the
+    only one."""
+    fails = state["fails"]
+    if _test_runner(record):
+        record["attempt_key"] = _runner_key(record)
+        if not any([r["kind"] == "test" and r["files"] and _same_place(record, r) for r in fails]):
+            fails.append(record)
+        return
+    if record["kind"] == "test":
+        if not record["files"] and any([_test_runner(r) and _same_place(r, record) for r in fails]):
+            return
+        key = _test_key(record)
+        for i, r in enumerate(fails):
+            if r["kind"] == "test" and _test_key(r) == key:
+                if record["files"] and not r["files"]:
+                    fails[i] = record
+                return
+        if record["files"] and any([_test_runner(r) and _same_place(r, record) for r in fails]):
+            fails = [r for r in fails if not (_test_runner(r) and _same_place(r, record))]
+            state["fails"] = fails
+            state["selected"] = min(state.get("selected", 0), max(0, len(fails)))
+    fails.append(record)
+
+def note_blocked(state: dict, event) -> None:
+    """Keep a failed target's root causes (`event.children`, which Bazel
+    gives every failed target, in its `target_completed` or, failed in
+    analysis, its Aborted `target_configured`), itself among them where
+    Bazel names it (an attribute error's target, one whose package is in
+    error), for `blocked_targets` and `failure_entries` to decide from the
+    build's failures as they end up, whatever came first. A target that
+    failed with no failed action among its causes (a missing source file)
+    is a failure record of its own (`kind` `target`, `detail` `target`),
+    its `failure_detail`'s message its description."""
+    kind = bes_get(event, "kind")
+    payload = bes_get(event, "payload")
+    event_id = bes_get(event, "id")
+    if kind == "target_completed":
+        if bes_get(payload, "success", False) or bes_get(event_id, "aspect", ""):
+            return
+    elif kind != "target_configured" or (bes_get(event, "payload_kind") or type(payload)) != "aborted":
+        # A configured target's only child is its own completion; one
+        # Aborted in analysis has its root causes.
+        return
+    label = _label_of(event_id)
+    roots = []
+    acted = False
+    for child in bes_get(event, "children") or []:
+        child_id = bes_get(child, "id")
+        if bes_get(child_id, "primary_output", ""):
+            acted = True
+        root = _repaired(str(bes_get(child_id, "label", "") or ""))
+        if root and root not in roots and (root != label or not bes_get(child_id, "primary_output", "")):
+            roots.append(root)
+    roots = [r for r in roots if r != label or len(roots) == 1]
+    if label and roots:
+        if state.get("root_causes") == None:
+            state["root_causes"] = {}
+        state["root_causes"][label] = roots
+    message = _repaired(str(bes_get(bes_get(payload, "failure_detail", None), "message", "") or ""))
+    if kind == "target_completed" and label and message and not acted and not _has_target_record(state, label):
+        _add_failure(state, _target_record(label, "target", message, False, event_id))
+
+def _has_target_record(state: dict, label: str) -> bool:
+    """Whether `label` has a target's failure record already."""
+    return any([r["kind"] == "target" and r["label"] == label for r in state["fails"]])
+
+def _target_record(label: str, detail: str, description: str, pattern: bool, event_id) -> dict:
+    """A target's failure record (`kind` `target`): what failed it
+    (`detail`: `loading`, `analysis` or `target`), Bazel's `description`
+    of it as its one log, and whether `label` is a pattern's."""
+    return {
+        "kind": "target",
+        "label": label,
+        "detail": detail,
+        "description": description,
+        "pattern": pattern,
+        "files": [("error", (description, False))] if description else [],
+        "output": "",
+        "config": _config_id(event_id),
+        "success": False,
+    }
+
+def blocked_targets(state: dict) -> dict:
+    """The targets not built for a failed dependency, by label, each with
+    its root causes as Bazel names them (`event.children` of its failed
+    `target_completed` or Aborted `target_configured`, `note_blocked`),
+    itself left out: every target whose roots are others and that has no
+    entry of its own (`_own_labels`). Cached until the root causes or the
+    failures change."""
+    causes = state.get("root_causes") or {}
+    key = (len(causes), len(state["fails"]))
+    cached = state.get("blocked_cache")
+    if cached != None and cached[0] == key:
+        return cached[1]
+    own = _own_labels(state)
+    blocked = {}
+    for label, roots in causes.items():
+        others = [r for r in roots if r != label]
+        if others and label not in own:
+            blocked[label] = others
+    state["blocked_cache"] = (key, blocked)
+    return blocked
+
+def blocked_text(label: str, roots: list) -> str:
+    """`blocked by :broken`: a root cause in `label`'s package by its name,
+    another by its label, and how many more there are."""
+    pkg = label.rpartition(":")[0]
+    first = roots[0]
+    shown = ":" + first.rpartition(":")[2] if first.rpartition(":")[0] == pkg else first
+    more = len(roots) - 1
+    return "blocked by " + shown + ((_counts(" and %d more", more)) if more else "")
+
+# How much of a log's end an excerpt reads: where its error usually is.
+_EXCERPT_READ_BYTES = 64 * 1024
+
+def _tail_text(state: dict, path: str) -> str | None:
+    """The last `_EXCERPT_READ_BYTES` of the file at `path`
+    (`state["read"]`), or None."""
+    if not path or state.get("read") == None:
+        return None
+    got = state["read"](path, _EXCERPT_READ_BYTES)
+    return got[0] if got != None else None
+
+def bazel_line(line: str) -> str:
+    """`line` without the `(23:04:25) ` (or `(23:04:25.123) `) Bazel puts
+    before it under `--show_timestamps`: the prefix the console stages
+    strip (`TIMESTAMP_RE` in crates/bazel/src/console/line.rs,
+    `\\(\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?\\) `), which no builtin strips for
+    AXL."""
+    close = line.find(") ")
+    if close < 9 or line[0] != "(" or line[3] != ":" or line[6] != ":" or not (line[1:3] + line[4:6] + line[7:9]).isdigit():
+        return line
+    fraction = line[9:close]
+    if fraction and not (fraction.startswith(".") and fraction[1:].isdigit()):
+        return line
+    return line[close + 2:]
+
+def new_state(read = None, bb_root: str | None = None, ansi = None) -> dict:
+    """A fresh state for the build event hooks to collect into
+    (`collect_event`) and the failure summary to read. `read` reads a file's
+    tail (`std.fs.try_read_tail`), `bb_root` is the runner's bb_clientd mount
+    (`bb_clientd_root`), for finding a remote cache's log, and `ansi` the
+    compiled `ANSI` pattern, to read a kept log's text as an error quotes
+    it."""
+    return dict(
+        read = read,
+        bb_root = bb_root,
+        ansi = ansi,
+        build = None,
+        collected_errors = None,
+        fails = [],
+        outputs = [],
+        counts = new_counts(),
+        inv = {},
+        last_attempts = {},
+        spread = {},
+        test_counts = {},
+        exec_root = "",
+        output_dirs = {},
+        root_causes = {},
+        blocked_cache = None,
+        entries_cache = None,
+        own_cache = None,
+        ties_cache = None,
+        bep_done_total = None,
+        excerpts = {},
+        cancelling = False,
+        log_path = "",
+    )
+
+def new_counts() -> dict:
+    """The tallies `count_event` keeps for one Bazel attempt."""
+    return {
+        "configured": 0,
+        "built": 0,
+        "failed": 0,
+        "skipped": 0,
+        "failures": [],
+        "failed_labels": {},
+        "aborted": {},
+        "tests_passed": 0,
+        "tests_failed": 0,
+        "tests_flaky": 0,
+        "tests_skipped": 0,
+        "flaky": {},
+        "failed_attempts": {},
+        "test_targets": {},
+        "test_unbuilt": {},
+        "testing": False,
+        "failed_roots": {},
+        "test_runs": 0,
+        "test_cached": 0,
+        "tests_cached": 0,
+        "test_resulted": {},
+        "test_finished": {},
+        "test_uncached": {},
+        "action_failures": [],
+        "spawns": 0,
+        "spawn_hits": 0,
+        "runners": {},
+        "log_actions": {},
+        "log_kinds": {"ran": 0, "disk": 0, "remote": 0},
+    }
+
+def count_spawn(counts: dict, spawn) -> None:
+    """Tally one spawn of the execution log (Bazel's compact one): the
+    source of truth for what ran and what a cache (remote or disk) served,
+    by runner, and by action (`log_kinds`): the spawns of one action share
+    its outputs, so its first output's path names it (an output not
+    created is given by its path, one created by its file's id, which
+    `note_log_file` resolved where it is a test's log: a test's two spawns
+    each have another first output created), and an action ran
+    where any of its spawns ran (a retried test's attempts are one
+    action's spawns), and was a disk or remote hit only where every spawn
+    was a hit (the first one's cache, where they differ). A spawn with no
+    output is an action of its own."""
+    counts["spawns"] += 1
+    hit = bool(bes_get(spawn, "cache_hit", False))
+    if hit:
+        counts["spawn_hits"] += 1
+    runner = str(bes_get(spawn, "runner", "") or "") or "unknown"
+    counts["runners"][runner] = counts["runners"].get(runner, 0) + 1
+    kind = ("remote" if runner.startswith("remote") else "disk") if hit else "ran"
+    outputs = bes_get(spawn, "outputs", None) or []
+    key = bes_get(outputs[0], "type", None) if outputs else None
+    kinds = counts["log_kinds"]
+    if type(key) == "int":
+        key = counts.get("log_files", {}).get(key, key)
+    elif type(key) != "string" or not key:
+        kinds[kind] += 1
+        return
+    was = counts["log_actions"].get(key)
+    if was == None:
+        counts["log_actions"][key] = kind
+        kinds[kind] += 1
+    elif kind == "ran" and was != "ran":
+        counts["log_actions"][key] = "ran"
+        kinds[was] -= 1
+        kinds["ran"] += 1
+
+def note_log_file(counts: dict, id: int, file) -> None:
+    """Keep an execution log file's path by its id where it is under a
+    test's logs (`testlogs/`), where a test's spawns' first outputs meet
+    (`count_spawn`); no other file's."""
+    path = str(bes_get(file, "path", "") or "")
+    if "/testlogs/" in path:
+        counts.setdefault("log_files", {})[id] = path
+
+def _fail(counts: dict, label: str) -> None:
+    """Count a failed target once, however often Bazel says so (one per
+    configuration, its analysis aborted by an aspect and its action failed
+    too), and list it."""
+    if label not in counts["failed_labels"]:
+        counts["failed"] += 1
+    _list_failure(counts, label)
+
+def _list_failure(counts: dict, label: str) -> None:
+    """List `label` as failed, once: a dict beside the list keeps it O(1)."""
+    if label not in counts["failed_labels"]:
+        counts["failed_labels"][label] = True
+        counts["failures"].append(label)
+
+def count_aborted_test(counts: dict, label: str, reason: str, config: str = "") -> None:
+    """Tally a test whose summary is Aborted for `reason`. Bazel gives one it
+    skipped (a build without `--keep_going` stopped first, a later attempt
+    of a flaky one cut off) and one that failed to build the same empty
+    reason; only the second has a result `FAILED_TO_BUILD`
+    (`failed_attempts`, by label and configuration), so it is failed, as
+    Bazel counts it, and the first skipped. An interrupt is no verdict, and
+    a test counted failed already (`test_unbuilt`) is not counted again."""
+    if not label or reason.lower() == "user_interrupted" or label in counts["test_unbuilt"]:
+        return
+    if (label, config) in counts["failed_attempts"]:
+        counts["tests_failed"] += 1
+        _list_failure(counts, label)
+    else:
+        counts["tests_skipped"] += 1
+
+def count_aborted(counts: dict, label: str, reason: str) -> None:
+    """Tally a target that did not build, its Aborted `reason` given: failed
+    when its loading or analysis did (`_FAILED_ABORTS`), else skipped; once
+    per label, as Bazel can report one under two ids."""
+    if not label or label in counts["aborted"]:
+        return
+    counts["aborted"][label] = True
+    if reason.lower() in _FAILED_ABORTS:
+        _fail(counts, label)
+    else:
+        counts["skipped"] += 1
+
+def count_event(counts: dict, kind: str, event_id, payload, aborted: bool | None = None) -> None:
+    """Tally one build event into `counts`. `build_started` says whether the
+    command tests (`testing`: `test` or `coverage`), which gates counting a
+    test target that failed to build. Each action the events say failed,
+    a test's own (`TestRunner`) too, is in `action_failures`, an
+    `ActionFailure`, once per event, whatever the
+    Failures list makes of it. A target that failed to build arrives
+    as `target_completed` without `success`; one that never got that far
+    (failed in loading or analysis, skipped, interrupted) as an Aborted
+    payload under its own id (`count_aborted`). An Aborted `configured_label`
+    with a failing reason is a root cause not asked for that failed
+    analysis: in `failed_roots`, and a failed target, once per label. An
+    aspect's own completion is not a target. A test's `overall_status` is
+    lowercase (`passed`, `flaky`, `failed`, …); only `_FAILED_TEST_STATUSES`
+    count as failed. A test whose summary is Aborted is failed or skipped by
+    `count_aborted_test`. A label is listed in `failures` once. `aborted`
+    says whether `payload` is an Aborted one, its type by default."""
+    if aborted == None:
+        aborted = type(payload) == "aborted"
+    label = _label_of(event_id)
+    if kind == "action_completed" and not aborted and bes_get(payload, "success", False):
+        # Every action Bazel executed, with `--build_event_publish_all_actions`:
+        # one that ran no spawn (internal) has no command line.
+        counts["actions_seen"] = counts.get("actions_seen", 0) + 1
+        if not (bes_get(payload, "command_line", None) or []):
+            counts["actions_internal"] = counts.get("actions_internal", 0) + 1
+        return
+    if kind == "action_completed" and not aborted:
+        counts["action_failures"].append(_ActionFailure(
+            output = str(bes_get(event_id, "primary_output", "") or ""),
+            counted_internal = counted_internal(payload),
+            mnemonic = str(bes_get(payload, "type", "") or ""),
+        ))
+        return
+    if kind == "build_started":
+        # Only a test or coverage run tests what it builds.
+        counts["testing"] = str(bes_get(payload, "command", "") or "") in ("test", "coverage")
+        return
+
+    # A target's own Aborted payload, under its `target_configured` or
+    # `target_completed` id; under `configured_label` or `unconfigured_label`
+    # it names a root cause (a dependency), not a target asked for.
+    if aborted:
+        reason = str(bes_get(payload, "reason", "") or "")
+        if kind in ("target_configured", "target_completed") and not bes_get(event_id, "aspect", ""):
+            count_aborted(counts, label, reason)
+        elif kind == "test_summary":
+            count_aborted_test(counts, label, reason, _config_id(event_id))
+        elif kind == "configured_label" and label and reason.lower() in _FAILED_ABORTS and label not in counts["failed_roots"]:
+            # A root cause that failed analysis, not asked for itself: what
+            # a target it blocks failed for (`blocked_targets`), and a
+            # failure of its own.
+            counts["failed_roots"][label] = True
+            count_aborted(counts, label, reason)
+        elif kind == "unconfigured_label" and label and label not in counts["failed_roots"]:
+            # One that failed loading (its package broken, or a source file
+            # missing): Bazel gives no reason, but it is a root cause all
+            # the same; a label no one asked for, it counts as no target.
+            counts["failed_roots"][label] = True
+        return
+    if kind == "target_configured":
+        if not bes_get(event_id, "aspect", ""):
+            counts["configured"] += 1
+            if str(bes_get(payload, "target_kind", "") or "").endswith("_test rule"):
+                counts["test_targets"][label] = True
+    elif kind == "target_completed":
+        if bes_get(event_id, "aspect", ""):
+            return
+        if bes_get(payload, "success", False):
+            counts["built"] += 1
+        else:
+            _fail(counts, label)
+            if counts["testing"] and label in counts["test_targets"] and label not in counts["test_unbuilt"]:
+                # A test that failed to build (or was blocked): Bazel posts
+                # no summary for it, and counts it as failing to build.
+                counts["test_unbuilt"][label] = True
+                counts["tests_failed"] += 1
+    elif kind == "test_result":
+        # A test run, and whether a cache (Bazel's own, or a remote one)
+        # gave it rather than running it.
+        counts["test_runs"] += 1
+        if str(bes_get(payload, "status", "") or "").lower() == "failed_to_build":
+            counts["failed_attempts"][(label, _config_id(event_id))] = True
+        info = bes_get(payload, "execution_info")
+        key = (label, _config_id(event_id))
+        counts["test_resulted"][key] = True
+        if bes_get(payload, "cached_locally", False) or bes_get(info, "cached_remotely", False):
+            counts["test_cached"] += 1
+        else:
+            counts["test_uncached"][key] = True
+    elif kind == "test_summary":
+        counts["test_finished"][label] = True
+        key = (label, _config_id(event_id))
+        if key in counts["test_resulted"] and key not in counts["test_uncached"]:
+            # Every run of the target a cache gave.
+            counts["tests_cached"] += 1
+        status = str(bes_get(payload, "overall_status", "") or "")
+        if status == "passed":
+            counts["tests_passed"] += 1
+        elif status == "flaky":
+            # Passed in the end: not a failure, nor a pass to count as one.
+            counts["tests_flaky"] += 1
+            counts["flaky"][label] = True
+        elif status in _FAILED_TEST_STATUSES:
+            counts["tests_failed"] += 1
+            _list_failure(counts, label)
+
+def bep_progress(text: str) -> tuple | None:
+    """The last `(done, total)` Bazel's console wrote in `text` (a build
+    event `progress`'s stderr: every status line it drew, coloured), or
+    None."""
+    last = None
+    for line in _plain(text).split("\n"):
+        line = line.rpartition("\r")[2]
+        at = line.find("[")
+        counts = progress_counts(line[at:]) if at >= 0 else None
+        if counts:
+            last = counts
+    return last
+
+def build_outcome(inv: dict) -> str:
+    """What a finished build's `BuildFinished` says that ✔/✗ cannot:
+    `interrupted`, `ended without a result` without one, else nothing."""
+    finished = inv.get("build_finished")
+    if finished == None:
+        return "ended without a result"
+    name = str(bes_get(bes_get(finished, "exit_code"), "name", "") or "")
+    return "interrupted" if name == "INTERRUPTED" else ""
+
+def build_succeeded(inv: dict) -> bool:
+    """Whether a build's `BuildFinished` says it succeeded: one that crashed
+    or was cut off without it, or was interrupted, did not."""
+    finished = inv.get("build_finished")
+    return finished != None and str(bes_get(bes_get(finished, "exit_code"), "name", "") or "") == "SUCCESS"
+
+# The build events the Invocation and Metrics tabs read.
+_INVOCATION_KINDS = ["build_started", "options_parsed", "workspace_status", "build_metadata", "build_finished", "build_metrics"]
+
+def _log_paths(state: dict, record: dict) -> list:
+    """Each of a failure's logs, `(stream, path)`, where it reads now (as
+    `_log_path` finds one)."""
+    out = []
+    for name, value in record["files"]:
+        path = _log_path(state, dict(record, files = [(name, value)]))
+        if path:
+            out.append((name, path))
+    return out
+
+def _log_path(state: dict, record: dict) -> str:
+    """Where a failure's log reads now: the history's copy of an action's
+    (`kept_action_log`), which outlives Bazel's own, before Bazel's; "" for
+    none."""
+    build = state.get("build")
+    if record["kind"] == "action" and build != None:
+        kept = build.kept_action_log(record.get("output", "")) or {}
+        for name, _ in record["files"]:
+            if name in kept:
+                return kept[name]
+    for _, value in record["files"]:
+        for path in log_paths(state, record, value):
+            if state["read"](path, 0) != None:
+                return path
+    return ""
+
+def _flaky(state: dict, record: dict) -> bool:
+    """Whether `record` is a failed attempt of a test that passed in the end."""
+    return record["kind"] == "test" and bool(state["counts"].get("flaky", {}).get(record["label"]))
+
+def _plain_text(state: dict, text: str) -> str:
+    """`text` without its escape sequences (`state["ansi"]`, the compiled
+    `ANSI` pattern) and with each CRLF or lone CR a newline, as an error's
+    quoted body reads."""
+    if state.get("ansi") != None:
+        text = state["ansi"].replace(text, "")
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+def _workspace(state: dict) -> str:
+    """The workspace directory Bazel's `build_started` names, else ""."""
+    started = (state.get("inv") or {}).get("build_started")
+    return str(bes_get(started, "workspace_directory", "") or "")
+
+def _referrers(state: dict) -> dict:
+    """Each root cause Bazel names (`root_causes`) with the targets that
+    name it, in their order."""
+    out = {}
+    for label, roots in (state.get("root_causes") or {}).items():
+        for r in roots:
+            out.setdefault(r, []).append(label)
+    return out
+
+def _target_entry(state: dict, rec: dict, referrers: dict, own: dict) -> bool:
+    """Whether a target's record (`kind` `target`: an Aborted root cause, a
+    target that failed with no action of its own) is an entry: always, but
+    for a label that failed loading (an Aborted `unconfigured_label`) every
+    target naming which is an entry itself (a missing source file, whose
+    targets each say so)."""
+    if rec["detail"] != "loading" or rec["pattern"]:
+        return True
+    names = referrers.get(rec["label"], [])
+    return not names or [n for n in names if n not in own or n == rec["label"]] != []
+
+def _own_labels(state: dict) -> dict:
+    """The labels a failure record of their own makes an entry of, before
+    any root cause decides: a failed action's, a test's, a target's that
+    failed with no action of its own, an analysis root's; a label that only
+    failed loading is decided by `_target_entry`."""
+    key = len(state["fails"])
+    cached = state.get("own_cache")
+    if cached != None and cached[0] == key:
+        return cached[1]
+    own = {}
+    for rec in state["fails"]:
+        if rec["kind"] in ("action", "test") or (rec["kind"] == "target" and rec["detail"] != "loading"):
+            own[rec["label"]] = True
+    referrers = _referrers(state)
+    for rec in state["fails"]:
+        if rec["kind"] == "target" and rec["detail"] == "loading" and _target_entry(state, rec, referrers, own):
+            own[rec["label"]] = True
+    state["own_cache"] = (key, own)
+    return own
+
+def _action_logs(state: dict, rec: dict) -> list:
+    """An action's logs where they read now, `(stream, path)`: the
+    history's copies (`kept_action_log`) before Bazel's own."""
+    return _log_paths(state, rec) if state.get("read") != None else []
+
+failure_records = namespace(
+    ActionFailure = _ActionFailure,
+    config_id = _config_id,
+    label_of = _label_of,
+    test_shape = test_shape,
+    action_logs = _action_logs,
+    bazel_line = bazel_line,
+    testonly_bep_progress = bep_progress,
+    blocked_targets = blocked_targets,
+    blocked_text = blocked_text,
+    testonly_bounded_log = bounded_log,
+    build_outcome = build_outcome,
+    build_succeeded = build_succeeded,
+    collect_event = collect_event,
+    COMMAND_FAILURES = _COMMAND_FAILURES,
+    testonly_count_aborted = count_aborted,
+    testonly_count_aborted_test = count_aborted_test,
+    testonly_count_event = count_event,
+    count_spawn = count_spawn,
+    cut_text = cut_text,
+    testonly_failure_of = failure_of,
+    flaky = _flaky,
+    testonly_local_test_logs = local_test_logs,
+    log_path = _log_path,
+    log_paths = log_paths,
+    MAX_LOG_BYTES = _MAX_LOG_BYTES,
+    testonly_new_counts = new_counts,
+    new_state = new_state,
+    testonly_note_blocked = note_blocked,
+    testonly_note_event = note_event,
+    note_log_file = note_log_file,
+    testonly_output_of = output_of,
+    own_labels = _own_labels,
+    plain_text = _plain_text,
+    progress_counts = progress_counts,
+    record_logs = _log_paths,
+    referrers = _referrers,
+    tail_text = _tail_text,
+    target_entry = _target_entry,
+    workspace = _workspace,
+)

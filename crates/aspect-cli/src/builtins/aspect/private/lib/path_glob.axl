@@ -6,10 +6,11 @@ match is case-sensitive (POSIX path semantics) and segment-aware:
   *   matches any sequence of characters except `/`
   ?   matches exactly one character except `/`
   **  matches zero or more path segments (must be a whole segment, i.e.
-      `**` between two `/` boundaries — patterns like `a**b` are treated
+      `**` between two `/` boundaries: patterns like `a**b` are treated
       as two single-`*` wildcards followed by literal characters)
 
-A trailing slash is trimmed (`vendor/` ≡ `vendor`).
+A trailing slash is trimmed (`vendor/` ≡ `vendor`). Any other empty
+segment (`/a`, `a//b`) matches an empty segment of the path literally.
 
 Examples:
   match_path("*.lock", "Cargo.lock")               → True
@@ -21,31 +22,36 @@ Examples:
   match_path("**/foo", "foo")                      → True
   match_path("a/**/b", "a/x/y/b")                  → True
 
-Implementation note: this is a pure-Starlark recursive segment matcher.
-Pattern-volume × file-volume is small in practice (≤ ~10 patterns × ≤ ~1k
-files = ≤ 10k matches per task), so the cost is invisible against the
-formatter binary's runtime. If profiling ever shows pressure we can move
-the matcher to Rust and expose via ctx; for now Starlark stays.
+Implementation note: this is a pure-Starlark segment matcher, so the work
+per match is kept small: a segment with no wildcard is compared, one that
+is `*` and a literal is a suffix check, and a `**` followed by no other
+`**` matches only the split that leaves its tail one name segment per
+pattern segment. A change of thousands of files against a dozen
+`**/<name>` patterns then costs one segment comparison per pattern each.
 """
 
 def _match_chars(pat, name):
     """Match a single segment-level pattern against a name (no `/`).
 
     Supports `*` (any chars except none) and `?` (exactly one char).
-    Iterative with backtracking — Starlark has no `while`, so we cap the
+    Iterative with backtracking: Starlark has no `while`, so we cap the
     iteration count.
 
     Bound rationale: this is the standard one-star-at-a-time backtracking
     algorithm. Each backtrack increments `star_ni` (monotone, capped at
     len(name)), and between backtracks we do at most len(pat) char
     advances before either matching or failing. Worst case is therefore
-    O(len(pat) * len(name)) — e.g. pattern `*?` against an N-character
+    O(len(pat) * len(name)), e.g. pattern `*?` against an N-character
     string takes ~2N iterations because each `?` advance is followed by
     a backtrack to `star_ni + 1`. The previous bound of
     `len(pat) + len(name) + 8` was undersized: `*?` and `*b` against
     11-character names both ran out of iterations and silently
     false-negative'd before reaching the match.
     """
+    if "*" not in pat and "?" not in pat:
+        return pat == name
+    if pat.startswith("*") and "*" not in pat[1:] and "?" not in pat:
+        return name.endswith(pat[1:])
     pi = 0
     ni = 0
     star_pi = -1
@@ -92,12 +98,16 @@ def _match_segments(pat_segs, name_segs):
             # split: consume k name segments here, recurse on the rest.
             tail = pat_segs[pi + 1:]
             if not tail:
-                # Trailing `**` — match must include at least one name
+                # Trailing `**`: match must include at least one name
                 # segment past this point (otherwise `**` at the end
                 # would also match the parent dir alone, which feels
                 # surprising; keep the "must have child" semantics
                 # documented in the module docstring).
                 return ni < nn
+            if "**" not in tail:
+                # Every other segment matches exactly one name segment.
+                k = nn - ni - len(tail)
+                return k >= 0 and _match_segments(tail, name_segs[ni + k:])
             for k in range(nn - ni + 1):
                 if _match_segments(tail, name_segs[ni + k:]):
                     return True
@@ -115,7 +125,7 @@ def match_path(pattern, path):
     if not pattern:
         return False
 
-    # Trim trailing slash for friendliness — `vendor/` and `vendor` mean
+    # Trim trailing slash for friendliness: `vendor/` and `vendor` mean
     # the same thing for our use case.
     if pattern.endswith("/"):
         pattern = pattern[:-1]

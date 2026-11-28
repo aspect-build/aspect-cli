@@ -1,0 +1,125 @@
+[32mComputing main repo mapping:[0m 
+[1A[K[32mLoading:[0m 
+[1A[K[32mLoading:[0m 0 packages loaded
+[1A[K[32mAnalyzing:[0m 5 targets (0 packages loaded, 0 targets configured)
+[1A[K[32mAnalyzing:[0m 5 targets (0 packages loaded, 0 targets configured)
+
+[1A[K[1A[K[32mINFO: [0mAnalyzed 5 targets (0 packages loaded, 0 targets configured).
+[32m[10 / 33][0m 4 actions running
+    Writing script t/fail.cppmap; 0s local
+    Writing script t/flaky.cppmap; 0s local
+    Writing script t/rpt.cppmap; 0s local
+    Writing script t/shard.cppmap; 0s local
+[1A[K[1A[K[1A[K[1A[K[1A[K[32m[43 / 52][0m 9 actions running
+    Testing //t:ok0; 0s darwin-sandbox
+    Testing //t:flaky; 0s local
+    Testing //t:rpt (run 3 of 3); 0s darwin-sandbox
+    Testing //t:rpt (run 1 of 3); 0s darwin-sandbox
+    Testing //t:rpt (run 2 of 3); 0s darwin-sandbox
+    Testing //t:shard (shard 2 of 3); 0s darwin-sandbox
+    Testing //t:shard (shard 1 of 3); 0s darwin-sandbox
+    Testing //t:shard (shard 3 of 3); 0s darwin-sandbox ...
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[32m[43 / 52][0m 9 actions running
+    Testing //t:ok0; 0s darwin-sandbox
+    Testing //t:flaky; 0s local
+    Testing //t:rpt (run 3 of 3); 0s darwin-sandbox
+    Testing //t:rpt (run 1 of 3); 0s darwin-sandbox
+    Testing //t:rpt (run 2 of 3); 0s darwin-sandbox
+    Testing //t:shard (shard 2 of 3); 0s darwin-sandbox
+    Testing //t:shard (shard 1 of 3); 0s darwin-sandbox
+    Testing //t:shard (shard 3 of 3); 0s darwin-sandbox ...
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[32m[43 / 52][0m 9 actions running
+    Testing //t:ok0; 0s darwin-sandbox
+    Testing //t:flaky; 0s local
+    Testing //t:rpt (run 3 of 3); 0s darwin-sandbox
+    Testing //t:rpt (run 1 of 3); 0s darwin-sandbox
+    Testing //t:rpt (run 2 of 3); 0s darwin-sandbox
+    Testing //t:shard (shard 2 of 3); 0s darwin-sandbox
+    Testing //t:shard (shard 1 of 3); 0s darwin-sandbox
+    Testing //t:shard (shard 3 of 3); 0s darwin-sandbox ...
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[32m[43 / 52][0m 9 actions running
+    Testing //t:ok0; 0s darwin-sandbox
+    Testing //t:flaky; 0s local
+    Testing //t:rpt (run 3 of 3); 0s darwin-sandbox
+    Testing //t:rpt (run 1 of 3); 0s darwin-sandbox
+    Testing //t:rpt (run 2 of 3); 0s darwin-sandbox
+    Testing //t:shard (shard 2 of 3); 0s darwin-sandbox
+    Testing //t:shard (shard 1 of 3); 0s darwin-sandbox
+    Testing //t:shard (shard 3 of 3); 0s darwin-sandbox ...
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[32m[43 / 52][0m 9 actions running
+    Testing //t:ok0; 1s darwin-sandbox
+    Testing //t:flaky; 1s local
+    Testing //t:rpt (run 3 of 3); 1s darwin-sandbox
+    Testing //t:rpt (run 1 of 3); 1s darwin-sandbox
+    Testing //t:rpt (run 2 of 3); 1s darwin-sandbox
+    Testing //t:shard (shard 2 of 3); 1s darwin-sandbox
+    Testing //t:shard (shard 1 of 3); 1s darwin-sandbox
+    Testing //t:shard (shard 3 of 3); 1s darwin-sandbox ...
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mFAIL: [0m//t:fail (Exit 1) (see ${OUTPUT_BASE}/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t/fail/test.log)
+[32m[43 / 52][0m 9 actions running
+    Testing //t:ok0; 1s darwin-sandbox
+    Testing //t:flaky; 1s local
+    Testing //t:rpt (run 3 of 3); 1s darwin-sandbox
+    Testing //t:rpt (run 1 of 3); 1s darwin-sandbox
+    Testing //t:rpt (run 2 of 3); 1s darwin-sandbox
+    Testing //t:shard (shard 2 of 3); 1s darwin-sandbox
+    Testing //t:shard (shard 1 of 3); 1s darwin-sandbox
+    Testing //t:shard (shard 3 of 3); 1s darwin-sandbox ...
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mFAIL: [0m//t:rpt (run 3 of 3) (Exit 1) (see ${OUTPUT_BASE}/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t/rpt/run_3_of_3/test.log)
+[32m[43 / 52][0m 9 actions running
+    Testing //t:ok0; 1s darwin-sandbox
+    Testing //t:flaky; 1s local
+    Testing //t:rpt (run 3 of 3); 1s darwin-sandbox
+    Testing //t:rpt (run 1 of 3); 1s darwin-sandbox
+    Testing //t:rpt (run 2 of 3); 1s darwin-sandbox
+    Testing //t:shard (shard 2 of 3); 1s darwin-sandbox
+    Testing //t:shard (shard 1 of 3); 1s darwin-sandbox
+    Testing //t:shard (shard 3 of 3); 1s darwin-sandbox ...
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mFAIL: [0m//t:flaky (Exit 1) (see ${OUTPUT_BASE}/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t/flaky/test_attempts/attempt_1.log)
+[32m[43 / 52][0m 9 actions running
+    Testing //t:ok0; 1s darwin-sandbox
+    Testing //t:flaky; 1s local
+    Testing //t:rpt (run 3 of 3); 1s darwin-sandbox
+    Testing //t:rpt (run 1 of 3); 1s darwin-sandbox
+    Testing //t:rpt (run 2 of 3); 1s darwin-sandbox
+    Testing //t:shard (shard 2 of 3); 1s darwin-sandbox
+    Testing //t:shard (shard 1 of 3); 1s darwin-sandbox
+    Testing //t:shard (shard 3 of 3); 1s darwin-sandbox ...
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[31m[1mFAIL: [0m//t:shard (shard 2 of 3) (Exit 1) (see ${OUTPUT_BASE}/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t/shard/shard_2_of_3/test.log)
+[32m[43 / 52][0m 9 actions running
+    Testing //t:ok0; 1s darwin-sandbox
+    Testing //t:flaky; 1s local
+    Testing //t:rpt (run 3 of 3); 1s darwin-sandbox
+    Testing //t:rpt (run 1 of 3); 1s darwin-sandbox
+    Testing //t:rpt (run 2 of 3); 1s darwin-sandbox
+    Testing //t:shard (shard 2 of 3); 1s darwin-sandbox
+    Testing //t:shard (shard 1 of 3); 1s darwin-sandbox
+    Testing //t:shard (shard 3 of 3); 1s darwin-sandbox ...
+[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K[1A[K
+[35mFLAKY: [0m//t:flaky (Summary)
+      ${OUTPUT_BASE}/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t/flaky/test_attempts/attempt_1.log
+[32m[51 / 52][0m 5 / 5 tests, [31m[1m3 failed[0m;[0m  1 action[0m; last test: [31m[1m//t:flaky[0m[0m
+    Testing //t:flaky; 1s local
+[1A[K[1A[K[32mINFO: [0mFound 5 test targets...
+[32m[52 / 52][0m 5 / 5 tests, [31m[1m3 failed[0m;[0m no actions running[0m; last test: [31m[1m//t:flaky[0m
+[1A[K[32mINFO: [0mElapsed time: 1.687s, Critical Path: 1.60s
+[32m[52 / 52][0m 5 / 5 tests, [31m[1m3 failed[0m;[0m no actions running[0m; last test: [31m[1m//t:flaky[0m
+[1A[K[32mINFO: [0m45 processes: 7 action cache hit, 26 internal, 24 darwin-sandbox, 6 local.
+[32m[52 / 52][0m 5 / 5 tests, [31m[1m3 failed[0m;[0m no actions running[0m; last test: [31m[1m//t:flaky[0m
+[1A[K[32mINFO: [0mBuild completed, 3 tests FAILED, 45 total actions
+[32mINFO:[0m 
+[1A[K[32mINFO:[0m 
+[1A[K[32mINFO:[0m 
+[1A[K[32mINFO:[0m 
+[1A[K[32mINFO:[0m 
+[1A[K[32mINFO:[0m 
+[1A[K[32mINFO:[0m 
+[1A[K[32mINFO:[0m 
+[1A[K[32mINFO:[0m 
+[1A[K[32mINFO:[0m 
+[1A[K[32mINFO:[0m 
+[1A[K[32mINFO:[0m 
+[1A[K[32mINFO:[0m 
+[1A[K[32mINFO:[0m 
+[1A[K[32mINFO: [0mBuild Event Protocol files produced successfully.
+[0m

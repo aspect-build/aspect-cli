@@ -514,6 +514,29 @@ fn try_message(input: TokenStream) -> Result<TokenStream, Error> {
             None
         };
 
+        // A duration reads as its whole milliseconds, `<field>_ms`: AXL has no
+        // duration type, and a whole millisecond count is what showing or
+        // comparing a time needs.
+        if sattrs.duration && !attrs.repeated && !sattrs.skip {
+            let fident = field.ident.clone().unwrap();
+            let name = Ident::new(&format!("{fident}_ms"), Span::call_site());
+            let doc = format!(" `{fident}` in whole milliseconds; None when unset.");
+            return quote! {
+                #[doc = #doc]
+                #[starlark(attribute)]
+                #deprecated_allow
+                fn #name<'v>(this: ::starlark::values::Value<'v>) -> ::anyhow::Result<::starlark::values::none::NoneOr<i64>> {
+                    use ::starlark::values::ValueLike;
+                    use ::starlark::StarlarkResultExt;
+                    #deprecated_allow
+                    let this = this.downcast_ref_err::<#ident>().into_anyhow_result()?;
+                    Ok(::starlark::values::none::NoneOr::from_option(
+                        this.#fident.as_ref().map(|d| d.seconds * 1000 + i64::from(d.nanos) / 1_000_000),
+                    ))
+                }
+            };
+        }
+
         if sattrs.duration
             || sattrs.timestamp
             || sattrs.skip
@@ -585,7 +608,9 @@ fn try_message(input: TokenStream) -> Result<TokenStream, Error> {
             // comparisons keep working. The typed enum value is used only on
             // the write side (members + constructor); a custom value can't be
             // `==` a builtin string reliably (starlark's operand-dispatch is
-            // unspecified), so reads stay string for back-compat.
+            // unspecified), so reads stay string for back-compat. A value the
+            // vendored proto does not know (a newer Bazel's) reads as its
+            // number, so reading it never fails.
             &parse_str::<Type>("::std::string::String").expect("failed to parse String type")
         } else if attrs.bytes.is_some() {
             &parse_str::<Type>("::starlark::values::bytes::StarlarkBytes")
@@ -609,7 +634,7 @@ fn try_message(input: TokenStream) -> Result<TokenStream, Error> {
         } else if attrs.enumeration.is_some() {
             let ty = Type::from_string(&attrs.enumeration.as_ref().unwrap())
                 .expect("failed to parse enum type");
-            quote! { Ok(#ty::try_from(this.#fident)?.starlark_str().to_string()) }
+            quote! { Ok(#ty::try_from(this.#fident).map(|e| e.starlark_str().to_string()).unwrap_or_else(|_| this.#fident.to_string())) }
         } else if attrs.bytes.is_some() {
             quote! { Ok(::starlark::values::bytes::StarlarkBytes::new(this.#fident.as_ref())) }
         } else {

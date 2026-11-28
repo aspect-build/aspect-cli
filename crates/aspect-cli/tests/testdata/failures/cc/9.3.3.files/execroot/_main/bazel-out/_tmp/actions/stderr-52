@@ -1,0 +1,6 @@
+Undefined symbols for architecture arm64:
+  "missing_fn()", referenced from:
+      u() in libundef.a[2](u.o)
+ld: symbol(s) not found for architecture arm64
+clang: error: linker command failed with exit code 1 (use -v to see invocation)
+Error in child process '/usr/bin/xcrun'. 1

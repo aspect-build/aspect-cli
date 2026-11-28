@@ -1,0 +1,4 @@
+load(":defs.bzl", "two", "cross", "nomsg")
+two(name = "p", cmds = ["touch $1" if i not in (1, 10) else ("echo 'same text' >&2; exit 1" if i == 1 else "sleep 0.5; echo 'same text' >&2; exit 1") for i in range(11)])
+cross(name = "x")
+nomsg(name = "n")

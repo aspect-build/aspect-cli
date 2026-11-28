@@ -33,7 +33,12 @@
 //! own labels and progress ([`recolour`]), so each stage, a user's
 //! `rewrite` included, sees the theme's colours. Each record is classified
 //! from Bazel's bytes before the chain runs, so what a stage knows of a
-//! record ([`line::Line`]) is the same in either mode.
+//! record ([`line::Line`]) is the same in either mode. Before all of them,
+//! one error collector ([`report::ErrorCollector`]), however many
+//! `collect_errors()` stages ask for it, reads each record raw, as Bazel
+//! wrote it, for the failure summary; it never sees the CLI's own notes,
+//! which the forwarder runs through the other stages alone
+//! ([`forward::Notes`]).
 //!
 //! # Curses, and what is shown
 //!
@@ -221,6 +226,14 @@ pub enum Stage {
     /// [`report::RecapErrors`] of up to `max` errors, once `after` lines
     /// followed the first.
     RecapErrors { max: usize, after: usize },
+    /// `recap_errors(summary = True)`: no recap, the task's failure summary
+    /// telling Bazel's errors from those a [`Stage::CollectErrors`] collects,
+    /// and naming the raw log itself ([`report::Summary::log_named_elsewhere`]).
+    RecapInSummary,
+    /// [`report::ErrorCollector`], at the chain's front, for the failure
+    /// summary and the Dashboard ([`processors::Observations::collected_errors`]): one
+    /// however many stages ask for it.
+    CollectErrors,
     /// [`processors::CollapseRepeats`].
     CollapseRepeats,
     /// [`filters::CollapseSimilar`].
@@ -280,7 +293,8 @@ impl Stage {
             Stage::Rewrite { .. } => "rewrite",
             Stage::RelativizePaths { .. } => "relativize_paths",
             Stage::Drop(_) => "drop",
-            Stage::RecapErrors { .. } => "recap_errors",
+            Stage::RecapErrors { .. } | Stage::RecapInSummary => "recap_errors",
+            Stage::CollectErrors => "collect_errors",
             Stage::CollapseRepeats => "collapse_repeats",
             Stage::CollapseSimilar { .. } => "collapse_similar",
         }
@@ -288,11 +302,13 @@ impl Stage {
 
     pub fn phase(&self) -> Phase {
         match self {
-            Stage::Observe(_) | Stage::Aggregate(_) | Stage::Fatal(_) => Phase::Observe,
+            Stage::Observe(_) | Stage::Aggregate(_) | Stage::Fatal(_) | Stage::CollectErrors => {
+                Phase::Observe
+            }
             Stage::Intercept { .. } => Phase::Intercept,
             Stage::Rewrite { .. } | Stage::RelativizePaths { .. } => Phase::Rewrite,
             Stage::Drop(_) => Phase::Drop,
-            Stage::RecapErrors { .. } => Phase::Report,
+            Stage::RecapErrors { .. } | Stage::RecapInSummary => Phase::Report,
             Stage::CollapseSimilar { .. } => Phase::Collapse,
             Stage::CollapseRepeats => Phase::Repeat,
         }
@@ -303,7 +319,12 @@ impl Stage {
     pub fn alters(&self) -> bool {
         !matches!(
             self,
-            Stage::Observe(_) | Stage::Aggregate(_) | Stage::Fatal(_) | Stage::RecapErrors { .. }
+            Stage::Observe(_)
+                | Stage::Aggregate(_)
+                | Stage::Fatal(_)
+                | Stage::RecapErrors { .. }
+                | Stage::RecapInSummary
+                | Stage::CollectErrors
         )
     }
 
@@ -344,7 +365,8 @@ pub struct Config {
     /// recap name, and the paths the summary names, as OSC 8 hyperlinks
     /// ([`links`]), a relative path resolved from the first of these
     /// directories it exists under. A hidden console ([`Output::Hidden`])
-    /// links nothing.
+    /// links what its feed gets, for the screen drawing it to open, with no
+    /// URL written out beside a link.
     pub links: Option<Vec<std::path::PathBuf>>,
     /// What a link to a file opens, when [`Config::links`] links: URLs are
     /// links whatever it says.
@@ -356,6 +378,10 @@ pub struct Config {
     /// recoloured with ([`recolour`]), where colour is shown; None styles
     /// and recolours nothing.
     pub palette: Option<Arc<aspect_theme::Palette>>,
+    /// The most of an action's stdout or stderr Bazel relays to the console
+    /// ([`report::relay_cap`] of the build's flags), which the error
+    /// collector keeps and reports; None for all of it.
+    pub relay_cap: Option<u64>,
 }
 
 impl Config {
@@ -377,6 +403,7 @@ impl Config {
             link_text: false,
             colour: false,
             palette: None,
+            relay_cap: Some(report::BAZEL_UI_MAX_STDOUTERR_BYTES),
         }
     }
 
@@ -397,19 +424,26 @@ impl Config {
     }
 
     /// A [`links::Linker`] for what is shown, when [`Config::links`] asks for
-    /// one and something is shown, counting the URLs it writes in `written`.
+    /// one: to the terminal, or hidden, to the feed, whose screen opens a
+    /// link itself, so neither its URL is written beside it nor styled;
+    /// counting the URLs it writes in `written`.
     fn linker(&self, written: &links::WrittenCount) -> Option<links::Linker> {
         let bases = self.links.clone()?;
-        (self.output != Output::Hidden)
-            .then(|| links::Linker::new(bases).with_files(self.files(written)))
+        Some(links::Linker::new(bases).with_files(self.files(written)))
     }
 
     /// How this pipeline's links to files are made, the URLs they write out
-    /// counted in `written`, which all of a pipeline's share.
+    /// counted in `written`, which all of a pipeline's share: hidden, plain
+    /// links for the feed's screen to open, no URL written beside one.
     fn files(&self, written: &links::WrittenCount) -> links::FileLinks {
+        let hidden = self.output == Output::Hidden;
         links::FileLinks::new(self.link_format.clone())
-            .written(self.link_text)
-            .styled(self.shown_palette().map(|p| links::LinkStyle::of(p)))
+            .written(self.link_text && !hidden)
+            .styled(
+                self.shown_palette()
+                    .filter(|_| !hidden)
+                    .map(|p| links::LinkStyle::of(p)),
+            )
             .counted(written.clone())
     }
 
@@ -418,10 +452,16 @@ impl Config {
         self.palette.as_deref().filter(|_| !self.strip_colour)
     }
 
-    /// The `bazel.*` colours, when Bazel is asked for colour, it is shown,
-    /// and the theme shares its vocabulary with Bazel.
+    /// The `bazel.*` colours, when Bazel is asked for colour, it is shown
+    /// (or hidden for a screen that draws the feed in colour itself), and
+    /// the theme shares its vocabulary with Bazel.
     fn recolours(&self) -> Option<recolour::BazelColours> {
-        recolour::BazelColours::of(self.shown_palette()?).filter(|_| self.colour)
+        let palette = if self.output == Output::Hidden {
+            self.palette.as_deref()?
+        } else {
+            self.shown_palette()?
+        };
+        recolour::BazelColours::of(palette).filter(|_| self.colour)
     }
 
     /// Whether the pipeline keeps a raw log, given a [`Config::log`]: when a
@@ -462,7 +502,10 @@ impl Config {
             },
             feed: None,
             hidden: self.output == Output::Hidden,
+            notes: None,
             copy: None,
+            hold: None,
+            gate: None,
         }
     }
 
@@ -486,6 +529,22 @@ impl Config {
             .any(|s| matches!(s, Stage::Intercept { .. }))
     }
 
+    /// Whether the task's failure summary tells Bazel's errors instead of
+    /// a recap: it has a `recap_errors(summary = True)` stage.
+    pub fn summarized(&self) -> bool {
+        self.stages
+            .iter()
+            .any(|s| matches!(s, Stage::RecapInSummary))
+    }
+
+    /// Whether the console's errors are collected for the failure summary:
+    /// it has a `collect_errors()` stage.
+    pub fn collects_errors(&self) -> bool {
+        self.stages
+            .iter()
+            .any(|s| matches!(s, Stage::CollectErrors))
+    }
+
     /// A fresh chain for one invocation, with its own observations, event
     /// channel and raw log.
     pub fn pipeline(&self) -> Pipeline {
@@ -506,6 +565,15 @@ impl Config {
             _ => None,
         };
         let mut chain: Vec<Box<dyn LineProcessor>> = vec![];
+        // It reads Bazel's records as Bazel wrote them, before anything
+        // rewrites one (the theme's colours, paths, a user's `rewrite`): the
+        // summary ties Bazel's lines as it wrote them.
+        if self.collects_errors() {
+            chain.push(Box::new(
+                report::ErrorCollector::new(self.pty, observations.clone())
+                    .relaying(self.relay_cap),
+            ));
+        }
         // First, so every stage after it, a user's `rewrite` included, sees
         // the theme's colours. Each record is classified from Bazel's own
         // bytes before the chain runs ([`forward`]), so the stages that tell
@@ -568,6 +636,9 @@ impl Config {
                 Stage::RecapErrors { max, after } => Box::new(
                     RecapErrors::new(max, after, self.style.clone()).linking(self.linker(&written)),
                 ),
+                // No recap: the task's failure summary tells the errors,
+                // from what the collector at the chain's front keeps.
+                Stage::RecapInSummary | Stage::CollectErrors => continue,
                 Stage::CollapseRepeats => Box::new(
                     CollapseRepeats::default()
                         .under_pty(pty)
@@ -592,16 +663,21 @@ impl Config {
             _ => RawLogState::Off,
         };
         if self.stages().iter().any(|s| s.hides()) || !matches!(state, RawLogState::Off) {
-            chain.push(Box::new(Summary::new(
-                stats,
-                state,
-                self.style.clone(),
-                self.linker(&written).map(|_| self.files(&written)),
-            )));
+            chain.push(Box::new(
+                Summary::new(
+                    stats,
+                    state,
+                    self.style.clone(),
+                    self.linker(&written).map(|_| self.files(&written)),
+                )
+                .log_named_elsewhere(self.summarized()),
+            ));
         }
         let feed = (self.output == Output::Hidden).then(|| Arc::new(feed::Feed::default()));
         let mut shape = self.shape();
         shape.feed = feed.clone();
+        let notes = forward::Notes::styled(self.style.info.clone());
+        shape.notes = Some(notes.clone());
         Pipeline {
             chain,
             observations,
@@ -610,6 +686,7 @@ impl Config {
             shape,
             feed,
             links_written: written,
+            notes,
         }
     }
 }
@@ -630,6 +707,8 @@ pub struct Pipeline {
     /// The URLs its links have written out beside them (the macOS
     /// Terminal's): a console line's, the recap's and the summary's paths.
     pub links_written: links::WrittenCount,
+    /// Lines for the console from another thread, written between Bazel's.
+    pub notes: forward::Notes,
 }
 
 #[cfg(test)]
@@ -638,6 +717,164 @@ mod tests {
     use crate::console::forward::Forwarder;
     use crate::console::processors::Verdict;
     use crate::testing::SharedSink;
+
+    /// The errors a recap of `input` repeats, as `(header, body)`, read
+    /// from what it wrote (escapes left out), on the screen's lines or as
+    /// written.
+    fn recapped(mode: Mode, lines: bool, input: &[u8]) -> Vec<(String, Vec<String>)> {
+        let mut config = Config::new(
+            mode,
+            vec![Stage::RecapErrors { max: 10, after: 0 }],
+            Style::default(),
+        );
+        if lines {
+            config.output = Output::Lines { status_every: None };
+        }
+        let mut pipeline = config.pipeline();
+        let sink = SharedSink::default();
+        let mut forwarder = Forwarder::spawn(
+            Box::new(std::io::Cursor::new(input.to_vec())),
+            Box::new(sink.clone()),
+            std::mem::take(&mut pipeline.chain),
+        )
+        .unwrap();
+        forwarder.join().unwrap();
+        let text =
+            String::from_utf8_lossy(&crate::console::ansi::strip(&sink.bytes())).into_owned();
+        let Some(at) = text.find("── Error recap (") else {
+            return vec![];
+        };
+        let mut out: Vec<(String, Vec<String>)> = vec![];
+        for line in text[at..].lines().skip(1) {
+            if let Some(body) = line.strip_prefix("    ") {
+                out.last_mut()
+                    .expect("a header first")
+                    .1
+                    .push(body.to_string());
+            } else if let Some(header) = line.strip_prefix("  ") {
+                out.push((header.to_string(), vec![]));
+            } else {
+                break;
+            }
+        }
+        out
+    }
+
+    /// `test //syntax:all` under curses (Bazel 9.3.3): the syntax error, a
+    /// redraw of the progress area, then Bazel's `ERROR: package contains
+    /// errors`, which a possible tail of the first is not: both repeated.
+    #[test]
+    fn an_error_after_a_redraw_is_recapped() {
+        let input: &[u8] = b"\r\x1b[1A\x1b[K\x1b[32mLoading:\x1b[0m 0 packages loaded\r\n\r\x1b[1A\x1b[K\x1b[31m\x1b[1mERROR: \x1b[0msyntax/BUILD.bazel:2:1: syntax error at 'newline': expected ,\r\n\x1b[32mLoading:\x1b[0m 0 packages loaded\r\n\r\x1b[1A\x1b[K\x1b[31m\x1b[1mERROR: \x1b[0mpackage contains errors: syntax: syntax error at 'newline': expected ,\r\n\x1b[32mLoading:\x1b[0m 1 packages loaded\r\n";
+        for lines in [false, true] {
+            let headers: Vec<String> = recapped(Mode::Pty, lines, input)
+                .into_iter()
+                .map(|e| e.0)
+                .collect();
+            assert_eq!(
+                headers,
+                vec![
+                    "ERROR: syntax/BUILD.bazel:2:1: syntax error at 'newline': expected ,"
+                        .to_string(),
+                    "ERROR: package contains errors: syntax: syntax error at 'newline': expected ,"
+                        .to_string(),
+                ],
+                "lines {lines}"
+            );
+        }
+    }
+
+    /// `build --keep_going //ar2:all` (Bazel 9.3.3): a syntax error in
+    /// le/BUILD.bazel, a redraw, then Bazel's `ERROR: le/BUILD.bazel: no
+    /// such target '//le:x'`, at the file alone, no line: its own error,
+    /// never the syntax error's body.
+    #[test]
+    fn an_error_at_a_build_file_without_a_line_is_its_own() {
+        let input: &[u8] = b"\x1b[1;31mERROR: \x1b[0mle/BUILD.bazel:2:1: syntax error at 'newline': expected ,\r\r\n\x1b[90mAnalyzing:\x1b[0m 4 targets (2 packages loaded, 2 targets configured)\r\r\n\r\r\n\r\x1b[1A\x1b[K\r\x1b[1A\x1b[K\x1b[1;31mERROR: \x1b[0mle/BUILD.bazel: no such target '//le:x': target 'x' not declared in package 'le' defined by le/BUILD.bazel\r\r\n\x1b[90mAnalyzing:\x1b[0m 4 targets (2 packages loaded, 2 targets configured)\r\r\n";
+        assert_eq!(
+            recapped(Mode::Pty, false, input),
+            vec![
+                ("ERROR: le/BUILD.bazel:2:1: syntax error at 'newline': expected ,".to_string(), vec![]),
+                (
+                    "ERROR: le/BUILD.bazel: no such target '//le:x': target 'x' not declared in package 'le' defined by le/BUILD.bazel".to_string(),
+                    vec![]
+                ),
+            ]
+        );
+    }
+
+    /// `//tl:inner2` (Bazel 9.3.3): a genrule's last line, written in
+    /// Bazel's `ERROR: ` colours with no newline, which Bazel flushes after
+    /// its next progress line. It is the tool's, not Bazel's, so it stays in
+    /// the genrule's error, under curses and in a pipe alike.
+    #[test]
+    fn a_tools_held_error_line_stays_in_its_body() {
+        let pty: &[u8] = b"\x1b[90m[1 / 3]\x1b[0m 2 actions running\r\r\n    Executing genrule //tl:inner2; 0s disk-cache, darwin-sandbox\r\r\n\r\x1b[1A\x1b[K\r\x1b[1A\x1b[K\x1b[1;31mERROR: \x1b[0mtl/BUILD.bazel:2:8: Executing genrule //tl:inner2 failed: (Exit 1): bash failed: error executing Genrule command (from genrule rule target //tl:inner2) /bin/bash -c 'echo inner'\r\r\n\r\r\nUse --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging\r\r\nrunning inner bazel 2\r\r\n\x1b[90m[2 / 3]\x1b[0m Executing genrule //tl:inner2; 0s disk-cache, darwin-sandbox\r\r\n\r\x1b[1A\x1b[K\x1b[1;31mERROR: \x1b[0mthe inner build failed\r\r\r\n\x1b[1;90mINFO: \x1b[0mFound 2 targets...\r\r\n\x1b[90m[3 / 3]\x1b[0m no actions running\r\r\n";
+        let pipe: &[u8] = b"\x1b[32m[1 / 3]\x1b[0m 2 actions running\n\x1b[31m\x1b[1mERROR: \x1b[0mtl/BUILD.bazel:2:8: Executing genrule //tl:inner2 failed: (Exit 1): bash failed: error executing Genrule command (from genrule rule target //tl:inner2) /bin/bash -c 'echo inner'\n\nUse --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging\nrunning inner bazel 2\n\x1b[32m[2 / 3]\x1b[0m Executing genrule //tl:inner2; 0s disk-cache, darwin-sandbox\n\x1b[31m\x1b[1mERROR: \x1b[0mthe inner build failed\n\x1b[32mINFO: \x1b[0mFound 2 targets...\n\x1b[32m[3 / 3]\x1b[0m no actions running\n";
+        for (mode, input) in [(Mode::Pty, pty), (Mode::Pipe, pipe)] {
+            assert_eq!(
+                recapped(mode, false, input),
+                vec![(
+                    "ERROR: tl/BUILD.bazel:2:8: Executing genrule //tl:inner2 failed: (Exit 1)"
+                        .to_string(),
+                    vec![
+                        "running inner bazel 2".to_string(),
+                        "ERROR: the inner build failed".to_string()
+                    ],
+                )],
+                "{mode:?}"
+            );
+        }
+    }
+
+    /// Bazel's `FAILED:` status row after an error about the build, not an
+    /// action, is never its body (a BUILD file's syntax error under curses,
+    /// as Bazel 7.7, 8.9 and 9.3 alike end it), on the screen's lines or as
+    /// written.
+    #[test]
+    fn a_status_row_is_no_errors_body() {
+        let input: &[u8] = b"\x1b[31m\x1b[1mERROR: \x1b[0mBuild did NOT complete successfully\r\n\x1b[31m\x1b[1mFAILED:\x1b[0m \r\n\r\x1b[1A\x1b[K\x1b[31m\x1b[1mFAILED:\x1b[0m \r\n\r\x1b[1A\x1b[K\x1b[31m\x1b[1mERROR: \x1b[0mCouldn't start the build. Unable to run tests\r\n\x1b[31m\x1b[1mFAILED:\x1b[0m \r\n\r\x1b[1A\x1b[K\x1b[32mINFO: \x1b[0mBuild Event Protocol files produced successfully.\r\n";
+        for lines in [false, true] {
+            let errors = recapped(Mode::Pty, lines, input);
+            let start = errors
+                .iter()
+                .find(|e| e.0.contains("Couldn't start"))
+                .unwrap_or_else(|| panic!("lines {lines}: {errors:?}"));
+            assert_eq!(
+                start.1,
+                Vec::<String>::new(),
+                "lines {lines}: no FAILED: under it"
+            );
+        }
+    }
+
+    /// For the failure summary, no recap at all: it tells Bazel's errors,
+    /// from the one collector however many stages ask for it.
+    #[test]
+    fn errors_for_the_summary_write_no_recap() {
+        let input: &[u8] = b"\x1b[31m\x1b[1mERROR: \x1b[0ma/BUILD:1:1: boom\r\n";
+        let mut pipeline = Config::new(
+            Mode::Pty,
+            vec![
+                Stage::RecapInSummary,
+                Stage::CollectErrors,
+                Stage::CollectErrors,
+            ],
+            Style::default(),
+        )
+        .pipeline();
+        let sink = SharedSink::default();
+        let mut forwarder = Forwarder::spawn(
+            Box::new(std::io::Cursor::new(input.to_vec())),
+            Box::new(sink.clone()),
+            std::mem::take(&mut pipeline.chain),
+        )
+        .unwrap();
+        forwarder.join().unwrap();
+        assert!(!sink.text().contains("Error recap"), "{}", sink.text());
+        let kept = pipeline.observations.collected_errors().expect("collected");
+        assert_eq!(kept.blocks.len(), 1, "one collector however many asked");
+    }
 
     /// `input` as bazel writes it, its messages coloured.
     fn coloured(input: &[u8]) -> Vec<u8> {

@@ -84,7 +84,10 @@ rust_test(
 # runs in CI, which has no `cargo test` step. Each resolves the binary through
 # `ASPECT_CLI_BIN` (with a `CARGO_BIN_EXE_…` fallback for cargo) via the shared
 # `tests/common/mod.rs`.
-INTEGRATION_TEST_COMMON_SRCS = ["tests/common/mod.rs"]
+INTEGRATION_TEST_COMMON_SRCS = [
+    "tests/common/hang_diag.rs",
+    "tests/common/mod.rs",
+]
 
 rust_test(
     name = "broken_pipe_test",
@@ -130,7 +133,35 @@ rust_test(
 )
 
 rust_test(
+    name = "child_output_test",
+    # Large, so a hang's HANG-DIAG (stacks take up to 40s a process) prints
+    # before the timeout.
+    size = "large",
+    srcs = ["tests/child_output.rs"] + INTEGRATION_TEST_COMMON_SRCS,
+    compile_data = glob(["tests/testdata/terminal/*.golden"]),
+    crate_root = "tests/child_output.rs",
+    data = [":aspect-cli"],
+    env = {
+        "ASPECT_CLI_BIN": "$(rootpath :aspect-cli)",
+    },
+    # Its pty tests time a take, a release and a Ctrl+Z against bounds
+    # under the stalls they guard against (one at a time, by a lock in the
+    # test); run alone, not beside the rest of //... loading the machine.
+    tags = ["exclusive"],
+    deps = [
+        "//crates/axl-runtime",
+        "@crates//:libc",
+        "@crates//:serde_json",
+        "@crates//:tempfile",
+    ],
+)
+
+# Some ninety runs of the unoptimized CLI, each a CPU-second of
+# evaluating the builtins: up to 455s on a loaded CI runner, past the medium
+# size's 300s timeout.
+rust_test(
     name = "console_test",
+    size = "large",
     srcs = ["tests/console.rs"] + INTEGRATION_TEST_COMMON_SRCS,
     crate_root = "tests/console.rs",
     data = [":aspect-cli"],
@@ -157,8 +188,10 @@ rust_test(
     ],
 )
 
+# 194s on a loaded CI runner, too near the medium size's 300s timeout.
 rust_test(
     name = "feature_color_test",
+    size = "large",
     srcs = ["tests/feature_color.rs"] + INTEGRATION_TEST_COMMON_SRCS,
     crate_root = "tests/feature_color.rs",
     data = [":aspect-cli"],
@@ -171,8 +204,10 @@ rust_test(
     ],
 )
 
+# 235s on a loaded CI runner, too near the medium size's 300s timeout.
 rust_test(
     name = "feature_shorthand_test",
+    size = "large",
     srcs = ["tests/feature_shorthand.rs"] + INTEGRATION_TEST_COMMON_SRCS,
     compile_data = [
         "src/builtins/aspect/bazel/no_value_flags.axl",
@@ -239,8 +274,10 @@ rust_test(
     ],
 )
 
+# 194s on a loaded CI runner, too near the medium size's 300s timeout.
 rust_test(
     name = "axl_load_failure_test",
+    size = "large",
     srcs = ["tests/axl_load_failure.rs"] + INTEGRATION_TEST_COMMON_SRCS,
     crate_root = "tests/axl_load_failure.rs",
     data = [":aspect-cli"],
@@ -311,16 +348,18 @@ rust_test(
     deps = [
         "//crates/axl-runtime",
         "@crates//:libc",
+        "@crates//:serde_json",
         "@crates//:tempfile",
     ],
 )
 
 # Drives every built-in task that spawns Bazel against the basil fake, with an
 # `exec_log_event` hook registered, so a lost `open` / `pump` / `close` at any
-# call site fails here rather than silently.
+# call site fails here rather than silently. Large: 300s on a loaded CI
+# runner, past the medium size's timeout.
 rust_test(
     name = "exec_log_event_test",
-    size = "medium",
+    size = "large",
     srcs = ["tests/exec_log_event.rs"] + INTEGRATION_TEST_COMMON_SRCS,
     crate_root = "tests/exec_log_event.rs",
     data = [
@@ -370,6 +409,7 @@ rust_test(
     },
     deps = [
         "//crates/axl-runtime",
+        "@crates//:serde_json",
         "@crates//:tempfile",
     ],
 )

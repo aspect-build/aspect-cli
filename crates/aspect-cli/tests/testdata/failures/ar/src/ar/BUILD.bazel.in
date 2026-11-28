@@ -1,0 +1,3 @@
+genrule(name = "boom", outs = ["boom.txt"], cmd = "echo 'boom broke' >&2; exit 1")
+genrule(name = "fine", outs = ["fine.txt"], cmd = "echo ok > $@")
+genrule(name = "badlabel", srcs = ["//nowhere:x"], outs = ["z.txt"], cmd = "true")

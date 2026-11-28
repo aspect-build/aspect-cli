@@ -1,0 +1,13 @@
+exit 0
+── Other errors from Bazel ──
+ERROR: held withlabel
+ERROR: held twolabels
+ERROR: held nolabel
+ERROR: held default
+4 built, 0 failed · 0 tests passed, 0 failed · Bazel's raw log: ${FIXTURE}/7.7.3.noall.console
+All of it: aspect history show t-replay
+--- Failures tab
+! held withlabel
+! held twolabels
+! held nolabel
+! held default

@@ -1,0 +1,32 @@
+exit 1
+── Failures (3) ──
+✗ //le:x  loading · p2/BUILD.bazel:1:8
+  │ no such target '//le:x': target 'x' not declared in package 'le' defined by le/BUILD.bazel
+  ○ blocked: //p2:a, //p2:d, //p1:a
+
+✗ //mt:gone  loading · p2/BUILD.bazel:3:8
+  │ no such target '//mt:gone': target 'gone' not declared in package 'mt' defined by mt/BUILD.bazel
+  ○ blocked: //p2:e, //p1:c
+
+✗ //le:y  loading · p1/BUILD.bazel:2:8
+  │ no such target '//le:y': target 'y' not declared in package 'le' defined by le/BUILD.bazel
+  ○ blocked: //p1:b
+
+── Other errors from Bazel ──
+ERROR: le/BUILD.bazel:2:1: syntax error at 'newline': expected ,
+0 built, 3 failed, 6 blocked · 0 tests passed, 0 failed · Bazel's raw log: ${FIXTURE}/9.3.3.console
+All of it: aspect history show t-replay
+--- Failures tab
+✗ //le:x  loading · p2/BUILD.bazel:1:8
+  │ no such target '//le:x': target 'x' not declared in package 'le' defined by le/BUILD.bazel
+✗ //mt:gone  loading · p2/BUILD.bazel:3:8
+  │ no such target '//mt:gone': target 'gone' not declared in package 'mt' defined by mt/BUILD.bazel
+✗ //le:y  loading · p1/BUILD.bazel:2:8
+  │ no such target '//le:y': target 'y' not declared in package 'le' defined by le/BUILD.bazel
+○ //p2:e  blocked by //mt:gone
+○ //p2:a  blocked by //le:x
+○ //p1:b  blocked by //le:y
+○ //p1:c  blocked by //mt:gone
+○ //p2:d  blocked by //le:x
+○ //p1:a  blocked by //le:x
+! le/BUILD.bazel:2:1: syntax error at 'newline': expected ,

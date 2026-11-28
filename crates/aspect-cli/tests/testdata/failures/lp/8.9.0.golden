@@ -1,0 +1,4 @@
+exit 0
+4 built, 0 failed · 0 tests passed, 0 failed · Bazel's raw log: ${FIXTURE}/8.9.0.console
+All of it: aspect history show t-replay
+--- Failures tab

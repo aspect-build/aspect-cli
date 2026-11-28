@@ -174,6 +174,11 @@ TIP_MAX_SHOWN = 20
 #
 # (GitLab commit statuses are too short to render a tip — no GitLab surface.)
 SURFACE_CLI = "cli"
+
+# The Dashboard's screen (`--dashboard`): a tip listing `SURFACE_CLI` but
+# not this is the terminal's alone, kept out of the screen while it is up
+# and in the task's output, so the scrollback has it where it happened.
+SURFACE_DASHBOARD = "cli-dashboard"
 SURFACE_GITHUB_STATUS_CHECKS = "github-status-checks"
 SURFACE_BUILDKITE_ANNOTATIONS = "buildkite-annotations"
 SURFACE_GITHUB_PR_SUMMARY = "github-pr-summary"
@@ -181,7 +186,7 @@ SURFACE_GITHUB_PR_SUMMARY = "github-pr-summary"
 # Per-task screens (excludes the aggregate PR summary). Set
 # `surfaces = TASK_SCREENS` for a tip that should never enter the
 # cross-task rollup.
-TASK_SCREENS = [SURFACE_CLI, SURFACE_GITHUB_STATUS_CHECKS, SURFACE_BUILDKITE_ANNOTATIONS]
+TASK_SCREENS = [SURFACE_CLI, SURFACE_DASHBOARD, SURFACE_GITHUB_STATUS_CHECKS, SURFACE_BUILDKITE_ANNOTATIONS]
 
 # Aggregate screen(s) — just the PR summary today; a list so
 # `surfaces = AGGREGATE_SCREENS` reads symmetrically for a rollup-only tip.
@@ -592,7 +597,7 @@ def emit_rule_tips(ctx, rule: TipRule, report: dict, build, batch: str):
     common = dict(
         id = rule.id,
         type = TIP_TEMPLATE_JINJA2,
-        surfaces = rule.surfaces or [SURFACE_CLI],
+        surfaces = rule.surfaces or [SURFACE_CLI, SURFACE_DASHBOARD],
         combine_across_tasks = rule.combine_across_tasks,
         show = rule.show,
         max_shown = rule.max_shown,
@@ -933,8 +938,11 @@ def collect_tips_sorted(ctx, limit = None, surface = None):
 
     `surface` is the caller's id (e.g. `SURFACE_GITHUB_STATUS_CHECKS`);
     `None` (default) skips filtering. See `tip_shows_on`. Pass `limit` to
-    cap the result for space-constrained surfaces.
+    cap the result for space-constrained surfaces. Empty for a task without
+    the Tips trait.
     """
+    if _TipsTrait not in ctx.traits:
+        return []
     filtered = [t for t in ctx.traits[_TipsTrait].collect() if tip_shows_on(t, surface)]
     out = sorted(filtered, key = lambda t: severity_rank(t.get("severity")))
     if limit != None and limit >= 0:
@@ -1330,6 +1338,22 @@ def silence_sources(flag_ids, config_ids, found):
                 sources[id].append(source)
     return sources
 
+def _born(born: dict, births: list, key):
+    """Note when `key` was first seen (the next of `births`), if it is new."""
+    if key not in born:
+        born[key] = births[0]
+        births[0] += 1
+
+def _insert_born(items: list, item, born: dict, births: list, key_of):
+    """Put `item` back into `items` before the first one first seen after
+    it (`born`), at the end when none was."""
+    n = born.get(key_of(item), births[0])
+    for i, other in enumerate(items):
+        if born.get(key_of(other), births[0]) > n:
+            items.insert(i, item)
+            return
+    items.append(item)
+
 def _tips_impl(ctx):
     """Owner feature impl. Holds the per-task tips, the silenced ids and
     what the terminal has shown in closure state. At bind time reads the
@@ -1339,6 +1363,17 @@ def _tips_impl(ctx):
     Registers the end of the task's terminal output (see `_finish`) as a
     post-task hook, so it runs however the task ended."""
     state = []
+
+    # What silencing an id set aside: its stored tips, its `shows` entry and
+    # whether it was in `order`, given back where they were when it is
+    # unsilenced: by when each was first stored (`born`, `born_ids`), so
+    # undoing several silences in any order keeps the original order.
+    aside = {}
+    born = {}
+    born_ids = {}
+
+    # The next birth number, apart from any tip's id or key.
+    births = [0]
 
     found = ctx.aspect.tips.config_silence()
     for w in found.warnings:
@@ -1442,6 +1477,7 @@ def _tips_impl(ctx):
         id = stored["id"]
         if id not in shows:
             order.append(id)
+            _born(born_ids, births, id)
             shows[id] = (stored.get("show", TIP_SHOW_EACH), stored.get("max_shown", TIP_MAX_SHOWN))
             shown[id] = 0
             printed[id] = {}
@@ -1470,7 +1506,13 @@ def _tips_impl(ctx):
     def _print_stored(call_ctx, stored, color_on):
         id = stored["id"]
         lines = terminal_tip_lines(id, stored["severity"], stored["title"], stored["body"], color_on, _console(call_ctx))
-        _print(lines)
+        if call_ctx.std.term.taken and not tip_shows_on(stored, SURFACE_DASHBOARD):
+            # The terminal's alone: kept for the scrollback the screen
+            # leaves, never drawn on it.
+            for line in lines:
+                call_ctx.std.term.keep_output(line + "\n")
+        else:
+            _print(lines)
         if lines:
             shown[id] += 1
 
@@ -1492,7 +1534,9 @@ def _tips_impl(ctx):
         # Only on a task with the Tips trait: one without it (`history
         # list`) still ends here, and a tip hook reads the task's context.
         if _TipsTrait in task_ctx.traits:
-            terminal_app_links_tip(task_ctx, links_written[0])
+            # A screen's scrollback writes out the URLs its builds' consoles
+            # did not while it held the terminal.
+            terminal_app_links_tip(task_ctx, links_written[0] + task_ctx.std.term.links_written)
         finished[0] = True
         color_on = task_ctx.std.io.stderr.color
         for id in order:
@@ -1590,6 +1634,7 @@ def _tips_impl(ctx):
 
         stored = _store(call_ctx, tip)
         state.append(stored)
+        _born(born, births, (stored["id"], stored.get("key", "")))
         _on_emit(call_ctx, stored, True, occurrence)
 
     def _collect():
@@ -1612,6 +1657,10 @@ def _tips_impl(ctx):
         held_last.clear()
         last.clear()
         warned.clear()
+        aside.clear()
+        born.clear()
+        born_ids.clear()
+        births[0] = 0
         finished[0] = False
         sink[0] = print
         auto_print[0] = False
@@ -1628,9 +1677,9 @@ def _tips_impl(ctx):
 
     def _set_silenced_from(id, source, on):
         """Add `source` to (`on`) or remove it from `id`'s sources. An id
-        newly silenced has its stored tips dropped, so neither a surface nor
-        the end of the task shows them; one with no source left shows again
-        from its next emit."""
+        newly silenced has its stored tips set aside (`aside`), so neither a
+        surface nor the end of the task shows them; one with no source left
+        has them back, and shows again on every surface and at the end."""
         held = sources.get(id, [])
         if on and source not in held:
             sources[id] = held + [source]
@@ -1642,6 +1691,7 @@ def _tips_impl(ctx):
                 sources.pop(id)
         if id in sources and id not in silenced:
             silenced.append(id)
+            aside[id] = ([t for t in state if t["id"] == id], shows.get(id), id in order)
             kept = [t for t in state if t["id"] != id]
             state.clear()
             state.extend(kept)
@@ -1650,6 +1700,13 @@ def _tips_impl(ctx):
                 shows.pop(id)
         elif id not in sources and id in silenced:
             silenced.remove(id)
+            tips, show, ordered = aside.pop(id, ([], None, False))
+            for t in tips:
+                if t not in state:
+                    _insert_born(state, t, born, births, lambda s: (s["id"], s.get("key", "")))
+            if ordered and id not in order:
+                _insert_born(order, id, born_ids, births, lambda i: i)
+                shows[id] = show
 
     def _set_auto_print(v):
         auto_print[0] = v
@@ -1701,6 +1758,7 @@ tips = struct(
     _reset_for_test = lambda ctx: ctx.traits[_TipsTrait]._reset(),
     _inspect_for_test = lambda ctx: ctx.traits[_TipsTrait].collect(),
     _set_silenced_for_test = lambda ctx, ids: ctx.traits[_TipsTrait]._set_silenced(ids),
+    _set_silenced_from_for_test = lambda ctx, id, source, on: ctx.traits[_TipsTrait].set_silenced(id, source, on),
     _set_auto_print_for_test = lambda ctx, v: ctx.traits[_TipsTrait]._set_auto_print(v),
     _set_sink_for_test = lambda ctx, fn: ctx.traits[_TipsTrait]._set_sink(fn),
     _finish_for_test = lambda ctx: ctx.traits[_TipsTrait]._finish(ctx),

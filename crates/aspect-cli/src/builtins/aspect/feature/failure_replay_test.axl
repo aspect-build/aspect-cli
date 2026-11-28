@@ -1,0 +1,184 @@
+"""Replays recorded Bazel failures through the failure summary and the
+Dashboard's Failures tab, and compares each with its golden.
+
+Run with:
+  aspect dev test-failure-replay [--update] [--case=<name>]
+
+Each case in crates/aspect-cli/tests/testdata/failures (its README says how
+they are recorded) holds, per Bazel version and variant, the JSON build
+event stream, the console as a pty got it and the logs the events name.
+Every event, read as the runtime reads a `--build_event_json_file`
+(`bazel.build_events.read(format = "json")`), goes through `collect_event`
+as the build event hooks see it, then `failure_summary` reads the console
+and the logs as it reads the history's copies, and `failure_rows` draws
+the Failures tab with every row's excerpt; the summary, the tab and the
+counts must agree on the failures and on Bazel's other errors, a passing
+build's too, and the actions' parts must add up to Bazel's last `[n / m]`.
+Placeholders stand for the recording's paths: `${FIXTURE}` for the case's
+folder and `${OUTPUT_BASE}` for the files the events name, so the goldens
+hold no path of this machine. `--update` rewrites the
+goldens; review the diff.
+"""
+
+load("@aspect//feature/dashboard/actions.axl", "dashboard_actions")
+load("@aspect//feature/dashboard/render.axl", "dashboard_render")
+load("@aspect//feature/dashboard.axl", "new_state")
+load("../private/lib/failure_records.axl", "failure_records")
+load("../private/lib/failures.axl", "failures")
+load("../private/lib/term_text.axl", "term_text")
+
+ANSI = term_text.ANSI
+bep_progress = failure_records.testonly_bep_progress
+collect_event = failure_records.collect_event
+failure_entries = failures.failure_entries
+failure_summary = failures.failure_summary
+action_split = dashboard_actions.action_split
+failure_rows = dashboard_render.testonly_failure_rows
+
+_FIXTURES = "crates/aspect-cli/tests/testdata/failures"
+
+def _plain(ansi, text: str) -> str:
+    """`text` without its escape sequences."""
+    return ansi.replace(text, "")
+
+def _replay(ctx: TaskContext, case: str, prefix: str) -> str:
+    """What the summary and the Failures tab say of one recording."""
+    fs = ctx.std.fs
+    folder = "%s/%s/%s" % (ctx.std.env.aspect_root_dir(), _FIXTURES, case)
+    files = "%s/%s.files" % (folder, prefix)
+
+    def resolve(path):
+        if path.startswith("${FIXTURE}/"):
+            return folder + "/" + path[len("${FIXTURE}/"):]
+        if path.startswith("${OUTPUT_BASE}/"):
+            return files + "/" + path[len("${OUTPUT_BASE}/"):]
+        return path
+
+    def read(path, n):
+        return fs.try_read_tail(resolve(path), n)
+
+    ansi = ctx.std.re.compile(ANSI)
+    state = new_state(read = read, ansi = ansi, excerpt = ctx.std.excerpt, building = True)
+    bep = folder + "/" + prefix + ".bep.json"
+    if fs.exists(bep):
+        # The events as the runtime reads a `--build_event_json_file`, each
+        # log's URI naming the recording's own file, so the runtime finds it
+        # on disk as in a build (`local_path`).
+        copy = "%s/aspect-failure-replay-%s-%s.bep.json" % (ctx.std.env.temp_dir(), case, prefix)
+        fs.write(copy, fs.read_to_string(bep).replace("file://${OUTPUT_BASE}/", "file://" + files + "/"))
+        events = bazel.build_events.read(copy, format = "json")
+        for event in events:
+            collect_event(state, event)
+        fs.remove_file(copy)
+        if events.error != None:
+            fail("%s/%s: %s" % (case, prefix, events.error))
+    exit = fs.read_to_string(folder + "/" + prefix + ".exit").strip()
+    code = int(exit) if exit.isdigit() else None
+    console = "${FIXTURE}/" + prefix + ".console"
+
+    # The console as the CLI's stage keeps it: a recording's own pty, its
+    # stdout there too for the `merged` variant.
+    raw = fs.read_to_string(folder + "/" + prefix + ".console") if fs.exists(folder + "/" + prefix + ".console") else ""
+    state.update(building = False, ended = True, collected_errors = bazel.output._collected_errors(raw, stdout = prefix.endswith(".merged")))
+
+    # Bazel's last `[n / m]`, as the Dashboard's last frame notes it.
+    last = bep_progress(raw)
+    if last:
+        state["done_total"] = (last[0], last[1], False)
+    if ctx.args.blocks:
+        for b in (state["collected_errors"] or {}).get("blocks") or []:
+            print("%s/%s %s %r" % (case, prefix, b["kind"], b["text"][:1500]))
+    out = ["exit " + exit]
+    summary = [_plain(ansi, l) for l in failure_summary(state, "t-replay", False, console, None, ctx.std.excerpt, 100, code)]
+    out += summary
+    out.append("--- Failures tab")
+    tab = dict(state, log_path = console, bazel_exit = code, focus = "console", selected = 0, expand_failures = True, excerpts = {}, ties_cache = None, entries_cache = None)
+    rows = [_plain(ansi, r).rstrip() for r in failure_rows(tab, 400, 120)]
+    out += rows
+
+    # One count: the summary's heading, the Failures tab's ✗ rows and the
+    # entries Results and the tab's badge count.
+    title = [l for l in summary if l.startswith("── Failures (")]
+    said = int(title[0].rpartition(" of ")[2].partition(")")[0].rpartition("(")[2]) if title else 0
+    tabbed = len([r for r in rows if r.startswith("✗ ")])
+    counted = len([e for e in failure_entries(dict(tab, bazel_exit = code))["entries"] if failures.counted(e)])
+    if not (said == tabbed and tabbed == counted):
+        fail("%s/%s: the summary says %d, the tab has %d rows, the counts %d" % (case, prefix, said, tabbed, counted))
+
+    # One list of Bazel's other errors, on a passing build too: the
+    # summary's, under its own heading alone, and the tab's `!` rows.
+    at = summary.index("── Other errors from Bazel ──") if "── Other errors from Bazel ──" in summary else len(summary)
+    others = len([l for l in summary[at:] if l.startswith("ERROR: ")])
+    more = [l for l in summary[at:] if l.startswith("… and ") and " more · " in l]
+    others += int(more[0][len("… and "):].partition(" ")[0].replace(",", "")) if more else 0
+    flagged = len([r for r in rows if r.startswith("! ")])
+    if others != flagged:
+        fail("%s/%s: the summary lists %d of Bazel's other errors, the tab %d" % (case, prefix, others, flagged))
+    if code == 0 and (title or tabbed):
+        fail("%s/%s: a passing build has failures" % (case, prefix))
+
+    # The actions' parts add up to Bazel's own done count, its last
+    # `[n / m]`: never more, never less.
+    split = action_split(dict(state, building = False))
+    if split["final"]:
+        parts = 0
+        for key in ("ran", "local", "disk", "remote", "internal", "failed", "other", "skipped", "unreported"):
+            parts += split[key]
+        if parts != split["done"]:
+            fail("%s/%s: the actions' parts add up to %d of %d" % (case, prefix, parts, split["done"]))
+    return "\n".join([l.replace(files, "${OUTPUT_BASE}") for l in out]) + "\n"
+
+def _prefixes(names: list) -> list:
+    """The recordings of a case's files: `9.3.3`, `9.3.3.noall`, …"""
+    return sorted([n[:-len(".exit")] for n in names if n.endswith(".exit")])
+
+def _glyphs(text: str) -> str:
+    """`text` as the `mono` theme draws it, so a golden compares under any
+    theme."""
+    return text.replace("✗", "x").replace("│", "|")
+
+def _impl(ctx: TaskContext) -> int:
+    fs = ctx.std.fs
+    root = "%s/%s" % (ctx.std.env.aspect_root_dir(), _FIXTURES)
+    stale = []
+    count = 0
+    for entry in sorted([e.path for e in fs.read_dir(root) if e.is_dir]):
+        if ctx.args.case and entry != ctx.args.case:
+            continue
+        names = [e.path for e in fs.read_dir(root + "/" + entry)]
+        for prefix in _prefixes(names):
+            count += 1
+            got = _replay(ctx, entry, prefix)
+            path = "%s/%s/%s.golden" % (root, entry, prefix)
+            if ctx.args.update:
+                fs.write(path, got)
+                continue
+            want = fs.read_to_string(path) if fs.exists(path) else None
+            if want == None or _glyphs(got) != _glyphs(want):
+                stale.append((entry + "/" + prefix, got, want))
+    for name, got, want in stale:
+        print("replay %s differs (aspect dev test-failure-replay --update rewrites it):" % name)
+        g, w = got.split("\n"), (want or "").split("\n")
+        for i in range(max(len(g), len(w))):
+            a = g[i] if i < len(g) else "<none>"
+            b = w[i] if i < len(w) else "<none>"
+            if _glyphs(a) != _glyphs(b):
+                print("  line %d\n    got:  %r\n    want: %r" % (i, a, b))
+                break
+    if stale:
+        fail("%d of %d replay golden(s) differ: %s" % (len(stale), count, ", ".join([s[0] for s in stale])))
+    print("failure_replay_test.axl: %s %d recordings" % ("wrote" if ctx.args.update else "OK", count))
+    return 0
+
+failure_replay_tests = task(
+    summary = "Replay the recorded Bazel failures through the failure summary and the Failures tab.",
+    kind = "test-failure-replay",
+    group = ["dev"],
+    implementation = _impl,
+    args = {
+        "update": args.boolean(default = False),
+        "case": args.string(default = ""),
+        # Print each recording's kept console blocks, to see what a tie had.
+        "blocks": args.boolean(default = False),
+    },
+)

@@ -294,10 +294,51 @@ def publish_all_actions(bazel_trait) -> None:
     `upload_build_logs = "all"`. The runtime takes the request off the command
     line, adds `--build_event_publish_all_actions` and, unless the user's own
     flags or rc ask for every action, keeps the extra events from the BES
-    backends the CLI streams to and its file sinks. Added once however often it
-    is asked; a build option, so it stays out of a task's query."""
+    backends the CLI streams to and its file sinks, a requested
+    `--build_event_binary_file` among them. Files Bazel writes itself
+    (`--build_event_json_file`, `--build_event_text_file`) and a
+    `--bes_backend` it streams to get every action's event. Added once however
+    often it is asked; a build option, so it stays out of a task's query."""
     if _PUBLISH_ALL_ACTIONS_FOR_CLI not in bazel_trait.extra_flags:
         add_task_flags(bazel_trait, [_PUBLISH_ALL_ACTIONS_FOR_CLI])
+
+def bazel_sends_events_out(rc, command: str) -> bool:
+    """Whether Bazel itself sends a build's events beyond the CLI: to a BES
+    backend it streams to (`--bes_backend`), whose events the CLI cannot trim,
+    or with their local files to a remote cache (`--remote_cache` or
+    `--remote_executor`, and `--experimental_build_event_upload_strategy` not
+    `local`). Every such upload asks the cache for its capabilities first,
+    under `--remote_build_event_upload=minimal` too, and with the cache down
+    the failure stops Bazel's event stream at that event, for the CLI's
+    readers and every file and BES backend alike."""
+    if rc.flag_value("--bes_backend", command = command):
+        return True
+    if rc.flag_value("--experimental_build_event_upload_strategy", command = command) == "local":
+        return False
+    return bool(rc.flag_value("--remote_cache", command = command) or rc.flag_value("--remote_executor", command = command))
+
+def publish_all_actions_unless_sent_out(bazel_trait, published: dict) -> None:
+    """`publish_all_actions` for each build whose events Bazel keeps to the
+    CLI (`bazel_sends_events_out`). Every successful action's event names its
+    output, a local file: with a remote cache down, the first one stops the
+    stream right after the configuration, where with failed actions alone it
+    stops at the closing tool logs. Decided per build once the rc is resolved,
+    through the injected-flag filters as any injected flag; `published["all_actions"]`
+    says whether the build got every action, from this, another feature's
+    `publish_all_actions`, or the user's own flags or rc."""
+
+    def _publish(_ctx, rc, command):
+        if _PUBLISH_ALL_ACTIONS_FOR_CLI in bazel_trait.extra_flags or rc.bool_flag("--build_event_publish_all_actions", command = command):
+            published["all_actions"] = True
+            return []
+        flags = [] if bazel_sends_events_out(rc, command) else [_PUBLISH_ALL_ACTIONS_FOR_CLI]
+        for flag_filter in bazel_trait.injected_flag_filters:
+            if flags:
+                flags = flag_filter(flags)
+        published["all_actions"] = bool(flags)
+        return flags
+
+    bazel_trait.rc_flags.append(_publish)
 
 def protected_omissions(omitted: list) -> list:
     """The entries of `omitted` that name a `PROTECTED_FLAGS` flag, as the user

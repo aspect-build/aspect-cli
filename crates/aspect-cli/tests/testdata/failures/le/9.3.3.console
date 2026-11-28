@@ -1,0 +1,37 @@
+[32mComputing main repo mapping:[0m 
+[1A[K[32mLoading:[0m 
+[1A[K[32mLoading:[0m 0 packages loaded
+[1A[K[31m[1mERROR: [0m${WORKSPACE}/le/BUILD.bazel:2:1: syntax error at 'newline': expected ,
+[32mLoading:[0m 0 packages loaded
+[1A[K[31m[1mERROR: [0mpackage contains errors: le: syntax error at 'newline': expected ,
+[32mLoading:[0m 0 packages loaded
+[1A[K[32mAnalyzing:[0m 2 targets (0 packages loaded, 0 targets configured)
+[1A[K[32mINFO: [0mAnalyzed 2 targets (0 packages loaded, 0 targets configured).
+
+[1A[K[31m[1mERROR: [0m${WORKSPACE}/le/sub/BUILD.bazel: no such target '//le/sub:nothere': target 'nothere' not declared in package 'le/sub' defined by ${WORKSPACE}/le/sub/BUILD.bazel
+
+[1A[K[31m[1mERROR: [0m${WORKSPACE}/q/BUILD.bazel:2:8: no such target '//le/sub:nothere': target 'nothere' not declared in package 'le/sub' defined by ${WORKSPACE}/le/sub/BUILD.bazel and referenced by '//q:on_sub'
+
+[1A[K[31m[1mERROR: [0m${WORKSPACE}/le/BUILD.bazel: no such target '//le:x': target 'x' not declared in package 'le' defined by ${WORKSPACE}/le/BUILD.bazel
+
+[1A[K[31m[1mERROR: [0m${WORKSPACE}/q/BUILD.bazel:1:8: no such target '//le:x': target 'x' not declared in package 'le' defined by ${WORKSPACE}/le/BUILD.bazel and referenced by '//q:on_le'
+
+[1A[K[35mWARNING: [0merrors encountered while analyzing target '//q:on_le', it will not be built.
+Analysis failed
+
+[1A[K[35mWARNING: [0merrors encountered while analyzing target '//q:on_sub', it will not be built.
+Analysis failed
+
+[1A[K[32mINFO: [0mFound 0 targets...
+
+[1A[K[31m[1mERROR: [0mcommand succeeded, but there were errors parsing the target pattern
+
+[1A[K[32mINFO: [0mElapsed time: 0.044s, Critical Path: 0.00s
+
+[1A[K[32mINFO: [0m1 process: 1 internal.
+
+[1A[K[31m[1mERROR: [0mBuild did NOT complete successfully
+[31m[1mFAILED:[0m 
+[1A[K[31m[1mFAILED:[0m 
+[1A[K[32mINFO: [0mBuild Event Protocol files produced successfully.
+[0m

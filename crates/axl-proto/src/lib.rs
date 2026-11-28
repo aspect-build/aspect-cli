@@ -6,6 +6,11 @@
 // warnings;
 // See: https://github.com/rust-lang/rust/issues/47219
 
+/// Every message's descriptor, a `FileDescriptorSet`: for reading a message
+/// from its proto3 JSON form, as Bazel's `--build_event_json_file` writes a
+/// build event.
+pub const FILE_DESCRIPTOR_SET: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/descriptor.bin"));
+
 pub use prost_types::Any;
 pub use prost_types::Duration;
 pub use prost_types::Timestamp;
@@ -196,3 +201,75 @@ pub mod stardoc_output {
     include!(concat!(env!("OUT_DIR"), "/stardoc_output.rs"));
 }
 include!(concat!(env!("OUT_DIR"), "/remote_logging.rs"));
+
+#[cfg(test)]
+mod tests {
+    use starlark::values::Heap;
+
+    use crate::blaze::action_cache_statistics::{MissDetail, MissReason};
+
+    fn reason_of(reason: i32) -> String {
+        Heap::temp(|heap| {
+            let detail = heap.alloc(MissDetail { reason, count: 1 });
+            detail
+                .get_attr("reason", heap)
+                .expect("reading reason")
+                .expect("a reason field")
+                .unpack_str()
+                .expect("a string")
+                .to_owned()
+        })
+    }
+
+    #[test]
+    fn a_known_enum_value_reads_as_its_name() {
+        assert_eq!(
+            reason_of(MissReason::NotCached as i32).to_uppercase(),
+            "NOT_CACHED"
+        );
+    }
+
+    /// Bazel 9's `DIGEST_MISMATCH` (7) reads by its name, the build event
+    /// protos being Bazel 9.3.3's.
+    #[test]
+    fn bazel_9s_newest_miss_reason_reads_as_its_name() {
+        assert_eq!(reason_of(7).to_uppercase(), "DIGEST_MISMATCH");
+    }
+
+    /// A `Duration` field reads as `<field>_ms`, its whole milliseconds, and
+    /// None when unset; the field itself is no attribute.
+    #[test]
+    fn a_duration_reads_as_its_whole_milliseconds() {
+        use crate::build_event_stream::TestResult;
+        let ms = |duration: Option<prost_types::Duration>| {
+            Heap::temp(|heap| {
+                let result = heap.alloc(TestResult {
+                    test_attempt_duration: duration,
+                    ..Default::default()
+                });
+                assert!(
+                    result
+                        .get_attr("test_attempt_duration", heap)
+                        .unwrap()
+                        .is_none(),
+                    "the Duration itself is not read"
+                );
+                let got = result
+                    .get_attr("test_attempt_duration_ms", heap)
+                    .expect("reading it")
+                    .expect("a `_ms` attribute");
+                got.unpack_i32().map(i64::from)
+            })
+        };
+        let at = |seconds, nanos| Some(prost_types::Duration { seconds, nanos });
+        assert_eq!(ms(at(1, 234_567_890)), Some(1234));
+        assert_eq!(ms(at(0, 999_999)), Some(0));
+        assert_eq!(ms(at(-1, -500_000_000)), Some(-1500));
+        assert_eq!(ms(None), None);
+    }
+
+    #[test]
+    fn an_enum_value_the_proto_does_not_know_reads_as_its_number() {
+        assert_eq!(reason_of(99), "99");
+    }
+}

@@ -1,0 +1,5 @@
+[1mtb/noc.cc:1:13: [0m[0;1;31merror: [0m[1minvalid use of 'this' outside of a non-static member function[0m
+    1 | [0;34mint[0m main(){ [0;34mthis[0m does not compile }[0m
+      | [0;1;32m            ^
+[0m1 error generated.
+Error in child process '/usr/bin/xcrun'. 1

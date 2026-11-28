@@ -1,0 +1,1 @@
+[genrule(name = "g%d" % i, outs = ["g%d.txt" % i], cmd = "echo > $@") for i in range(3000)]

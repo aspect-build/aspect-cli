@@ -1,0 +1,6 @@
+exit 8
+■ Bazel was interrupted (exit 8)
+interrupted · 2 built, 0 failed · 1 test passed, 0 failed · Bazel's raw log: ${FIXTURE}/9.3.3.console
+All of it: aspect history show t-replay
+--- Failures tab
+■ Bazel was interrupted (exit 8)

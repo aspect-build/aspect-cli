@@ -99,6 +99,11 @@ unsafe impl<'v> Trace<'v> for TaskContext<'v> {
 }
 
 impl<'v> TaskContext<'v> {
+    /// The run's `TaskHooks`.
+    pub(crate) fn hooks(&self) -> values::Value<'v> {
+        self.hooks
+    }
+
     pub fn new(
         args: values::Value<'v>,
         traits: values::Value<'v>,

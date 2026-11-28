@@ -1,0 +1,119 @@
+exit 1
+── Failures (first 10 of 13) ──
+✗ //cc:lib  CppCompile · exit 1 · cc/BUILD.bazel:2:11
+  │ cc/a.cc:1:18: error: use of undeclared identifier 'x'
+  │     1 | int a() { return x; }
+  │       |                  ^
+  │ 1 error generated.
+  log ${OUTPUT_BASE}/execroot/_main/bazel-out/_tmp/actions/stderr-44
+
+✗ //cc2:other  CppCompile · exit 1 · cc2/BUILD.bazel:3:11
+  │ cc2/g.cc:1:18: error: use of undeclared identifier 'y'
+  │     1 | int g() { return y; }
+  │       |                  ^
+  │ 1 error generated.
+  log ${OUTPUT_BASE}/execroot/_main/bazel-out/_tmp/actions/stderr-51
+
+✗ //cc4:subz  CppCompile · exit 1 · cc4/BUILD.bazel:7:11
+  │ cc4/sub/z.cc:1:18: error: use of undeclared identifier 'xz'
+  │     1 | int z() { return xz; }
+  │       |                  ^~
+  │ 1 error generated.
+  log ${OUTPUT_BASE}/execroot/_main/bazel-out/_tmp/actions/stderr-47
+
+✗ //cc2:stems  CppCompile · exit 1 · cc2/BUILD.bazel:2:11
+  │ cc2/d.cc:1:19: error: use of undeclared identifier 'q'
+  │     1 | int d1() { return q; }
+  │       |                   ^
+  │ 1 error generated.
+  log ${OUTPUT_BASE}/execroot/_main/bazel-out/_tmp/actions/stderr-52
+
+✗ //cc:lib  CppCompile · exit 1 · cc/BUILD.bazel:2:11
+  │ cc/b.cc:1:19: error: expected ';' after return statement
+  │     1 | int b() { return 1 }
+  │       |                   ^
+  │       |                   ;
+  │ 1 error generated.
+  log ${OUTPUT_BASE}/execroot/_main/bazel-out/_tmp/actions/stderr-49
+
+✗ //cc4:s1  CppCompile · exit 1 · cc4/BUILD.bazel:5:11
+
+✗ //cc4:ph  CppCompile · exit 1 · cc4/BUILD.bazel:3:11
+
+✗ //cc4:ph  CppCompile · exit 1 · cc4/BUILD.bazel:3:11
+
+✗ //cc2:stems  CppCompile · exit 1 · cc2/BUILD.bazel:2:11
+
+✗ //cc2:stems  CppCompile · exit 1 · cc2/BUILD.bazel:2:11
+… and 3 more failures · aspect history show t-replay
+1 built, 8 failed · 0 tests passed, 0 failed · Bazel's raw log: ${FIXTURE}/7.7.3.console
+All of it: aspect history show t-replay
+--- Failures tab
+✗ //cc:lib  CppCompile · exit 1 · cc/BUILD.bazel:2:11
+  │ cc/a.cc:1:18: error: use of undeclared identifier 'x'
+  │     1 | int a() { return x; }
+  │       |                  ^
+  │ 1 error generated.
+✗ //cc2:other  CppCompile · exit 1 · cc2/BUILD.bazel:3:11
+  │ cc2/g.cc:1:18: error: use of undeclared identifier 'y'
+  │     1 | int g() { return y; }
+  │       |                  ^
+  │ 1 error generated.
+✗ //cc4:subz  CppCompile · exit 1 · cc4/BUILD.bazel:7:11
+  │ cc4/sub/z.cc:1:18: error: use of undeclared identifier 'xz'
+  │     1 | int z() { return xz; }
+  │       |                  ^~
+  │ 1 error generated.
+✗ //cc2:stems  CppCompile · exit 1 · cc2/BUILD.bazel:2:11
+  │ cc2/d.cc:1:19: error: use of undeclared identifier 'q'
+  │     1 | int d1() { return q; }
+  │       |                   ^
+  │ 1 error generated.
+✗ //cc:lib  CppCompile · exit 1 · cc/BUILD.bazel:2:11
+  │ cc/b.cc:1:19: error: expected ';' after return statement
+  │     1 | int b() { return 1 }
+  │       |                   ^
+  │       |                   ;
+  │ 1 error generated.
+✗ //cc4:s1  CppCompile · exit 1 · cc4/BUILD.bazel:5:11
+  │ cc4/shared.cc:1:19: error: use of undeclared identifier 'xs'
+  │     1 | int sh() { return xs; }
+  │       |                   ^~
+  │ 1 error generated.
+✗ //cc4:ph  CppCompile · exit 1 · cc4/BUILD.bazel:3:11
+  │ In file included from cc4/a.cc:1:
+  │ ./cc4/a.h:1:26: error: use of undeclared identifier 'xh'
+  │     1 | inline int ah() { return xh; }
+  │ …
+  │ 2 errors generated.
+✗ //cc4:ph  CppCompile · exit 1 · cc4/BUILD.bazel:3:11
+  │ cc4/b.cc:1:18: error: use of undeclared identifier 'xb'
+  │     1 | int b() { return xb; }
+  │       |                  ^~
+  │ 1 error generated.
+✗ //cc2:stems  CppCompile · exit 1 · cc2/BUILD.bazel:2:11
+  │ cc2/sub/d.cc:1:19: error: use of undeclared identifier 'r'
+  │     1 | int d2() { return r }
+  │       |                   ^
+  │ 1 error generated.
+✗ //cc2:stems  CppCompile · exit 1 · cc2/BUILD.bazel:2:11
+  │ cc2/f.cc:1:18: error: use of undeclared identifier 'x'
+  │     1 | int f() { return x; }
+  │       |                  ^
+  │ 1 error generated.
+✗ //cc2:stems  CppCompile · exit 1 · cc2/BUILD.bazel:2:11
+  │ cc2/e.cc:1:18: error: use of undeclared identifier 'x'
+  │     1 | int e() { return x; }
+  │       |                  ^
+  │ 1 error generated.
+✗ //cc4:s2  CppCompile · exit 1 · cc4/BUILD.bazel:6:11
+  │ cc4/shared.cc:1:19: error: use of undeclared identifier 'xs'
+  │     1 | int sh() { return xs; }
+  │       |                   ^~
+  │ 1 error generated.
+✗ //cc2:linkfail  CppLink · exit 1 · cc2/BUILD.bazel:5:10
+  │ Undefined symbols for architecture arm64:
+  │   "missing_fn()", referenced from:
+  │       u() in libundef.a[2](u.o)
+  │ ld: symbol(s) not found for architecture arm64
+  │ clang: error: linker command failed with exit code 1 (use -v to see invocation)

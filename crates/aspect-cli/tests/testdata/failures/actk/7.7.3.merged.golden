@@ -1,0 +1,31 @@
+exit 1
+── Failures (5) ──
+✗ //actk:loc  Genrule · exit 7 · actk/BUILD.bazel:3:8
+  │ local action broke
+  log ${OUTPUT_BASE}/execroot/_main/bazel-out/_tmp/actions/stderr-4
+
+✗ //actk:wk  PyWork · exit 3 · actk/BUILD.bazel:7:3
+  │ worker says: wk broke on bazel-out/darwin_arm64-fastbuild/bin/actk/wk.out
+  log ${OUTPUT_BASE}/execroot/_main/bazel-out/_tmp/actions/stderr-3
+
+✗ //actk:silent  Genrule · exit 9 · actk/BUILD.bazel:5:8
+
+✗ //actk:outonly  Genrule · exit 6 · actk/BUILD.bazel:6:8
+  │ stdout only text
+  log ${OUTPUT_BASE}/execroot/_main/bazel-out/_tmp/actions/stdout-5
+
+✗ //actk:sbx  Genrule · exit 8 · actk/BUILD.bazel:4:8
+  │ sandboxed action broke
+  log ${OUTPUT_BASE}/execroot/_main/bazel-out/_tmp/actions/stderr-2
+0 built, 5 failed · 0 tests passed, 0 failed · Bazel's raw log: ${FIXTURE}/7.7.3.merged.console
+All of it: aspect history show t-replay
+--- Failures tab
+✗ //actk:loc  Genrule · exit 7 · actk/BUILD.bazel:3:8
+  │ local action broke
+✗ //actk:wk  PyWork · exit 3 · actk/BUILD.bazel:7:3
+  │ worker says: wk broke on bazel-out/darwin_arm64-fastbuild/bin/actk/wk.out
+✗ //actk:silent  Genrule · exit 9 · actk/BUILD.bazel:5:8
+✗ //actk:outonly  Genrule · exit 6 · actk/BUILD.bazel:6:8
+  │ stdout only text
+✗ //actk:sbx  Genrule · exit 8 · actk/BUILD.bazel:4:8
+  │ sandboxed action broke

@@ -1,0 +1,2 @@
+module(name = "fx")
+bazel_dep(name = "rules_cc", version = "0.2.25")

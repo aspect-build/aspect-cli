@@ -416,8 +416,15 @@ async fn run() -> Result<ExitCode, anyhow::Error> {
 
     let result = match out.await {
         Ok(result) => result,
-        Err(err) => panic!("{:?}", err),
+        Err(err) => {
+            axl_runtime::engine::release_terminal();
+            panic!("{:?}", err)
+        }
     };
+    // A full-screen feature that did not give the terminal back.
+    axl_runtime::engine::release_terminal();
+    // What children's pipes still carry (a grandchild holding one), passed on.
+    axl_runtime::engine::finish_forwarders();
     // Children bound to the root may still be stopping (a terminated process
     // in its grace, a bazel client finishing its cancel). Give them the exit
     // window before the process goes away; past it, say so and leave.
@@ -704,6 +711,7 @@ fn wants_json_output(args: impl IntoIterator<Item = String>) -> bool {
 fn main() -> ExitCode {
     axl_runtime::startup::mark_process_start();
     axl_runtime::out::copy_axl_output();
+    axl_runtime::engine::route_cli_output();
     // Install before any other machinery, so fatal-signal reporting covers
     // everything after it (see the `crash_handler` module docs).
     crash_handler::install();
@@ -841,6 +849,8 @@ fn install_signal_watcher() {
         if killed > 0 {
             errln!("aspect-cli: killed {killed} child process(es) that were still running");
         }
+        axl_runtime::engine::release_terminal();
+        axl_runtime::engine::finish_forwarders();
         errln!("aspect-cli: exiting with code {}", kind.exit_code());
         std::process::exit(i32::from(kind.exit_code()));
     });
@@ -968,12 +978,28 @@ async fn next_signal() -> Option<(SignalKind, SignalOrigin, bool)> {
         _ = recv(terminate) => (SignalKind::Terminate, false),
         _ = recv(hangup) => (SignalKind::Terminate, true),
     };
-    let origin = if hangup || LAST_SENDER.load(Ordering::SeqCst) != 0 {
+    let origin = if hangup {
         SignalOrigin::Process
     } else {
-        SignalOrigin::Terminal
+        origin_of(
+            LAST_SENDER.load(Ordering::SeqCst),
+            std::process::id() as i32,
+        )
     };
     Some((kind, origin, hangup))
+}
+
+/// Who a signal came from, by its sender's pid (`si_pid`): the terminal (0),
+/// or this process signalling its own group (a full screen's `interrupt()`),
+/// which reached the children as the terminal's Ctrl+C does; else another
+/// process.
+#[cfg(unix)]
+fn origin_of(sender: i32, own_pid: i32) -> SignalOrigin {
+    if sender == 0 || sender == own_pid {
+        SignalOrigin::Terminal
+    } else {
+        SignalOrigin::Process
+    }
 }
 
 /// Console events never reach a child spawned with `CREATE_NEW_PROCESS_GROUP`,
@@ -1130,5 +1156,17 @@ mod degrade_policy_tests {
                 "{kind:?} is a rejection, not a help screen"
             );
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod signal_origin_tests {
+    use super::{SignalOrigin, origin_of};
+
+    #[test]
+    fn a_signal_to_our_own_group_counts_as_the_terminals() {
+        assert!(matches!(origin_of(0, 42), SignalOrigin::Terminal));
+        assert!(matches!(origin_of(42, 42), SignalOrigin::Terminal));
+        assert!(matches!(origin_of(7, 42), SignalOrigin::Process));
     }
 }

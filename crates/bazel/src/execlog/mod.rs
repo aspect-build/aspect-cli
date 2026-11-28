@@ -127,15 +127,19 @@ fn with_current_name(flags: &[String]) -> Vec<String> {
 const OTHER_FORMATS: [&str; 2] = ["--execution_log_binary_file", "--execution_log_json_file"];
 
 /// Whether `flags` have Bazel write a binary or JSON execution log for
-/// `verb`, which it refuses beside a compact one. Any value names one, empty
-/// or `true` included (Bazel's default location, or a stream to remote
-/// storage), and so does the bare flag; only a false boolean or the `--no`
-/// form does not.
+/// `verb`, which it refuses beside a compact one: the last occurrence names a
+/// path, or is `true` or the bare flag. An empty value is no format (Bazel
+/// takes it as unset: the way to clear one an rc file set). A false value and
+/// the `--no` form are taken as no format too, as Bazel 10 reads them; Bazel
+/// 9 takes `=false` as a file named `false`, and refuses the `--no` form.
 pub fn other_format(flags: &[String], verb: &str) -> bool {
     OTHER_FORMATS.iter().any(|name| {
         // A value that is not a boolean is a path, which is a format.
         crate::rc::last_word(flags, verb, |token| {
-            crate::rc::bool_token(token, name).map(|word| word.unwrap_or(true))
+            crate::rc::bool_token(token, name).map(|word| match word {
+                Err("") => false,
+                word => word.unwrap_or(true),
+            })
         }) == Some(true)
     })
 }
@@ -229,7 +233,14 @@ mod tests {
     fn another_format_is_any_value_but_a_false_one() {
         for (line, other) in [
             (vec!["--execution_log_json_file=/tmp/x.json"], true),
-            (vec!["--execution_log_binary_file="], true),
+            (vec!["--execution_log_binary_file="], false),
+            (
+                vec![
+                    "--default_override=0:build=--execution_log_binary_file=x",
+                    "--execution_log_binary_file=",
+                ],
+                false,
+            ),
             (vec!["--execution_log_binary_file"], true),
             (vec!["--execution_log_binary_file=true"], true),
             (vec!["--execution_log_binary_file=False"], false),
@@ -240,7 +251,7 @@ mod tests {
             ),
             (
                 vec!["--default_override=0:build=--execution_log_binary_file="],
-                true,
+                false,
             ),
             (
                 vec![

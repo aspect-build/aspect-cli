@@ -1,0 +1,1 @@
+build --keep_going --build_event_publish_all_actions //ad:all

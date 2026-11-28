@@ -127,3 +127,98 @@ noop = task(summary = "Test fixture.", implementation = lambda ctx: 0)
         &["noop"],
     ));
 }
+
+/// A CLI a test spawns keeping the whole environment, as this file's do,
+/// records its run in the test process's own history, never the developer's.
+#[test]
+fn a_spawned_clis_history_is_the_test_processs_own() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::fs::write(dir.path().join("MODULE.bazel"), "").expect("MODULE.bazel");
+    std::fs::create_dir(dir.path().join(".aspect")).expect(".aspect");
+    std::fs::write(
+        dir.path().join(".aspect/tasks.axl"),
+        "def _impl(ctx):\n    return 0\n\nguarded = task(implementation = _impl, summary = \"x\")\n",
+    )
+    .expect("tasks.axl");
+    let status = Command::new(aspect_cli())
+        .arg("guarded")
+        .current_dir(dir.path())
+        .status()
+        .expect("running the CLI");
+    assert!(status.success(), "{status:?}");
+    let history = common::test_history_dir();
+    assert!(history.starts_with(common::scratch_root()), "{history:?}");
+    let here = std::fs::canonicalize(dir.path()).expect("canonical");
+    let recorded = std::fs::read_dir(&history)
+        .expect("the test's history")
+        .flatten()
+        .filter_map(|e| std::fs::read_to_string(e.path().join("task.json")).ok())
+        .filter_map(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+        .any(|t| {
+            t["cwd"]
+                .as_str()
+                .and_then(|c| std::fs::canonicalize(c).ok())
+                .is_some_and(|c| c == here)
+        });
+    assert!(recorded, "no entry for {here:?} in {history:?}");
+}
+
+/// Post-task work the user waits for (a hook's sleep here; uploads, status
+/// checks and tips in a real run) is the task's time: its record and its
+/// closing line count it, with the task's own exit code.
+#[test]
+fn a_post_task_hooks_time_is_in_the_recorded_duration() {
+    const HOOK_MS: u64 = 2000;
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::fs::write(dir.path().join("MODULE.bazel"), "").expect("MODULE.bazel");
+    std::fs::create_dir(dir.path().join(".aspect")).expect(".aspect");
+    std::fs::write(
+        dir.path().join(".aspect/held.axl"),
+        format!(
+            r#"load("@std//time.axl", "sleep")
+
+def _slow(ctx, outcome):
+    sleep({HOOK_MS})
+
+def _impl(ctx):
+    ctx.hooks.post_task(_slow)
+    return 3
+
+held = task(implementation = _impl, summary = "Test fixture.")
+"#
+        ),
+    )
+    .expect("held.axl");
+    let history = dir.path().join("history");
+    let output = Command::new(aspect_cli())
+        .arg("held")
+        .current_dir(dir.path())
+        .env("ASPECT_HISTORY_DIR", &history)
+        .env(
+            "ASPECT_CREDENTIALS_FILE",
+            dir.path().join("credentials.json"),
+        )
+        .env_remove("ASPECT_DEBUG")
+        .output()
+        .expect("running the CLI");
+    assert_eq!(output.status.code(), Some(3), "{output:?}");
+    let record: serde_json::Value = std::fs::read_dir(&history)
+        .expect("the history")
+        .flatten()
+        .find_map(|e| std::fs::read_to_string(e.path().join("task.json")).ok())
+        .map(|t| serde_json::from_str(&t).expect("task.json"))
+        .expect("a task.json");
+    assert_eq!(record["status"], "ended", "{record}");
+    assert_eq!(record["exit_code"], 3, "{record}");
+    assert_eq!(record["cancelled"], false, "{record}");
+    let took = record["duration_ms"].as_u64().expect("duration_ms");
+    assert!(
+        took >= HOOK_MS,
+        "the hook's time left out: {took}ms in {record}"
+    );
+    let said = common::closing_line_ms(&String::from_utf8_lossy(&output.stderr));
+    assert!(
+        said >= HOOK_MS && said.abs_diff(took) < 100,
+        "the closing line's {said}ms against the record's {took}ms"
+    );
+}

@@ -1,0 +1,1 @@
+test --keep_going --build_event_publish_all_actions //tb:all --runs_per_test=//tb:rpt@2 --flaky_test_attempts=//tb:fl@2

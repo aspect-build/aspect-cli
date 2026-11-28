@@ -1,0 +1,14 @@
+def _impl(ctx):
+    o = ctx.actions.declare_file(ctx.label.name + ".out")
+    ctx.actions.run_shell(outputs = [o], command = ctx.attr.cmd, progress_message = "Processing %{output}", mnemonic = "Proc")
+    return [DefaultInfo(files = depset([o]))]
+proc = rule(implementation = _impl, attrs = {"cmd": attr.string()})
+
+def _two_impl(ctx):
+    outs = []
+    for i, cmd in enumerate(ctx.attr.cmds):
+        o = ctx.actions.declare_file("%s.%d" % (ctx.label.name, i))
+        ctx.actions.run_shell(outputs = [o], command = cmd, progress_message = "Processing %{output}", mnemonic = "Proc")
+        outs.append(o)
+    return [DefaultInfo(files = depset(outs))]
+two = rule(implementation = _two_impl, attrs = {"cmds": attr.string_list()})

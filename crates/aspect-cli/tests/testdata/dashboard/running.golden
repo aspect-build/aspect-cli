@@ -1,0 +1,30 @@
+ ⠋ aspect build · 12s                                                             2 actions running
+ ┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈─────────────────────────────────────────────────────── 3 of 9 actions
+┌─ Running (2) ─────────────────────────────────────────────┐┌─ Results ───────────────────────────┐
+│ Compiling src/a.cc; 3s                                    ││ Targets  0 configured               │
+│ Linking //app:bin; 1s                                     ││          0 built, 0 failed          │
+│                                                           ││ Actions  ? 3 unreported             │
+│                                                           ││          ─ 2 running · 4 pending    │
+│                                                           ││                                     │
+│                                                           ││                                     │
+│                                                           ││                                     │
+│                                                           ││                                     │
+│                                                           ││                                     │
+│                                                           ││                                     │
+└───────────────────────────────────────────────────────────┘└─────────────────────────────────────┘
+┌─ Console  Failures  Metrics  Invocation  Tips ─────────────────────────────────────── following ─┐
+│ INFO: Analyzed 3 targets (12 packages loaded).                                                   │
+│ INFO: Found 3 targets...                                                                         │
+│ src/a.cc:3:1: warning: unused variable                                                           │
+│ Building...                                                                                      │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+└──────────────────────────────────────────────────────────────────────────────────────────────────┘
+ q cancel · / find · e filter · PgUp PgDn ⇧↑↓ u d page · K J top/end · z zoom · w cut · ? keys

@@ -1,0 +1,9 @@
+In file included from cc4/a.cc:1:
+[1m./cc4/a.h:1:26: [0m[0;1;31merror: [0m[1muse of undeclared identifier 'xh'[0m
+    1 | [0;34minline[0m [0;34mint[0m ah() { [0;34mreturn[0m xh; }[0m
+      | [0;1;32m                         ^~
+[0m[1mcc4/a.cc:2:18: [0m[0;1;31merror: [0m[1muse of undeclared identifier 'xa'[0m
+    2 | [0;34mint[0m a() { [0;34mreturn[0m xa; }[0m
+      | [0;1;32m                 ^~
+[0m2 errors generated.
+Error in child process '/usr/bin/xcrun'. 1

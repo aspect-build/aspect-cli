@@ -1,0 +1,28 @@
+[32mComputing main repo mapping:[0m 
+[1A[K[32mLoading:[0m 
+[1A[K[32mLoading:[0m 0 packages loaded
+[1A[K[32mAnalyzing:[0m target //ad:x (0 packages loaded, 0 targets configured)
+[1A[K[32mINFO: [0mAnalyzed target //ad:x (0 packages loaded, 0 targets configured).
+
+[1A[K[31m[1mERROR: [0mno such package 'nowhere2': BUILD file not found in any of the following directories. Add a BUILD file to a directory to mark it as a package.
+ - nowhere2
+
+[1A[K[31m[1mERROR: [0m${WORKSPACE}/ad/BUILD.bazel:2:2: every rule of type r implicitly depends upon the target '//nowhere2:tool', but this target could not be found because of: no such package 'nowhere2': BUILD file not found in any of the following directories. Add a BUILD file to a directory to mark it as a package.
+ - nowhere2
+
+[1A[K[35mWARNING: [0merrors encountered while analyzing target '//ad:x', it will not be built.
+Analysis failed
+
+[1A[K[32mINFO: [0mFound 0 targets...
+
+[1A[K[31m[1mERROR: [0mcommand succeeded, but not all targets were analyzed
+
+[1A[K[32mINFO: [0mElapsed time: 0.051s, Critical Path: 0.00s
+
+[1A[K[32mINFO: [0m1 process: 1 internal.
+
+[1A[K[31m[1mERROR: [0mBuild did NOT complete successfully
+[31m[1mFAILED:[0m 
+[1A[K[31m[1mFAILED:[0m 
+[1A[K[32mINFO: [0mBuild Event Protocol files produced successfully.
+[0m

@@ -1,0 +1,3 @@
+load(":defs.bzl", "bad_macro")
+bad_macro(name = "m")
+genrule(name = "z", outs = ["z.txt"], cmd = "true")

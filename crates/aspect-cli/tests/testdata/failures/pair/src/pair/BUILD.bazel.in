@@ -1,0 +1,5 @@
+load(":defs.bzl", "pair")
+pair(name = "plain", first = "echo 'plain one broke' >&2; exit 2", second = "sleep 1; echo 'plain two broke' >&2; exit 3")
+pair(name = "ansi", first = "sleep 1; printf '\\033[31merror:\\033[0m ansi one broke\\n' >&2; exit 2", second = "printf '\\033[31merror:\\033[0m ansi two broke\\n' >&2; exit 3")
+pair(name = "crlf", first = "sleep 1; printf 'crlf one broke\\r\\n' >&2; exit 2", second = "printf 'crlf two broke\\r\\n' >&2; exit 3")
+pair(name = "same", first = "sleep 1; echo 'identical text' >&2; exit 2", second = "echo 'identical text' >&2; exit 3")

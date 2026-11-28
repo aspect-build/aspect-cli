@@ -28,6 +28,7 @@ nix = { version = "0.30.1", features = ["fs", "process", "signal", "term"] }
 opentelemetry = "0.33.0"
 prost = "0.14.1"
 prost-types = "0.14.1"
+prost-reflect = { version = "0.16", features = ["serde"] }
 rand = "0.8.5"
 regex = "1.11.3"
 semver = "1"

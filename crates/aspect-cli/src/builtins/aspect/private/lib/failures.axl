@@ -1,0 +1,692 @@
+"""The failure summary (`failure_summary`, `── Failures (N) ──`) and its
+entries (`failure_entries`), from the records `failure_records.axl`
+collects and the console text `failure_ties.axl` ties to them."""
+
+load("@aspect//bazel/console.axl", "RECAP_MAX")
+load("@std//theme.axl", "theme")
+load("./bazel_results.axl", "bes_get")
+load("./failure_records.axl", "failure_records")
+load("./failure_ties.axl", "failure_ties")
+load("./term_text.axl", "term_text")
+
+_c = term_text.c
+_counts = term_text.counts
+_tenths = term_text.tenths
+_RESET = term_text.RESET
+_text_width = term_text.text_width
+_wrap_line = term_text.wrap_line
+_flaky = failure_records.flaky
+_log_path = failure_records.log_path
+_own_labels = failure_records.own_labels
+_plain_text = failure_records.plain_text
+_referrers = failure_records.referrers
+_tail_text = failure_records.tail_text
+_target_entry = failure_records.target_entry
+_COMMAND_FAILURES = failure_records.COMMAND_FAILURES
+_workspace = failure_records.workspace
+_blocked_targets = failure_records.blocked_targets
+_build_outcome = failure_records.build_outcome
+_test_shape = failure_records.test_shape
+_BAZEL = failure_ties.BAZEL
+_status_word = failure_ties.status_word
+_console_ties = failure_ties.console_ties
+
+# What a flaky test's failed attempt says of it.
+FLAKY_NOTE = "flaky, passed on a later attempt"
+
+def _more_lines(n: int) -> str:
+    """`… 3 more lines`: what an excerpt leaves out after its last row,
+    counted."""
+    return _counts("… %d more line", n) + ("" if n == 1 else "s")
+
+def failure_detail(state: dict, record: dict, flaky_note: bool = True) -> str:
+    """What tells a failure apart from others of its label: an action's
+    mnemonic; a test attempt's number, after its shard and run when the
+    test has (its summary's counts) or has been seen to have (`spread`, the
+    highest of each its results named) more than one, and that the test was
+    flaky, but where `flaky_note` is false (under a heading that says so)."""
+    if record["kind"] != "test":
+        return record["detail"]
+    detail = record["detail"]
+    if record.get("status") == "timeout":
+        ms = record.get("duration_ms", 0)
+        detail += " · timeout" + (" after " + _tenths(ms) if ms else "")
+    if flaky_note and state.get("counts", {}).get("flaky", {}).get(record["label"]):
+        detail += " · " + FLAKY_NOTE
+    runs, shards = _test_shape(state, record["label"], record["config"])
+    parts = []
+    if shards > 1:
+        parts.append("shard %d" % record["shard"])
+    if runs > 1:
+        parts.append("run %d" % record["run"])
+    return " · ".join(parts + [detail])
+
+# The entries of the failure summary with their excerpt, the lines of each,
+# and the rows a line wraps to before it is cut; a line's longest quote.
+_EXCERPTED = 5
+
+_EXCERPT_LINES = 5
+
+_EXCERPT_ROWS = 3
+
+_MAX_QUOTED_BYTES = 300
+
+# Bazel's lines at the top of a test's log, before the test's own.
+_TEST_LOG_PREAMBLE = ["exec ${PAGER", "Executing tests from", "-----"]
+
+# An excerpt's row standing for lines left out between two it shows.
+_GAP_ROW = "\x00gap"
+
+def target_counts(state: dict) -> tuple:
+    """`(built, failed, blocked)` targets, from the failure entries: the
+    targets with an entry of their own that is no test's and no pattern's
+    are failed (`_own_labels`), each once however many entries it has; one
+    that failed for a failed dependency (`blocked_targets`) is blocked."""
+    found = failure_entries(state)
+    failed = {}
+    for e in found["entries"]:
+        if e["group"] != "test" and not e["pattern"] and e["label"]:
+            failed[e["label"]] = True
+    return (state["counts"]["built"], len(failed), len(_blocked_targets(state)))
+
+def counted(e: dict) -> bool:
+    """Whether entry `e` counts as a failure: not a flaky test's, which
+    passed in the end, nor the mark of a build Bazel was interrupted in
+    (`interrupted`), which failed nothing."""
+    return not e["flaky"] and not e.get("interrupted")
+
+def _failure_counts(state: dict) -> tuple:
+    """`(failed, blocked)`: the failure entries that count (`counted`, as
+    the failure summary counts them, and the Failures list has their `✗`
+    rows), and the targets not built for a failed dependency."""
+    found = failure_entries(state)
+    return (len([e for e in found["entries"] if counted(e)]), len(_blocked_targets(state)))
+
+# The most flaky tests' failed attempts the scrollback lists.
+_MAX_FLAKY_LISTED = 20
+
+# The most entries, and of Bazel's other errors, the failure summary lists
+# unless told (`failure_summary`'s `max_entries`): as many as the console
+# recaps; the rest are counted.
+_SUMMARY_MAX = RECAP_MAX
+
+def summary_counts(state: dict) -> str:
+    """The failure summary's counts: targets built, failed and blocked,
+    tests passed, failed, flaky and skipped, after `interrupted · ` where
+    the build was cut short or the task cancelled before it returned
+    (between its builds too)."""
+    c = state["counts"]
+    built_n, targets_failed, targets_blocked = target_counts(state)
+    inv = state.get("inv") or {}
+    interrupted = _build_outcome(inv) == "interrupted" or bool(state.get("cancelling"))
+    return _counts("%s%d built, %d failed%s · %d %s passed, %d failed%s%s", (
+        "interrupted · " if interrupted else "",
+        built_n,
+        targets_failed,
+        _counts(", %d blocked", targets_blocked) if targets_blocked else "",
+        c["tests_passed"],
+        "test" if c["tests_passed"] == 1 else "tests",
+        c["tests_failed"],
+        _counts(", %d flaky", c["tests_flaky"]) if c.get("tests_flaky") else "",
+        _counts(", %d skipped", c["tests_skipped"]) if c.get("tests_skipped") else "",
+    ))
+
+def quoted_rows(line: str, width: int) -> list:
+    """`line` as the summary quotes it in `width` cells: its tabs spaces to
+    the next 8-column stop of its text, cut to `_MAX_QUOTED_BYTES`, wrapped
+    at the last space that fits where the word after it fits a row (one
+    wider than a row fills it mid-word), at most `_EXCERPT_ROWS` rows, `…`
+    where it was cut; each row after the first two cells further in."""
+    line = _expand_tabs(line)
+    cut = len(line) > _MAX_QUOTED_BYTES
+    if cut:
+        line = line[:_MAX_QUOTED_BYTES]
+    rows = []
+    rest = line
+    for _ in range(len(line) + 1):
+        if not rest or len(rows) == _EXCERPT_ROWS:
+            break
+        room = max(1, width if not rows else width - 2)
+        piece = _wrap_line(rest, room)[0][0]
+        if len(piece) < len(rest):
+            space = piece.rfind(" ")
+            word = rest[space + 1:].partition(" ")[0] if space > 0 else ""
+            if space > 0 and _text_width(word) <= max(1, width - 2):
+                piece = piece[:space + 1]
+            rows.append(piece.rstrip())
+        else:
+            rows.append(piece)
+        rest = rest[len(piece):].lstrip(" ") if rows else rest
+    if rest:
+        cut = True
+    if not rows:
+        rows = [line]
+    if cut:
+        last = rows[-1].rstrip()
+        room = width if len(rows) == 1 else width - 2
+        if _text_width(last) + 1 > room:
+            last = last[:-1]
+        rows[-1] = last + "…"
+    return rows
+
+def _expand_tabs(line: str) -> str:
+    """`line` with each tab spaces to the next 8-column stop."""
+    if "\t" not in line:
+        return line
+    pieces = line.split("\t")
+    out = pieces[0]
+    for piece in pieces[1:]:
+        out += " " * (8 - _text_width(out) % 8) + piece
+    return out
+
+def _picked(got: dict) -> tuple:
+    """`(lines, gaps)` of what `std.excerpt` picked (`got`): its lines but
+    its `… N more lines` ones, and where each of those stood, `(index, n)`,
+    `n` lines left out before `lines[index]` (`len(lines)`: after the
+    last)."""
+    at = {i: n for i, n in got["gaps"]}
+    lines = []
+    gaps = []
+    for i, line in enumerate(got["lines"]):
+        if i in at:
+            gaps.append((len(lines), at[i]))
+        else:
+            lines.append(line)
+    return (lines, gaps)
+
+def excerpt_rows(lines: list, gaps: list = [], after_shown: bool = False) -> tuple:
+    """`(rows, more)` of an excerpt's `lines` as the summary and the
+    Failures list show them: at most `_EXCERPT_LINES` rows, the lines left
+    out between two shown ones (`gaps`, `_picked`'s) a `_GAP_ROW` among
+    them, which stands for them (counting as one row; too many rows, the
+    lines just before a gap go into it first, so the output's last lines
+    stay), and `more`, the lines left out after the last row shown: those
+    past the rows' cap, and a gap after the last line. Lines left out
+    before the first are in neither, unless `lines` go on from a line
+    shown already (`after_shown`: Other errors' `ERROR:` line), where they
+    are a gap between two shown ones too."""
+    left = {}
+    for i, n in gaps:
+        left[i] = left.get(i, 0) + n
+
+    # Each row with the lines it stands for: a line one, a gap its own.
+    rows = []
+    for i in range(len(lines) + 1):
+        if i in left and (rows or after_shown):
+            if rows and rows[-1][0] == _GAP_ROW:
+                rows[-1] = (_GAP_ROW, rows[-1][1] + left[i])
+            else:
+                rows.append((_GAP_ROW, left[i]))
+        if i < len(lines) and lines[i]:
+            rows.append((lines[i], 1))
+    more = 0
+    if rows and rows[-1][0] == _GAP_ROW:
+        more = rows[-1][1]
+        rows = rows[:-1]
+    for _ in range(len(rows)):
+        at = [k for k, r in enumerate(rows) if r[0] == _GAP_ROW]
+        if len(rows) <= _EXCERPT_LINES or not at or at[-1] < 2:
+            break
+        k = at[-1]
+        gap = (_GAP_ROW, rows[k][1] + 1)
+        before = rows[:k - 1]
+        if before and before[-1][0] == _GAP_ROW:
+            gap = (_GAP_ROW, before[-1][1] + gap[1])
+            before = before[:-1]
+        rows = before + [gap] + rows[k + 1:]
+
+    # Past the cap (every gap among the first two rows): what follows the
+    # last row shown, lines and gaps alike.
+    for _, n in rows[_EXCERPT_LINES:]:
+        more += n
+    return ([text for text, _ in rows[:_EXCERPT_LINES]], more)
+
+def _test_excerpt(text: str, excerpt, timed_out: bool) -> tuple:
+    """`(lines, gaps)` of a test's log for the summary: what `excerpt`
+    (`std.excerpt`, the console recap's choice) picks once Bazel's
+    preamble is left out (`_picked`), its last lines where nothing reads
+    as an error; at most two of a timed-out test's. Either way it ends at
+    the log's last line (`tail = 1`), so no line follows it; `gaps` are
+    the lines left out between two spans."""
+    lines = [l for l in text.split("\n") if not any([l.startswith(p) for p in _TEST_LOG_PREAMBLE])]
+    for _ in range(len(lines)):
+        if lines[-1].strip():
+            break
+        lines = lines[:-1]
+    if not lines:
+        return ([], [])
+    if excerpt == None:
+        return (lines[-_EXCERPT_LINES:], [])
+    return _picked(excerpt("\n".join(lines), max_lines = 2 if timed_out else _EXCERPT_LINES, before = 1, after = 2, tail = 1))
+
+def _attempts_text(n: int, of: int | None = None) -> str:
+    """`failed 1 of 2 attempts`: `n` failed of `of` (all of them when
+    not known)."""
+    of = max(n, of or n)
+    return _counts("failed %d of %d attempt", (n, of)) + ("" if of == 1 else "s")
+
+def own_excerpt(state: dict, rec: dict, excerpt) -> tuple:
+    """`(details, lines, gaps, log)` of a failed action from its record
+    alone: its exit code (`exit 3`, none for 0), what `excerpt`
+    (`std.excerpt`, the recap's choice) picks of its own log (`_picked`),
+    escapes and CRs left out (`_plain_text`), its last lines without
+    `excerpt`, and that log's path; no location, which only a console tie
+    gives (`console_ties`)."""
+    details = ["exit %d" % rec["exit_code"]] if rec.get("exit_code") else []
+    path = _log_path(state, rec) if state.get("read") != None else ""
+    text = _plain_text(state, _tail_text(state, path) or "").rstrip("\n")
+    lines, gaps = [], []
+    if text.strip() and excerpt != None:
+        lines, gaps = _picked(excerpt(text, max_lines = _EXCERPT_LINES, before = 1, after = 2, tail = 1))
+    elif text.strip():
+        lines = text.split("\n")[-_EXCERPT_LINES:]
+    return (details, lines, gaps, path)
+
+def test_group(state: dict, recs: list) -> dict:
+    """A failed test's records as the summary and the Failures list tell
+    it: `rec`, the last attempt of its first failed shard or run (`index`
+    among `recs`), `details` for its heading (`shard 2 of 3 · run 1 of 2`,
+    then `failed 2 of 2 attempts · 0.4s` or `timed out after 5.0s`),
+    `others`, each other failed shard or run's last attempt with what names
+    it (`shard 3 of 3 · run 2 of 2`), and whether it `timed_out`."""
+    label = recs[0]["label"]
+    runs, shards = _test_shape(state, label, recs[0].get("config", ""))
+
+    def named(at: tuple) -> str:
+        return " · ".join((["shard %d of %d" % (at[0], shards)] if shards > 1 else []) + (["run %d of %d" % (at[1], runs)] if runs > 1 else []))
+
+    parts = {}
+    order = []
+    for rec in recs:
+        at = (rec.get("shard", 1), rec.get("run", 1))
+        if at not in parts:
+            order.append(at)
+        parts.setdefault(at, []).append(rec)
+    order = sorted(order)
+    first = parts[order[0]]
+    last = first[-1]
+    attempts = len(first)
+
+    # Every attempt Bazel made of that shard and run, the passed one of a
+    # flaky test too (`last_attempts`, from its test results).
+    tried = (state.get("last_attempts") or {}).get((label, recs[0].get("config", ""), order[0][1], order[0][0]), 0)
+    tried = max([tried, attempts] + [r.get("attempt", 1) for r in first])
+    details = [named(order[0])] if named(order[0]) else []
+    timed_out = last.get("status") == "timeout"
+    ms = last.get("duration_ms", 0) or 0
+    if timed_out:
+        details.append("timed out" + (" after " + _tenths(ms) if ms else ""))
+    else:
+        details.append(_attempts_text(attempts, tried))
+        if ms >= 100:
+            details.append(_tenths(ms))
+    others = [(named(at), parts[at][-1]) for at in order[1:]]
+    return {"rec": last, "index": [i for i, r in enumerate(recs) if r == last][-1], "details": details, "others": others, "timed_out": timed_out}
+
+# What an entry says when Bazel's events give a failed target no reason.
+_NO_REASON = "Bazel's events give no reason; its error is in the console"
+
+def _traceback_lines(state: dict, lines: list) -> tuple:
+    """`(lines, gaps)`: `lines` with a Starlark `Traceback` in them cut as
+    the console's recap cuts one (`std.excerpt(traceback = True)`: what
+    comes before it, its first frame at a BUILD file, else its innermost,
+    and that frame's code line, and its last `Error in` line, the rest
+    gaps, `_picked`); any other text's lines as they are."""
+    excerpt = state.get("excerpt")
+    if excerpt == None or not lines:
+        return (lines, [])
+    return _picked(excerpt("\n".join(lines), traceback = True, max_lines = len(lines) + 1))
+
+# The targets an entry's blocked line names; the rest are counted.
+_BLOCKED_SHOWN = 3
+
+# The width a quoted line wraps to: the summary's, less its gutter (`  │ `,
+# or `  │ ! ` under Other errors), never under `_MIN_QUOTE`.
+_QUOTE_GUTTER = 4
+_OTHER_GUTTER = 9
+_MIN_QUOTE = 20
+
+# The failure summary's groups of entries, in order: the targets' (roots
+# whose analysis or loading failed, missing sources, Bazel's exit code), the
+# failed actions, the tests.
+_GROUPS = ["target", "action", "test"]
+
+def failure_entries(state: dict) -> dict:
+    """The build's failures as the failure summary and the Failures list
+    tell them, from Bazel's build events alone, in order (an `entry` each):
+    the targets' first (a root cause whose analysis or loading failed, its
+    description Bazel's; a target that failed with no action of its own, a
+    missing source file's), then the failed actions, then the tests (the
+    attempt `test_group` picks; a flaky one marked `flaky`), each in Bazel's
+    order; then a failed target none of those is about and no root cause
+    blocks (`_NO_REASON`); with none of those nor any of Bazel's other
+    errors (`console_ties`) once a build Bazel failed has ended
+    (`bazel_exit`), its exit code (`exited`). Once a build its
+    `BuildFinished` says Bazel was interrupted in has ended (`INTERRUPTED`,
+    by name), an entry of that last, whatever else is listed, its exit code
+    `BuildFinished`'s and marked `interrupted`, which counts as no failure
+    (`counted`). Each blocked target
+    (`blocked_targets`) goes under the first entry of its first root cause
+    (`blocked`); a root with no entry keeps its blocked targets in
+    `unlisted`. An entry's heading and excerpt are `entry_text`'s. Cached
+    until the failures, the root causes or the failed targets change."""
+    fails = state["fails"]
+    causes = state.get("root_causes") or {}
+    key = (len(fails), len(causes), len(state["counts"]["failed_labels"]), state.get("bazel_exit"), bool(state.get("building")))
+    cached = state.get("entries_cache")
+    if cached != None and cached[0] == key:
+        return cached[1]
+    referrers = _referrers(state)
+    own = _own_labels(state)
+    tests = {}
+    for i, rec in enumerate(fails):
+        if rec["kind"] == "test":
+            tests.setdefault(rec["label"], []).append(i)
+    groups = {group: [] for group in _GROUPS}
+    for i, rec in enumerate(fails):
+        if rec["kind"] == "target":
+            if _target_entry(state, rec, referrers, own):
+                groups["target"].append((i, rec))
+        elif rec["kind"] == "action":
+            groups["action"].append((i, rec))
+        elif tests.get(rec["label"]) != None:
+            at = tests.pop(rec["label"])
+            picked = at[test_group(state, [fails[j] for j in at])["index"]]
+            groups["test"].append((picked, fails[picked]))
+    entries = []
+    for group in _GROUPS:
+        for i, rec in groups[group]:
+            entries.append({"index": i, "group": group, "label": rec["label"], "flaky": _flaky(state, rec), "pattern": rec.get("pattern", False), "blocked": []})
+    blocked = _blocked_targets(state)
+    for label in state["counts"]["failures"]:
+        if label not in own and label not in blocked:
+            entries.append({"index": None, "group": "target", "label": label, "flaky": False, "pattern": False, "blocked": []})
+
+    # A failed build always says why: with nothing else to list, an entry of
+    # Bazel's exit code (`entry_text`: its raw log's last lines); one Bazel
+    # was interrupted in says so, whatever else it lists.
+    code = state.get("bazel_exit")
+    inv = state.get("inv") or {}
+    if not state.get("building") and _build_outcome(inv) == "interrupted":
+        code = bes_get(bes_get(inv.get("build_finished"), "exit_code"), "code", None) or code
+        entries.append({"index": None, "group": "target", "label": "", "exited": code, "interrupted": True, "flaky": False, "pattern": False, "blocked": []})
+    elif not entries and code not in (None, 0) and not state.get("building") and not _console_ties(state)["others"]:
+        entries.append({"index": None, "group": "target", "label": "", "exited": code, "interrupted": False, "flaky": False, "pattern": False, "blocked": []})
+    first = {}
+    for e in entries:
+        if e["label"] not in first:
+            first[e["label"]] = e
+    unlisted = {}
+    for label, roots in blocked.items():
+        if roots[0] in first:
+            first[roots[0]]["blocked"].append(label)
+        else:
+            unlisted.setdefault(roots[0], []).append(label)
+    result = {"entries": entries, "unlisted": unlisted}
+    state["entries_cache"] = (key, result)
+    return result
+
+def entry_text(state: dict, e: dict) -> dict:
+    """An entry's heading and excerpt (`kind`, `details`, `lines`, `gaps`,
+    `log`, `extra`: `gaps` where lines are left out between two of
+    `lines`, `excerpt_rows`'), the same in the failure summary and the
+    Failures list, kept once worked out:
+
+    - a failed action: its mnemonic and its command's exit code (its
+      `failure_detail`'s `spawn_exit_code`), and the code of a command
+      that timed out, ran out of memory or could not start in its sandbox
+      in words (`timeout`, `out of memory`, `subprocess start failed`);
+      its own log's excerpt (what `std.excerpt` picks, `own_excerpt`) and
+      that log; with neither an excerpt nor a tie's lines, its
+      `failure_detail`'s message where it says more than the failed
+      command (`COMMAND_FAILURES`), such as a test Bazel failed itself
+      (`Sharding requested, but the test runner did not advertise support
+      for it`);
+    - a test: `test_group`'s heading and its chosen attempt's `test.log`
+      excerpt; each other failed shard or run a line;
+    - a target: `analysis` or `loading`, and Bazel's description of it (a
+      `Traceback` cut as the console's recap cuts one); a target Bazel
+      names as its own root cause with none says its package has an error;
+      one that failed with no action of its own, what its `failure_detail`
+      says (`missing input file '//a:b'`);
+    - a failed target no event says more of: `_NO_REASON`;
+    - Bazel's exit code: its raw log's last `ERROR:` lines, else, a crashed
+      server's, its last lines but progress (`_last_words`); `Bazel was
+      interrupted (exit 8)` for an interrupted build's.
+
+    Once the build has ended, what Bazel's console ties to it
+    (`console_ties`): its location, an action's status (`killed`) and the
+    lines a tie quotes (`output 'x' was not created`, an attribute error),
+    after its own.
+    """
+    cache = state.setdefault("excerpts", {})
+    ended = not state.get("building")
+    key = (e["index"], e["label"], ended)
+    if key in cache:
+        return cache[key]
+    ties = _console_ties(state) if ended else {"actions": {}, "targets": {}}
+    fails = state["fails"]
+    rec = fails[e["index"]] if e["index"] != None else None
+    out = {"kind": "", "details": [], "lines": [], "gaps": [], "log": "", "extra": []}
+    if e.get("exited") != None:
+        kind = ("Bazel was interrupted (exit %d)" if e.get("interrupted") else "Bazel exited %d") % e["exited"]
+        out.update(kind = kind, lines = _last_words(state), log = state.get("log_path", ""))
+    elif rec == None:
+        out["lines"] = [_NO_REASON]
+    elif rec["kind"] == "action":
+        details, lines, gaps, log = own_excerpt(state, rec, state.get("excerpt"))
+        tied = ties["actions"].get(e["index"]) or {"location": "", "status": "", "lines": []}
+        if tied["status"]:
+            details = [_status_word(tied["status"])]
+        category, code = rec.get("failure_category") or ("", "")
+        command = code in _COMMAND_FAILURES.get(category, [])
+        if command and code != "non_zero_exit" and code.replace("_", " ") not in details:
+            details.append(code.replace("_", " "))
+        gaps = [(i + len(tied["lines"]), n) for i, n in gaps]
+        lines = tied["lines"] + lines
+        if not lines and rec.get("failure") and not command:
+            lines = [l for l in rec["failure"].split("\n") if l.strip()]
+        out.update(kind = rec["detail"], details = details + ([tied["location"]] if tied["location"] else []), lines = lines, gaps = gaps, log = log)
+    elif rec["kind"] == "test":
+        recs = [r for r in fails if r["kind"] == "test" and r["label"] == rec["label"]]
+        group = test_group(state, recs)
+        out.update(kind = "test", details = group["details"])
+        if not e["flaky"]:
+            path = _log_path(state, group["rec"]) if state.get("read") != None else ""
+            text = _tail_text(state, path)
+            if text:
+                out["lines"], out["gaps"] = _test_excerpt(text, state.get("excerpt"), group["timed_out"])
+            elif any([type(v) == "string" and v.startswith("bytestream://") or (type(v) == "tuple" and str(v[0]).startswith("bytestream://")) for _, v in group["rec"]["files"]]):
+                out["extra"].append("log is only in the remote cache")
+            out["log"] = path
+            for what, other in group["others"]:
+                other_path = _log_path(state, other) if state.get("read") != None else ""
+                out["extra"].append(what + " also failed" + (" · log " + other_path if other_path else ""))
+    else:
+        text = rec.get("description", "")
+        if not text and (state.get("root_causes") or {}).get(rec["label"]) == [rec["label"]]:
+            text = "its package has an error"
+        lines, gaps = _traceback_lines(state, [l for l in text.split("\n") if l.strip()]) if text else ([], [])
+        tied = ties["targets"].get(rec["label"]) or {"location": "", "lines": []}
+        lines += [l for l in tied["lines"] if l not in lines]
+        workspace = _workspace(state)
+        if workspace:
+            lines = [l.replace(workspace + "/", "") for l in lines]
+        out.update(kind = rec["detail"] if rec["detail"] != "target" else "", details = [tied["location"]] if tied["location"] else [], lines = lines, gaps = gaps)
+    if out["lines"] or ended:
+        cache[key] = out
+    return out
+
+def _tab_extras(state: dict) -> list:
+    """The Failures list's rows of no record of their own, after the
+    records' (`listed_failures`), `(what, item)`: an entry of none
+    (`("entry", entry)`: a failed target no event says more of, Bazel's
+    exit code), each blocked target (`("blocked", label)`),
+    then, once the build has ended, each of Bazel's other errors
+    (`("other", block)`, `console_ties`)."""
+    found = failure_entries(state)
+    out = [("entry", e) for e in found["entries"] if e["index"] == None]
+    for label in _blocked_targets(state).keys():
+        out.append(("blocked", label))
+    for block in _console_ties(state)["others"] if not state.get("building") else []:
+        out.append(("other", block))
+    return out
+
+def _last_words(state: dict) -> list:
+    """What Bazel's raw log (`log_path`) says last: its last `ERROR:` lines,
+    else, a crashed server's `FATAL: …` and `Server terminated abruptly`
+    lines, else its last lines but progress, at most `_EXCERPT_LINES`."""
+    tail = [l for l in _plain_text(state, _tail_text(state, state.get("log_path", "")) or "").split("\n") if l.strip()]
+    words = [l[len(_BAZEL.error):] for l in tail if l.startswith(_BAZEL.error)]
+    if not words:
+        words = [l for l in tail if l.startswith((_BAZEL.fatal, _BAZEL.server_died))]
+    if not words:
+        words = [l for l in tail if not l.startswith(("[", "INFO: ", "WARNING: ", "Loading", "Analyzing", "Computing", "Starting local Bazel server", "Extracting Bazel installation", "  "))]
+    return words[-_EXCERPT_LINES:]
+
+def failure_summary(state: dict, task_id: str, tty: bool, log_path: str = "", linked = None, excerpt = None, width: int = 100, bazel_exit: int | None = None, max_entries: int | None = None) -> list:
+    """The end of a build's console, the same with the Dashboard or without:
+    a `── Failures (N) ──` rule when anything failed, then an entry for each
+    failure Bazel's build events report (`failure_entries`, its heading and
+    excerpt `entry_text`'s): a heading (`✗ //pkg:t  Genrule · exit 1`: the
+    label bold, its kind and details muted), then for the first `_EXCERPTED`
+    an excerpt behind a muted `│`, at most `_EXCERPT_LINES` rows (each line
+    cut to `_MAX_QUOTED_BYTES` or `_EXCERPT_ROWS` rows of `width`, then `…`;
+    `│ …` where lines between two shown ones are left out; `│ … N more
+    lines` counting those left out after the last shown), then a muted
+    `log <path>`, then
+    what else it has (another failed shard or run, a log only in the remote
+    cache); every entry then names three of the targets it blocked (`○
+    blocked: //a, //b, //c +4 blocked`), and a root cause with no entry its
+    own line; a blank line apart. A flaky test has no entry. Then, under `──
+    Other errors from Bazel ──`, a passing build's too (with no `Failures`
+    rule), each of Bazel's `ERROR:` blocks no entry claimed (`console_ties`:
+    a BUILD file's syntax error, a macro's `Traceback`, `package contains
+    errors`): its line and the lines Bazel wrote with it, escapes and the
+    workspace's path left out, every row of its line shown, a `Traceback`
+    cut as an entry's is, capped as the entries are, and what the console
+    stage's caps left out counted; `Failures (N)` counts the entries alone.
+    With neither though Bazel exited non-zero (`bazel_exit`), the one entry
+    is `✗ Bazel exited N` (`failure_entries`), quoting the raw log's last
+    `ERROR:` lines, else, a crashed server's, its last lines but progress.
+    A build Bazel was interrupted in ends, after whatever else it lists, on
+    a line `■ Bazel was interrupted (exit N)` in the `warning` role, which
+    counts as no failure (Bazel's own `ERROR: build interrupted`, the same
+    outcome restated, claimed, `console_ties`).
+
+    Past `max_entries` entries (`_SUMMARY_MAX` when None), and as many of
+    Bazel's other errors, `… and N more failures · aspect history show
+    <id>`; then the counts, Bazel's raw log (`log_path`), and where
+    the rest is. Every line goes through `linked` (`ctx.std.io.linked`)
+    when given, so its paths are links as the CLI's own lines on that
+    terminal are. The `mono` theme (`NO_COLOR` too) draws `x` and `|` for
+    `✗` and `│`."""
+    max_entries = max_entries or _SUMMARY_MAX
+    bold = _c("strong") if tty else ""
+    red = _c("error") if tty else ""
+    muted = _c("muted") if tty else ""
+    yellow = _c("warning") if tty else ""
+    reset = _RESET if tty else ""
+    ascii = theme.info()["name"] == "mono"
+    cross = "x" if ascii else "✗"
+    bar = "|" if ascii else "│"
+    state = dict(state, log_path = log_path or state.get("log_path", ""), building = False, excerpt = excerpt or state.get("excerpt"), excerpts = {}, entries_cache = None, blocked_cache = None, own_cache = None, bazel_exit = bazel_exit if bazel_exit != None else state.get("bazel_exit"))
+    found = failure_entries(state)
+    entries = [e for e in found["entries"] if counted(e)]
+    halted = [e for e in found["entries"] if e.get("interrupted")]
+
+    def blocked_line(stopped: list) -> str:
+        more = len(stopped) - _BLOCKED_SHOWN
+        return "  ○ blocked: " + ", ".join(stopped[:_BLOCKED_SHOWN]) + (_counts(" +%d blocked", more) if more > 0 else "")
+
+    shown = []
+    for e in entries:
+        text = entry_text(state, e)
+        rows, more = excerpt_rows(text["lines"], text["gaps"])
+        shown.append(dict(text, label = e["label"], rows = rows, more = more, blocked = e["blocked"]))
+
+    out = []
+
+    def quote(rows: list, more: int) -> None:
+        # An excerpt's rows behind the gutter, a gap as `│ …`, then how
+        # many lines it left out.
+        for line in rows:
+            if line == _GAP_ROW:
+                out.append("  " + muted + bar + " …" + reset)
+                continue
+            for j, row in enumerate(quoted_rows(line, max(_MIN_QUOTE, width - _QUOTE_GUTTER))):
+                out.append("  " + muted + bar + reset + " " + ("  " if j else "") + row)
+        if more:
+            out.append("  " + muted + bar + reset + " " + _more_lines(more))
+
+    if shown:
+        total = len(shown)
+        listed = shown[:max_entries]
+        title = ("Failures (first %d of %d)" % (len(listed), total)) if total > len(listed) else ("Failures (%d)" % len(listed))
+        out.append(red + bold + "── " + title + " ──" + reset)
+        for i, e in enumerate(listed):
+            if i:
+                out.append("")
+            details = ([e["kind"]] if e["kind"] else []) + e["details"]
+            name = e["label"] or ("error" if not details else "")
+            out.append(red + cross + reset + " " + bold + name + reset + (("  " if name else "") + muted + " · ".join(details) + reset if details else ""))
+            if i < _EXCERPTED:
+                quote(e["rows"], e["more"])
+                if e["log"]:
+                    out.append("  " + muted + "log" + reset + " " + e["log"])
+                for line in e["extra"]:
+                    out.append("  " + muted + line + reset)
+            if e["blocked"]:
+                out.append(blocked_line(e["blocked"]))
+
+        # Targets blocked by a root cause with no entry.
+        for root in sorted(found["unlisted"].keys()):
+            out.append("○ " + root + " " + blocked_line(found["unlisted"][root]).strip()[2:])
+        if total > len(listed):
+            out.append(_counts("… and %d more failure", total - len(listed)) + ("" if total - len(listed) == 1 else "s") + " · aspect history show %s" % task_id)
+    others = _console_ties(state)["others"]
+    if others:
+        if out:
+            out.append("")
+        out.append(red + bold + "── Other errors from Bazel ──" + reset)
+        for i, block in enumerate(others[:max_entries]):
+            lines, gaps = _traceback_lines(state, block["lines"])
+            for j, row in enumerate(quoted_rows(lines[0], max(_MIN_QUOTE, width - _OTHER_GUTTER))):
+                out.append((red + "ERROR:" + reset + " " if not j else "         ") + row)
+            if i < _EXCERPTED:
+                quote(*excerpt_rows(lines[1:], [(max(0, k - 1), n) for k, n in gaps], after_shown = True))
+        if len(others) > max_entries:
+            out.append(_counts("… and %d more", len(others) - max_entries) + " · aspect history show %s" % task_id)
+    for e in halted:
+        if out:
+            out.append("")
+        out.append(yellow + "■" + reset + " " + entry_text(state, e)["kind"])
+    not_kept = _console_ties(state)["not_kept"]
+    if not_kept:
+        out.append(muted + _counts("(%d bytes of Bazel's error messages not kept)", not_kept) + reset)
+    froms_not_kept = (state.get("collected_errors") or {}).get("froms_not_kept", 0) or 0
+    if froms_not_kept:
+        out.append(muted + _counts("(%d of the actions' INFO: From blocks not kept)", froms_not_kept) + reset)
+    raw = (" · Bazel's raw log: " + log_path) if log_path else ""
+    out.append(summary_counts(state) + raw)
+    out.append("All of it: aspect history show %s" % task_id)
+    return [linked(l) for l in out] if linked else out
+
+failures = namespace(
+    counted = counted,
+    FLAKY_NOTE = FLAKY_NOTE,
+    entry_text = entry_text,
+    excerpt_rows = excerpt_rows,
+    expand_tabs = _expand_tabs,
+    failure_counts = _failure_counts,
+    failure_detail = failure_detail,
+    failure_entries = failure_entries,
+    failure_summary = failure_summary,
+    GAP_ROW = _GAP_ROW,
+    NO_REASON = _NO_REASON,
+    testonly_quoted_rows = quoted_rows,
+    MAX_FLAKY_LISTED = _MAX_FLAKY_LISTED,
+    tab_extras = _tab_extras,
+    target_counts = target_counts,
+    testonly_test_group = test_group,
+)

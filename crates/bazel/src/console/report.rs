@@ -1,6 +1,8 @@
 //! What the console says once it ends: the stages that only report
 //! ([`RecapErrors`]) and the [`Summary`] of what the others hid, with the
-//! raw log and the files of each collapsed kind.
+//! raw log and the files of each collapsed kind; and what the task's own
+//! failure summary reads instead of a recap, the errors an
+//! [`ErrorCollector`] collects from Bazel's records as it wrote them.
 //!
 //! Each writes its lines from [`LineProcessor::report`], after every stage has
 //! flushed what it held, so the report follows bazel's last line. A report
@@ -10,7 +12,11 @@
 //! detail lines under it `muted`, the recap under a `── Error recap (N) ──`
 //! rule in `label.error`; the recap's quoted errors stay as Bazel wrote them
 //! but for each header's `ERROR` label, coloured as the live line's is, with
-//! what they name linked on a terminal ([`super::links`]).
+//! what they name linked on a terminal ([`super::links`]). Where the task
+//! prints a failure summary instead (`recap_errors(summary = True)`,
+//! [`super::Stage::RecapInSummary`]), there is no recap and the summary
+//! leaves the raw log for that summary to name
+//! ([`Summary::log_named_elsewhere`]).
 
 use std::collections::{HashSet, VecDeque};
 use std::io::Write;
@@ -298,9 +304,9 @@ impl Style {
     fn line(&self, out: &mut Vec<u8>, text: &str) {
         match text.strip_prefix("INFO:") {
             Some(rest) if !self.info.is_empty() => {
-                out.extend_from_slice(self.info.as_bytes());
-                out.extend_from_slice(b"INFO\x1b[0m:");
-                out.extend_from_slice(rest.as_bytes());
+                out.extend_from_slice(
+                    aspect_theme::label_line(&self.info, "INFO", rest).as_bytes(),
+                );
             }
             _ => {
                 out.extend_from_slice(self.open.as_bytes());
@@ -332,11 +338,20 @@ pub fn quote(text: &str) -> String {
     }
 }
 
-/// Bazel's own closing lines, which a recap would only repeat.
-static BOILERPLATE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
-    Regex::new(r"^ERROR: (?:Build did NOT complete successfully|Build failed\. Not running tests)")
-        .unwrap()
-});
+/// Bazel's own closing `ERROR:` lines, which say only that the build failed
+/// (a recap would only repeat them), by how their text after `ERROR: `
+/// starts.
+const BOILERPLATE: &[&str] = &[
+    "Build did NOT complete successfully",
+    "Build failed. Not running tests",
+    "command succeeded, but ",
+];
+
+/// Whether `message`, an `ERROR:` line's text after `ERROR: `, is one of
+/// Bazel's closing lines (`BOILERPLATE`).
+pub fn is_boilerplate(message: &str) -> bool {
+    BOILERPLATE.iter().any(|b| message.starts_with(b))
+}
 
 /// [`RecapErrors`]' `after` by default: lines after the first error for a
 /// recap to be worth printing, below which the error is likely still on
@@ -351,14 +366,325 @@ pub const RECAP_MAX: usize = 10;
 /// half after them.
 const RECAP_BODY_HELD: usize = 400;
 
-/// A failed action's error header up to its exit code: what follows (the
-/// tool that failed, its whole command line) the recap leaves out.
-static EXIT_TAIL: std::sync::LazyLock<Regex> =
-    std::sync::LazyLock::new(|| Regex::new(r"^(.*? failed: \(Exit [^)]*\)): .+$").unwrap());
+/// A failed action's error header up to its exit code, or the signal that
+/// ended it as Bazel's `TerminationStatus` names it (`(Killed)`,
+/// `(Trace/breakpoint trap)`, `(User defined signal 1)`, `(Signal 24)`):
+/// what follows (the tool that failed, its whole command line) the recap
+/// leaves out.
+static EXIT_TAIL: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
+    Regex::new(r"^(.*? failed: \((?:Exit [^)]*|[A-Z][^()]*)\)): .+$").unwrap()
+});
 
 /// Bazel's hint under every sandboxed failure, which a recapped body leaves
 /// out for a line of the tool's own.
 const SANDBOX_HINT: &str = "Use --sandbox_debug to see verbose messages from the sandbox";
+
+/// Bazel's default `--experimental_ui_max_stdouterr_bytes`: the most of an
+/// action's stdout or stderr Bazel relays to its console, past which it
+/// writes a line saying it skipped that file instead.
+pub const BAZEL_UI_MAX_STDOUTERR_BYTES: u64 = 1024 * 1024;
+
+/// The flag that sets what Bazel relays of an action's output
+/// ([`BAZEL_UI_MAX_STDOUTERR_BYTES`]).
+pub const UI_MAX_STDOUTERR_FLAG: &str = "--experimental_ui_max_stdouterr_bytes";
+
+/// The most of an action's stdout or stderr Bazel relays to the console of
+/// a `command` given `flags`: the last value they give
+/// [`UI_MAX_STDOUTERR_FLAG`] ([`crate::rc::last_flag_value`]), else Bazel's
+/// default; None for no limit (`-1`). A value that is no number is
+/// Bazel's to refuse, and leaves the default.
+pub fn relay_cap(flags: &[String], command: &str) -> Option<u64> {
+    let given = crate::rc::last_flag_value(flags, UI_MAX_STDOUTERR_FLAG, command)
+        .and_then(|v| v.trim().parse::<i64>().ok());
+    match given {
+        Some(n) if n < 0 => None,
+        Some(n) => Some(n as u64),
+        None => Some(BAZEL_UI_MAX_STDOUTERR_BYTES),
+    }
+}
+
+/// What a [`ErrorCollector`] block keeps beyond what Bazel relays of an
+/// action's output: room for its message.
+const BLOCK_ROOM: usize = 64 * 1024;
+
+/// The most a [`ErrorCollector`] block keeps: what Bazel relays of an
+/// action's output ([`relay_cap`], all of it with no limit) and room for
+/// its message.
+fn block_cap(relay: Option<u64>) -> usize {
+    relay.map_or(MAX_BLOCKS_BYTES, |n| {
+        (n as usize)
+            .saturating_add(BLOCK_ROOM)
+            .min(MAX_BLOCKS_BYTES)
+    })
+}
+
+/// The most a [`ErrorCollector`] block keeps by default
+/// ([`BAZEL_UI_MAX_STDOUTERR_BYTES`] relayed).
+const MAX_BLOCK_BYTES: usize = BAZEL_UI_MAX_STDOUTERR_BYTES as usize + BLOCK_ROOM;
+
+/// The most every [`ErrorCollector`] block together keeps.
+const MAX_BLOCKS_BYTES: usize = 64 * 1024 * 1024;
+
+/// The longest last line of an action's `INFO: From` output a
+/// [`ErrorCollector`] keeps; a longer one is kept as none, so no tie can use it.
+pub const MAX_HELD_LINE_BYTES: usize = 64 * 1024;
+
+/// The most every [`ErrorCollector`] `INFO: From` block together keeps (its
+/// header and last line), apart from Bazel's own blocks' budget; past it a
+/// block is counted ([`CollectedErrors::froms_not_kept`]), not kept.
+///
+/// [`CollectedErrors::froms_not_kept`]: super::processors::CollectedErrors::froms_not_kept
+pub const MAX_FROM_BYTES: usize = 16 * 1024 * 1024;
+
+/// Collects, for the task's failure summary and the Dashboard, what ties
+/// Bazel's console to its build events, each record as Bazel wrote it with
+/// its line ending ([`Block`]), so the summary's exact ties hold however
+/// long the console is:
+///
+/// - each of Bazel's own `ERROR:` messages: a header, one in Bazel's
+///   colours right after its redraw, or, before Bazel has coloured
+///   anything, any (`--color=no`);
+/// - each record that may be an output's held last line
+///   ([`BlockKind::Tail`]): the first Bazel wrote after its redraw once a
+///   block ended, or the classifier's;
+/// - with each, the records that follow it before Bazel's next message or
+///   redraw (a body as [`RecapErrors`] reads one: other and blank lines no
+///   progress area drew); a tail whose last record ended in a bare `\r`
+///   goes on with the next record when no redraw came between, as Bazel
+///   ends a held line only with the newline it adds;
+/// - of each action's `INFO: From …:` output, the header, the body's
+///   length and its last line (up to [`MAX_HELD_LINE_BYTES`]), never the
+///   body, so a chatty build costs no more than its errors, within
+///   [`MAX_FROM_BYTES`].
+///
+/// One of Bazel's blocks keeps at most what Bazel relays of an action's
+/// output ([`ErrorCollector::relaying`], [`BAZEL_UI_MAX_STDOUTERR_BYTES`] by
+/// default) and room for its message, and all of them `MAX_BLOCKS_BYTES`;
+/// what the caps leave out is counted ([`CollectedErrors::not_kept`],
+/// [`CollectedErrors::froms_not_kept`]). It also notes whether Bazel
+/// coloured its console. It writes nothing, and reads each record as
+/// Bazel wrote it ([`LineProcessor::reads_raw`]), before any stage rewrites
+/// it or curses is rendered into lines, so it never sees the CLI's own
+/// notes between Bazel's lines.
+///
+/// [`Block`]: super::processors::Block
+/// [`BlockKind::Tail`]: super::processors::BlockKind::Tail
+/// [`CollectedErrors::not_kept`]: super::processors::CollectedErrors::not_kept
+/// [`CollectedErrors::froms_not_kept`]: super::processors::CollectedErrors::froms_not_kept
+pub struct ErrorCollector {
+    given: Given,
+    pty: bool,
+    current: Option<Open>,
+    kept: super::processors::CollectedErrors,
+    bytes: usize,
+    from_bytes: usize,
+    /// The most one block and all of them keep: [`block_cap`] and
+    /// [`MAX_BLOCKS_BYTES`], but in a test.
+    caps: (usize, usize),
+    /// What Bazel relays of an action's output ([`relay_cap`]).
+    relay_cap: Option<u64>,
+    /// [`MAX_FROM_BYTES`], but in a test.
+    from_cap: usize,
+    /// Whether Bazel has coloured a line yet.
+    coloured: bool,
+    /// Whether a block ended and nothing but Bazel's progress area has come
+    /// since: the next fresh record may be an output's held last line.
+    after_block: bool,
+    observations: std::sync::Arc<super::processors::Observations>,
+}
+
+/// The block a [`ErrorCollector`] has open: its text (for an `INFO: From`,
+/// its header alone), and of its body how many bytes and the last line.
+struct Open {
+    kind: super::processors::BlockKind,
+    text: Vec<u8>,
+    body_len: usize,
+    last: Vec<u8>,
+    /// Whether the last record ended in a bare `\r`.
+    returns: bool,
+}
+
+impl ErrorCollector {
+    /// Through a PTY (`pty`) a `\r\n` is the PTY's own line ending, kept as
+    /// `\n`; in a pipe it is what Bazel wrote.
+    pub fn new(pty: bool, observations: std::sync::Arc<super::processors::Observations>) -> Self {
+        Self {
+            given: Given::default(),
+            pty,
+            current: None,
+            kept: Default::default(),
+            bytes: 0,
+            from_bytes: 0,
+            caps: (MAX_BLOCK_BYTES, MAX_BLOCKS_BYTES),
+            relay_cap: Some(BAZEL_UI_MAX_STDOUTERR_BYTES),
+            from_cap: MAX_FROM_BYTES,
+            coloured: false,
+            after_block: false,
+            observations,
+        }
+    }
+
+    /// This collector for a console where Bazel relays `cap` bytes of an
+    /// action's stdout or stderr (None: all of it), each block keeping as
+    /// much and room for its message.
+    pub fn relaying(mut self, cap: Option<u64>) -> Self {
+        self.relay_cap = cap;
+        self.caps.0 = block_cap(cap);
+        self
+    }
+
+    /// This collector with its caps at `block` and `all` bytes.
+    #[cfg(test)]
+    fn with_caps(mut self, block: usize, all: usize) -> Self {
+        self.caps = (block, all);
+        self
+    }
+
+    /// This collector with its `INFO: From` budget at `bytes`.
+    #[cfg(test)]
+    fn with_from_cap(mut self, bytes: usize) -> Self {
+        self.from_cap = bytes;
+        self
+    }
+
+    /// End the open block, keeping Bazel's own within the caps (an `INFO:
+    /// From` costs its header and last line alone).
+    fn close(&mut self) {
+        use super::processors::BlockKind;
+        if let Some(mut open) = self.current.take() {
+            if open.kind == BlockKind::From {
+                if open.last.len() > MAX_HELD_LINE_BYTES {
+                    open.last.clear();
+                }
+                let cost = open.text.len() + open.last.len();
+                if self.from_bytes + cost > self.from_cap {
+                    self.kept.froms_not_kept += 1;
+                    return;
+                }
+                self.from_bytes += cost;
+            } else {
+                if self.bytes + open.text.len() > self.caps.1 {
+                    self.kept.not_kept += open.text.len() as u64;
+                    return;
+                }
+                self.bytes += open.text.len();
+            }
+            self.kept.blocks.push(super::processors::Block {
+                kind: open.kind,
+                text: String::from_utf8_lossy(&open.text).into_owned(),
+                body_len: open.body_len as u64,
+                last_line: String::from_utf8_lossy(&open.last).into_owned(),
+            });
+        }
+    }
+}
+
+impl LineProcessor for ErrorCollector {
+    fn see(&mut self, line: &Line) {
+        self.given.see(line);
+    }
+
+    fn process(&mut self, record: &[u8]) -> Option<Vec<u8>> {
+        use super::processors::BlockKind;
+        let line = self.given.take(record);
+        let text = line.text.trim_end();
+        let ending: &[u8] = if line.returns {
+            b"\r"
+        } else if line.crlf && !self.pty {
+            b"\r\n"
+        } else {
+            b"\n"
+        };
+        // Bazel's own message: a header, one in its colours right after its
+        // redraw (which no tool's output follows, though the classifier may
+        // still hold an output open), or, before Bazel has coloured
+        // anything, any (`--color=no`).
+        let bazels = line.kind == Kind::Header || (line.fresh && line.coloured) || !self.coloured;
+        // Coloured by Bazel, not a plain `INFO:` the classifier calls one.
+        self.coloured |= line.coloured && record.contains(&0x1b);
+        // A tool's held line with a bare `\r` in it, which Bazel writes after
+        // its redraw: one record per `\r`, the line's until Bazel's newline.
+        if let Some(open) = self.current.as_mut() {
+            if open.kind == BlockKind::Tail && open.returns && !line.fresh && !line.drawn {
+                open.text.extend_from_slice(record);
+                open.text.extend_from_slice(ending);
+                open.returns = line.returns;
+                return None;
+            }
+        }
+        // The first record after a block, past Bazel's progress area, that
+        // Bazel wrote after its redraw or the classifier calls an output's
+        // held last line: that line, which Bazel writes after its next
+        // redraw, or Bazel's own next message; the summary tells which.
+        let held = (line.tail || (self.after_block && line.fresh))
+            && matches!(line.kind, Kind::Other | Kind::Header)
+            && !line.drawn;
+        let kind = if bazels && text.starts_with("INFO: From ") {
+            Some(BlockKind::From)
+        } else if held {
+            Some(BlockKind::Tail)
+        } else if bazels && text.starts_with("ERROR: ") {
+            Some(BlockKind::Error)
+        } else {
+            None
+        };
+        if !line.drawn && line.kind != Kind::Blank {
+            self.after_block = false;
+        }
+        if let Some(kind) = kind {
+            self.close();
+            self.current = Some(Open {
+                kind,
+                text: [record, ending].concat(),
+                body_len: 0,
+                last: vec![],
+                returns: line.returns,
+            });
+        } else if let Some(open) = self.current.as_mut() {
+            let body = matches!(line.kind, Kind::Other | Kind::Blank) && !line.drawn && !line.fresh;
+            if !body {
+                self.close();
+                self.after_block = true;
+            } else if open.kind == BlockKind::From {
+                open.body_len += record.len() + ending.len();
+                open.last.clear();
+                if record.len() + ending.len() <= MAX_HELD_LINE_BYTES + 1 {
+                    open.last.extend_from_slice(record);
+                    open.last.extend_from_slice(ending);
+                }
+            } else if open.text.len() + record.len() + ending.len() > self.caps.0 {
+                self.kept.not_kept += (record.len() + ending.len()) as u64;
+            } else {
+                open.text.extend_from_slice(record);
+                open.text.extend_from_slice(ending);
+                open.returns = line.returns;
+            }
+        }
+        None
+    }
+
+    fn finish(&mut self) -> Option<Vec<u8>> {
+        self.close();
+        self.kept.color = self.coloured;
+        self.kept.relay_cap = self.relay_cap;
+        self.observations
+            .set_collected_errors(std::mem::take(&mut self.kept));
+        None
+    }
+
+    fn reads_raw(&self) -> bool {
+        true
+    }
+
+    fn crlf_after_cr(&mut self) {
+        if let Some(open) = self.current.as_mut().filter(|o| o.returns) {
+            open.text.pop();
+            open.text
+                .extend_from_slice(if self.pty { b"\n" } else { b"\r\n" });
+            open.returns = false;
+        }
+    }
+}
 
 /// Repeats the first `max` distinct `ERROR:` messages of bazel's, at the end,
 /// once `after` lines followed the first (blank lines and the rows curses
@@ -380,6 +706,10 @@ pub struct RecapErrors {
     errors: Vec<Recapped>,
     /// The error whose body the lines now coming are, while they are.
     body: Option<usize>,
+    /// The error whose body bazel's progress area broke off: its output's
+    /// held last line ([`Line::tail`]), an `ERROR:` in bazel's colours that
+    /// is not bazel's own, is still its.
+    held: Option<usize>,
     distinct: HashSet<String>,
     after_first: usize,
     /// Links what the repeated lines name, for a terminal, with what
@@ -434,6 +764,9 @@ impl Recapped {
     fn excerpt(&self) -> Vec<Part<'_>> {
         let held: Vec<&(String, LineLinks)> = self.first.iter().chain(&self.last).collect();
         let texts: Vec<&str> = held.iter().map(|(t, _)| t.as_str()).collect();
+        if let Some(parts) = self.traceback(&held) {
+            return parts;
+        }
         // Where the lines not held were, between `first` and `last`.
         let join = self.first.len();
         let unheld = |from: usize, to: usize| {
@@ -471,6 +804,33 @@ impl Recapped {
     }
 }
 
+impl Recapped {
+    /// A Starlark `Traceback`'s excerpt ([`excerpt::traceback`], of the
+    /// header and the body): what it keeps of the body, what is between a
+    /// gap; None for another body, or one the recap did not hold whole.
+    fn traceback<'a>(&self, held: &[&'a (String, LineLinks)]) -> Option<Vec<Part<'a>>> {
+        if self.dropped > 0 {
+            return None;
+        }
+        let lines: Vec<&str> = std::iter::once(self.header.0.as_str())
+            .chain(held.iter().map(|(t, _)| t.as_str()))
+            .collect();
+        let mut parts = vec![];
+        let mut at = 1;
+        for k in excerpt::traceback(&lines)?.into_iter().filter(|&k| k > 0) {
+            if k > at {
+                parts.push(Part::Gap(k - at));
+            }
+            parts.push(Part::Line(held[k - 1]));
+            at = k + 1;
+        }
+        if at < lines.len() {
+            parts.push(Part::Gap(lines.len() - at));
+        }
+        Some(parts)
+    }
+}
+
 impl RecapErrors {
     pub fn new(max: usize, after: usize, style: Style) -> Self {
         Self {
@@ -480,6 +840,7 @@ impl RecapErrors {
             given: Given::default(),
             errors: vec![],
             body: None,
+            held: None,
             distinct: HashSet::new(),
             after_first: 0,
             linker: None,
@@ -534,7 +895,11 @@ impl LineProcessor for RecapErrors {
         // an error right after a failed action's output is not one until
         // bazel's next progress line, so a recap may miss it, never invent one.
         let body = self.body.take();
-        if line.kind == Kind::Header && text.starts_with("ERROR: ") && !BOILERPLATE.is_match(text) {
+        let held = self.held.take();
+        if line.kind == Kind::Header
+            && let Some(said) = text.strip_prefix("ERROR: ")
+            && !is_boilerplate(said)
+        {
             let short = EXIT_TAIL
                 .captures(text)
                 .map_or(text, |c| c.get(1).unwrap().as_str());
@@ -549,13 +914,31 @@ impl LineProcessor for RecapErrors {
             && !line.drawn
             && !line.fresh
         {
-            if line.kind == Kind::Other && !text.starts_with(SANDBOX_HINT) {
+            // The CLI's own note between Bazel's lines (where the history
+            // kept a log) and curses' bare status row are no part of it.
+            if line.kind == Kind::Other
+                && !line.note
+                && !text.starts_with(SANDBOX_HINT)
+                && !line::is_bare_status(text)
+            {
                 let quoted = quote(text);
                 let links = self.links(record, &quoted);
                 self.errors[i].body_line(quoted, links);
             }
             self.body = Some(i);
             self.after_first += usize::from(line.kind == Kind::Other);
+        } else if let Some(i) = held.or(body)
+            && line.tail
+            && line.kind == Kind::Other
+            && text.starts_with("ERROR: ")
+        {
+            // An `ERROR:` the classifier did not take for bazel's own is
+            // the output's held last line; any other tail may be bazel's
+            // next message.
+            let quoted = quote(text);
+            let links = self.links(record, &quoted);
+            self.errors[i].body_line(quoted, links);
+            self.after_first += 1;
         } else if !self.distinct.is_empty()
             && matches!(line.kind, Kind::Header | Kind::Other)
             && !line.drawn
@@ -564,6 +947,9 @@ impl LineProcessor for RecapErrors {
             // off screen, and are gone from plain lines, which must count
             // the same.
             self.after_first += 1;
+        }
+        if line.drawn || line.kind == Kind::Blank {
+            self.held = held.or(body);
         }
         Some(record.to_vec())
     }
@@ -583,8 +969,25 @@ impl LineProcessor for RecapErrors {
             format!("Error recap ({n})")
         };
         self.style.rule(&mut out, &header);
+        for e in self.rendered() {
+            for (i, l) in e.into_iter().enumerate() {
+                out.extend_from_slice(if i == 0 { b"  " } else { b"    " });
+                out.extend(l);
+                out.push(b'\n');
+            }
+        }
+        Some(out)
+    }
+}
+
+impl RecapErrors {
+    /// Each error's lines as the recap repeats them, without their indent:
+    /// the header styled as an error, then what it picked of the body and
+    /// each count of the rest.
+    fn rendered(&mut self) -> Vec<Vec<Vec<u8>>> {
         let style = self.style.clone();
-        let mut line = |text: &str, links: &[Known]| match self.linker.as_mut() {
+        let mut linker = self.linker.take();
+        let mut line = |text: &str, links: &[Known]| match linker.as_mut() {
             Some(l) if l.files.text => {
                 let linked = l.link_with(text.as_bytes(), links);
                 l.files.write_urls(&linked)
@@ -592,27 +995,22 @@ impl LineProcessor for RecapErrors {
             Some(l) => l.link_with(text.as_bytes(), links),
             None => text.as_bytes().to_vec(),
         };
+        let mut out = vec![];
         for e in &self.errors {
-            out.extend(
-                b"  "
-                    .iter()
-                    .copied()
-                    .chain(style.error_label(line(&e.header.0, &e.header.1)))
-                    .chain(*b"\n"),
-            );
+            let mut lines = vec![style.error_label(line(&e.header.0, &e.header.1))];
             for part in e.excerpt() {
                 match part {
-                    Part::Line((b, links)) => {
-                        out.extend(b"    ".iter().copied().chain(line(b, links)).chain(*b"\n"));
-                    }
+                    Part::Line((b, links)) => lines.push(line(b, links)),
                     Part::Gap(n) => {
                         let s = if n == 1 { "" } else { "s" };
-                        out.extend_from_slice(format!("    … {n} more line{s}\n").as_bytes());
+                        lines.push(format!("… {n} more line{s}").into_bytes());
                     }
                 }
             }
+            out.push(lines);
         }
-        Some(out)
+        self.linker = linker;
+        out
     }
 }
 
@@ -646,6 +1044,9 @@ pub struct Summary {
     log: RawLogState,
     style: Style,
     links: Option<FileLinks>,
+    /// Whether the task's failure summary names the raw log
+    /// ([`Summary::log_named_elsewhere`]).
+    elsewhere: bool,
 }
 
 impl Summary {
@@ -660,7 +1061,17 @@ impl Summary {
             log,
             style,
             links,
+            elsewhere: false,
         }
+    }
+
+    /// This summary leaving a raw log kept whole to the task's failure
+    /// summary, which names it on its counts line (`… · Bazel's raw log:
+    /// <path>`); one it could not keep, or kept cut short, it still says so
+    /// of.
+    pub fn log_named_elsewhere(mut self, elsewhere: bool) -> Self {
+        self.elsewhere = elsewhere;
+        self
     }
 
     /// `path`, linked when files are; `restore` is the style of the text
@@ -688,10 +1099,8 @@ impl LineProcessor for Summary {
                     Cut::Failed => INCOMPLETE,
                 };
                 // On the `INFO:` line, whose text is unstyled.
-                Some(format!(
-                    "Bazel's raw log{cut} is in {}",
-                    self.path(path, "")
-                ))
+                (!self.elsewhere || !cut.is_empty())
+                    .then(|| format!("Bazel's raw log{cut} is in {}", self.path(path, "")))
             }
             RawLogState::Failed => Some("Bazel's raw log could not be saved".to_string()),
             RawLogState::Off => None,
@@ -743,6 +1152,7 @@ impl LineProcessor for Summary {
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
 
     use std::sync::Arc;
@@ -827,6 +1237,694 @@ mod tests {
         String::from_utf8(p.report().unwrap_or_default()).unwrap()
     }
 
+    /// What [`ErrorCollector`] keeps of `input`, written as a PTY gives it
+    /// (`\r\n` endings), with caps of `block` and `all` bytes.
+    fn collected(
+        input: &str,
+        block: usize,
+        all: usize,
+    ) -> Arc<super::super::processors::CollectedErrors> {
+        let observations = Arc::new(super::super::processors::Observations::default());
+        let collector = ErrorCollector::new(true, observations.clone()).with_caps(block, all);
+        collect(collector, input.replace('\n', "\r\n").into_bytes());
+        observations.collected_errors().expect("kept")
+    }
+
+    /// `bytes` through `collector`, as a console of them streams.
+    fn collect(collector: ErrorCollector, bytes: Vec<u8>) {
+        let chain: Vec<Box<dyn LineProcessor>> = vec![Box::new(collector)];
+        let mut forwarder = super::super::forward::Forwarder::spawn(
+            Box::new(std::io::Cursor::new(bytes)),
+            Box::new(std::io::sink()),
+            chain,
+        )
+        .unwrap();
+        forwarder.join().unwrap();
+    }
+
+    /// The kinds and texts of `kept`'s blocks.
+    fn kinds_and_texts(kept: &super::super::processors::CollectedErrors) -> Vec<(&str, &str)> {
+        kept.blocks
+            .iter()
+            .map(|b| (b.kind.as_str(), b.text.as_str()))
+            .collect()
+    }
+
+    /// With `--color=no` through a pipe, a plain `INFO:` first, which the
+    /// classifier may call coloured, leaves every later `ERROR:` Bazel's.
+    #[test]
+    fn a_plain_info_line_leaves_later_errors_bazels() {
+        let observations = Arc::new(super::super::processors::Observations::default());
+        let input = "INFO: Reading rc options for 'build'\nComputing main repo mapping: \nERROR: syntax/BUILD.bazel:2:1: syntax error at 'newline'\n";
+        collect(
+            ErrorCollector::new(false, observations.clone()),
+            input.as_bytes().to_vec(),
+        );
+        let kept = observations.collected_errors().expect("kept");
+        assert_eq!(
+            kinds_and_texts(&kept),
+            vec![(
+                "error",
+                "ERROR: syntax/BUILD.bazel:2:1: syntax error at 'newline'\n"
+            )]
+        );
+    }
+
+    /// `input` through a collector reading a pipe.
+    fn collected_from_a_pipe(input: &str) -> Arc<super::super::processors::CollectedErrors> {
+        let observations = Arc::new(super::super::processors::Observations::default());
+        collect(
+            ErrorCollector::new(false, observations.clone()),
+            input.as_bytes().to_vec(),
+        );
+        observations.collected_errors().expect("kept")
+    }
+
+    /// Through a pipe in Bazel's colours: an action's `INFO: From` output
+    /// and an `ERROR:`'s body end at Bazel's coloured progress line, a tool's
+    /// uncoloured `ERROR:` in that output is no block of its own, and the
+    /// console is coloured. Bazel's message after a progress line that ended
+    /// an output is a `tail`, as the output's held last line would be: the
+    /// bytes cannot tell them apart, and the summary does.
+    #[test]
+    fn the_collector_reads_a_coloured_pipe() {
+        let kept = collected_from_a_pipe(concat!(
+            "\x1b[32mINFO: \x1b[0mFrom Compiling a.cc:\n",
+            "a.cc:1: warning: x\n",
+            "ERROR: not bazel's\n",
+            "\x1b[32m[1 / 3]\x1b[0m Compiling b.cc\n",
+            "\x1b[31m\x1b[1mERROR: \x1b[0mb/BUILD:2:3: Compiling b.cc failed: (Exit 1)\n",
+            "b.cc:1: error: y\n",
+            "\x1b[32m[2 / 3]\x1b[0m Linking\n",
+            "\x1b[31m\x1b[1mERROR: \x1b[0mBuild did NOT complete successfully\n",
+        ));
+        assert!(kept.color);
+        assert_eq!(
+            kept.blocks
+                .iter()
+                .map(|b| (
+                    b.kind.as_str(),
+                    b.text.as_str(),
+                    b.body_len,
+                    b.last_line.as_str()
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    "from",
+                    "\x1b[32mINFO: \x1b[0mFrom Compiling a.cc:\n",
+                    38,
+                    "ERROR: not bazel's\n"
+                ),
+                (
+                    "tail",
+                    "\x1b[31m\x1b[1mERROR: \x1b[0mb/BUILD:2:3: Compiling b.cc failed: (Exit 1)\nb.cc:1: error: y\n",
+                    0,
+                    ""
+                ),
+                (
+                    "tail",
+                    "\x1b[31m\x1b[1mERROR: \x1b[0mBuild did NOT complete successfully\n",
+                    0,
+                    ""
+                ),
+            ]
+        );
+    }
+
+    /// With `--color=no`, every `ERROR:` and `INFO: From` is taken for
+    /// Bazel's own (nothing tells a tool's apart), and the console is not
+    /// coloured. An action's output ends at Bazel's progress line, which
+    /// only colour tells from a tool's inside an `ERROR:`'s body, so that
+    /// body runs on to Bazel's next message.
+    #[test]
+    fn the_collector_reads_a_console_without_colour() {
+        let kept = collected_from_a_pipe(concat!(
+            "INFO: Analyzed 2 targets.\n",
+            "INFO: From Compiling a.cc:\n",
+            "a.cc:1: warning: x\n",
+            "[1 / 3] Compiling b.cc\n",
+            "ERROR: b/BUILD:2:3: Compiling b.cc failed: (Exit 1)\n",
+            "b.cc:1: error: y\n",
+            "[2 / 3] Linking\n",
+            "ERROR: Build did NOT complete successfully\n",
+        ));
+        assert!(!kept.color);
+        assert_eq!(
+            kinds_and_texts(&kept),
+            vec![
+                ("from", "INFO: From Compiling a.cc:\n"),
+                (
+                    "error",
+                    "ERROR: b/BUILD:2:3: Compiling b.cc failed: (Exit 1)\nb.cc:1: error: y\n[2 / 3] Linking\n"
+                ),
+                ("error", "ERROR: Build did NOT complete successfully\n"),
+            ]
+        );
+    }
+
+    /// What Bazel relays of an action's output: the last value the flags
+    /// give, an rc entry's for the command too; Bazel's default without
+    /// one; no limit for `-1`.
+    #[test]
+    fn the_relay_cap_is_the_flags_last_word() {
+        let flags = |f: &[&str]| f.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(relay_cap(&[], "build"), Some(BAZEL_UI_MAX_STDOUTERR_BYTES));
+        assert_eq!(
+            relay_cap(
+                &flags(&[
+                    "--experimental_ui_max_stdouterr_bytes=10",
+                    "--experimental_ui_max_stdouterr_bytes=20"
+                ]),
+                "build"
+            ),
+            Some(20)
+        );
+        assert_eq!(
+            relay_cap(
+                &flags(&["--experimental_ui_max_stdouterr_bytes=-1"]),
+                "test"
+            ),
+            None
+        );
+        assert_eq!(
+            relay_cap(
+                &flags(&["--default_override=0:build=--experimental_ui_max_stdouterr_bytes=7"]),
+                "build"
+            ),
+            Some(7)
+        );
+        assert_eq!(
+            relay_cap(
+                &flags(&["--experimental_ui_max_stdouterr_bytes=x"]),
+                "build"
+            ),
+            Some(BAZEL_UI_MAX_STDOUTERR_BYTES)
+        );
+    }
+
+    /// A block keeps what Bazel relays and room for its message: a smaller
+    /// relay cap counts the rest as not kept, and the cap is reported.
+    #[test]
+    fn a_block_keeps_what_bazel_relays() {
+        let observations = Arc::new(super::super::processors::Observations::default());
+        let body = "x".repeat(100);
+        let input = format!(
+            "ERROR: a failed\n{}\n",
+            vec![body.as_str(); 2000].join("\n")
+        );
+        collect(
+            ErrorCollector::new(false, observations.clone()).relaying(Some(0)),
+            input.into_bytes(),
+        );
+        let kept = observations.collected_errors().expect("kept");
+        assert_eq!(kept.relay_cap, Some(0));
+        assert!(
+            kept.blocks[0].text.len() <= BLOCK_ROOM,
+            "{}",
+            kept.blocks[0].text.len()
+        );
+        assert!(kept.not_kept > 0);
+    }
+
+    /// A kept `ERROR:` header says where and what, whether Bazel coloured
+    /// it and whether it is a closing line; a coloured console says so
+    /// (`color`), a `--color=no` one does not.
+    #[test]
+    fn an_error_header_says_where_and_what() {
+        use super::super::processors::ErrorHeader;
+        let header = |location: &str, message: &str, coloured, boilerplate| ErrorHeader {
+            location: location.into(),
+            message: message.into(),
+            coloured,
+            boilerplate,
+            body: vec![],
+        };
+        let kept = collected(
+            "\x1b[32mINFO: \x1b[0mStarting\n\
+             \x1b[31m\x1b[1mERROR: \x1b[0m/ws/a/BUILD.bazel:3:8: Compiling a.cc failed: (Exit 1)\n\
+             \x1b[32m[1 / 9]\x1b[0m running\n\
+             \x1b[1A\x1b[K\x1b[31m\x1b[1mERROR: \x1b[0m/ws/b/BUILD: no such package\n\
+             \x1b[32m[1 / 9]\x1b[0m running\n\
+             \x1b[1A\x1b[K\x1b[31m\x1b[1mERROR: \x1b[0mBuild did NOT complete successfully\n",
+            MAX_BLOCK_BYTES,
+            MAX_BLOCKS_BYTES,
+        );
+        assert!(kept.color);
+        let headers: Vec<_> = kept
+            .blocks
+            .iter()
+            .filter_map(|b| b.error_header())
+            .collect();
+        assert_eq!(
+            headers,
+            vec![
+                header(
+                    "/ws/a/BUILD.bazel:3:8",
+                    "Compiling a.cc failed: (Exit 1)",
+                    true,
+                    false
+                ),
+                header("/ws/b/BUILD", "no such package", true, false),
+                header("", "Build did NOT complete successfully", true, true),
+            ]
+        );
+
+        let observations = Arc::new(super::super::processors::Observations::default());
+        collect(
+            ErrorCollector::new(false, observations.clone()),
+            b"(12:00:01) ERROR: in r rule //rf:x: refused\n".to_vec(),
+        );
+        let kept = observations.collected_errors().expect("kept");
+        assert!(!kept.color, "--color=no");
+        assert_eq!(
+            kept.blocks[0].error_header(),
+            Some(header("", "in r rule //rf:x: refused", false, false)),
+            "a timestamp left out, `in r rule //rf:x` no location"
+        );
+    }
+
+    /// An `ERROR:` header quotes the lines Bazel wrote with it, escapes left
+    /// out, up to a blank line or one of Bazel's own, a timestamped one too.
+    #[test]
+    fn an_error_header_quotes_the_lines_written_with_it() {
+        let body = |console: &str| {
+            let observations = Arc::new(super::super::processors::Observations::default());
+            collect(
+                ErrorCollector::new(false, observations.clone()),
+                console.as_bytes().to_vec(),
+            );
+            let kept = observations.collected_errors().expect("kept");
+            kept.blocks[0].error_header().expect("a header").body
+        };
+        assert_eq!(
+            body(
+                "ERROR: /ws/a/BUILD:3:1: Traceback (most recent call last):\n\tFile \"/ws/a/BUILD\", line 3\n    .-> //a:b\na \x1b[1mbold\x1b[0m word\n\x1b[1mcoloured\x1b[0m\n"
+            ),
+            vec![
+                "\tFile \"/ws/a/BUILD\", line 3",
+                "    .-> //a:b",
+                "a bold word"
+            ],
+            "a frame, an indented label and a word in colour; a line starting in colour ends it"
+        );
+        assert_eq!(
+            body(
+                "(12:00:01) ERROR: /ws/a/BUILD:3:1: bad\nits detail\n(12:00:01) INFO: Found 1 target...\nmore\n"
+            ),
+            vec!["its detail"],
+            "a timestamped line of Bazel's own ends it"
+        );
+        assert_eq!(body("ERROR: x failed\nwhy\n\nafter a blank\n"), vec!["why"]);
+        assert_eq!(
+            body("ERROR: x failed\nUse --sandbox_debug to see verbose messages\n"),
+            Vec::<String>::new()
+        );
+    }
+
+    /// Through a pipe, a `\r\n` is the tool's own and kept as written.
+    #[test]
+    fn a_pipe_keeps_a_tools_crlf() {
+        let observations = Arc::new(super::super::processors::Observations::default());
+        let input = "ERROR: a/BUILD:1:1: Executing genrule //a:a failed: (Exit 1): bash failed\ncrlf one\r\n";
+        collect(
+            ErrorCollector::new(false, observations.clone()),
+            input.as_bytes().to_vec(),
+        );
+        let kept = observations.collected_errors().expect("kept");
+        assert_eq!(kinds_and_texts(&kept), vec![("error", input)]);
+    }
+
+    /// A tool's held last line with a bare `\r` in it, which Bazel writes
+    /// after its redraw, is one tail up to the newline Bazel adds.
+    #[test]
+    fn a_held_line_with_a_bare_cr_is_one_tail() {
+        let input = "\x1b[32mINFO: \x1b[0mFrom Executing genrule //a:ok:\nout\n\x1b[32m[1 / 9]\x1b[0m running\n\r\x1b[1A\x1b[Kspin 1\r\x1b[31m\x1b[1mERROR: \x1b[0mheld after cr\n\x1b[32m[2 / 9]\x1b[0m running\n";
+        let kept = collected(input, MAX_BLOCK_BYTES, MAX_BLOCKS_BYTES);
+        assert_eq!(
+            kinds_and_texts(&kept),
+            vec![
+                (
+                    "from",
+                    "\x1b[32mINFO: \x1b[0mFrom Executing genrule //a:ok:\n"
+                ),
+                (
+                    "tail",
+                    "\x1b[1A\x1b[Kspin 1\r\x1b[31m\x1b[1mERROR: \x1b[0mheld after cr\n"
+                ),
+            ]
+        );
+    }
+
+    /// A held line whose `\r\n` a read splits is one line: what Bazel writes
+    /// next is not that line's.
+    #[test]
+    fn a_crlf_split_across_reads_ends_the_held_line() {
+        let observations = Arc::new(super::super::processors::Observations::default());
+        let chain: Vec<Box<dyn LineProcessor>> =
+            vec![Box::new(ErrorCollector::new(false, observations.clone()))];
+        let first = b"\x1b[32mINFO: \x1b[0mFrom Holding //a:cr:\n\x1b[32m[1 / 9]\x1b[0m running\n\r\x1b[1A\x1b[K\x1b[31m\x1b[1mERROR: \x1b[0mheld lone cr\r".to_vec();
+        let second = b"\n\x1b[32mINFO: \x1b[0mFrom Holding //a:next:\nout\n".to_vec();
+        let mut forwarder = super::super::forward::Forwarder::spawn(
+            Box::new(Chunks(vec![first, second])),
+            Box::new(std::io::sink()),
+            chain,
+        )
+        .unwrap();
+        forwarder.join().unwrap();
+        let kept = observations.collected_errors().expect("kept");
+        assert_eq!(
+            kinds_and_texts(&kept)[1..],
+            [
+                (
+                    "tail",
+                    "\x1b[1A\x1b[K\x1b[31m\x1b[1mERROR: \x1b[0mheld lone cr\r\n"
+                ),
+                ("from", "\x1b[32mINFO: \x1b[0mFrom Holding //a:next:\n"),
+            ]
+        );
+    }
+
+    /// A reader that returns each chunk in one read.
+    struct Chunks(Vec<Vec<u8>>);
+
+    impl std::io::Read for Chunks {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if self.0.is_empty() {
+                return Ok(0);
+            }
+            let chunk = self.0.remove(0);
+            buf[..chunk.len()].copy_from_slice(&chunk);
+            Ok(chunk.len())
+        }
+    }
+
+    /// An `INFO: From` output's last line past [`MAX_HELD_LINE_BYTES`] is
+    /// kept as none, so no tie can use it, and its length still counts.
+    #[test]
+    fn a_long_last_line_is_kept_as_none() {
+        let long = "x".repeat(MAX_HELD_LINE_BYTES + 10);
+        let input = format!(
+            "\x1b[32mINFO: \x1b[0mFrom Executing genrule //a:ok:\nshort\n{long}\n\x1b[32m[1 / 9]\x1b[0m running\n"
+        );
+        let kept = collected(&input, MAX_BLOCK_BYTES, MAX_BLOCKS_BYTES);
+        assert_eq!(kept.blocks.len(), 1);
+        assert_eq!(kept.blocks[0].last_line, "");
+        assert_eq!(
+            kept.blocks[0].body_len as usize,
+            "short\n".len() + long.len() + 1
+        );
+    }
+
+    /// Past their own budget `INFO: From` blocks are counted, not kept, and
+    /// take nothing of the room Bazel's own errors have.
+    #[test]
+    fn from_blocks_past_their_budget_are_counted() {
+        let mut input = String::new();
+        for i in 0..50 {
+            input.push_str(&format!("\r\x1b[1A\x1b[K\x1b[32mINFO: \x1b[0mFrom Executing genrule //a:n{i}:\nout\n\x1b[32m[{i} / 99]\x1b[0m running\n"));
+        }
+        input.push_str("\r\x1b[1A\x1b[K\x1b[31m\x1b[1mERROR: \x1b[0ma/BUILD:9:8: Executing genrule //a:late failed: (Exit 1): bash failed\n");
+        let observations = Arc::new(super::super::processors::Observations::default());
+        let collector = ErrorCollector::new(true, observations.clone()).with_from_cap(1000);
+        collect(collector, input.replace('\n', "\r\n").into_bytes());
+        let kept = observations.collected_errors().expect("kept");
+        let froms = kept
+            .blocks
+            .iter()
+            .filter(|b| b.kind.as_str() == "from")
+            .count();
+        assert!(froms > 0 && froms < 50, "{froms} kept");
+        assert_eq!(froms as u64 + kept.froms_not_kept, 50);
+        assert_eq!(kept.not_kept, 0);
+        assert!(kept.blocks.last().unwrap().text.contains("//a:late failed"));
+    }
+
+    /// Each of Bazel's own `ERROR:` messages with what followed it, before
+    /// its next message or redraw, and each action's `INFO: From` output,
+    /// kept as Bazel wrote them; a tool's own lines in them stay theirs.
+    /// However long the console, an error at its start is kept: nothing is
+    /// read back from its end. A coloured `ERROR:` right after an action's
+    /// output is kept as a tail, for the summary to tell by that output.
+    #[test]
+    fn bazels_errors_and_action_output_are_kept_as_written() {
+        let filler = "\x1b[32m[1 / 9]\x1b[0m 1 action running\n".repeat(100_000);
+        let input = format!(
+            "\x1b[31m\x1b[1mERROR: \x1b[0ma/BUILD:1:1: Executing genrule //a:a failed: (Exit 1): bash failed\n\nUse --sandbox_debug to see\ntool says\ncrlf\r\n\x1b[32m[1 / 9]\x1b[0m running\n{filler}\x1b[32mINFO: \x1b[0mFrom Executing genrule //a:ok:\nERROR: a tool's own\n\x1b[32m[2 / 9]\x1b[0m running\n\r\x1b[1A\x1b[K\x1b[31m\x1b[1mERROR: \x1b[0mlast\n"
+        );
+        let kept = collected(&input, MAX_BLOCK_BYTES, MAX_BLOCKS_BYTES);
+        assert_eq!(kept.not_kept, 0);
+        let blocks: Vec<(&str, &str)> = kept
+            .blocks
+            .iter()
+            .map(|b| (b.kind.as_str(), b.text.as_str()))
+            .collect();
+        assert_eq!(
+            blocks,
+            vec![
+                (
+                    "error",
+                    "\x1b[31m\x1b[1mERROR: \x1b[0ma/BUILD:1:1: Executing genrule //a:a failed: (Exit 1): bash failed\n\nUse --sandbox_debug to see\ntool says\ncrlf\r\n"
+                ),
+                (
+                    "from",
+                    "\x1b[32mINFO: \x1b[0mFrom Executing genrule //a:ok:\n"
+                ),
+                ("tail", "\x1b[1A\x1b[K\x1b[31m\x1b[1mERROR: \x1b[0mlast\n"),
+            ]
+        );
+    }
+
+    /// An action's `INFO: From` output keeps its header, its body's length
+    /// and last line, never the body: thousands of chatty actions cost what
+    /// their headers do, and never take the room Bazel's own errors have, so
+    /// an error after them keeps its location.
+    #[test]
+    fn action_output_is_never_kept_whole() {
+        let chatty = "chatty tool line padding padding padding padding padding\n".repeat(200);
+        let mut input = String::new();
+        for i in 0..2000 {
+            input.push_str(&format!("\r\x1b[1A\x1b[K\x1b[32mINFO: \x1b[0mFrom Executing genrule //big:n{i}:\n{chatty}\x1b[32m[{i} / 9000]\x1b[0m running\n"));
+        }
+        input.push_str("\r\x1b[1A\x1b[K\x1b[31m\x1b[1mERROR: \x1b[0mbig/BUILD.bazel:9:8: Executing genrule //big:late failed: (Exit 1): bash failed\nlate broke\n");
+        let kept = collected(&input, MAX_BLOCK_BYTES, 1024 * 1024);
+        let froms: Vec<_> = kept
+            .blocks
+            .iter()
+            .filter(|b| b.kind.as_str() == "from")
+            .collect();
+        assert_eq!(froms.len(), 2000);
+        let held: usize = kept
+            .blocks
+            .iter()
+            .map(|b| b.text.len() + b.last_line.len())
+            .sum();
+        assert!(
+            held < 2000 * 200,
+            "{held} bytes kept for 2000 outputs of {} each",
+            chatty.len()
+        );
+        assert_eq!(froms[0].body_len, chatty.len() as u64);
+        assert_eq!(
+            froms[0].last_line,
+            "chatty tool line padding padding padding padding padding\n"
+        );
+        assert_eq!(kept.not_kept, 0);
+        assert!(
+            kept.blocks
+                .last()
+                .unwrap()
+                .text
+                .contains("big/BUILD.bazel:9:8: Executing genrule //big:late failed")
+        );
+    }
+
+    /// A tool's last line with no newline, which Bazel writes after its next
+    /// redraw, uncoloured, is kept as a tail after the output's block, as is
+    /// any first line Bazel writes after its redraw once a block ended.
+    #[test]
+    fn a_held_last_line_is_kept_after_its_block() {
+        let input = "\x1b[31m\x1b[1mERROR: \x1b[0ma/BUILD:1:1: Executing genrule //a:a failed: (Exit 3): bash failed\nfirst line\n\x1b[32m[1 / 9]\x1b[0m running\n\r\x1b[1A\x1b[Kno newline\n\x1b[32m[2 / 9]\x1b[0m running\n";
+        let kept = collected(input, MAX_BLOCK_BYTES, MAX_BLOCKS_BYTES);
+        let blocks: Vec<(&str, &str)> = kept
+            .blocks
+            .iter()
+            .map(|b| (b.kind.as_str(), b.text.as_str()))
+            .collect();
+        assert_eq!(
+            blocks,
+            vec![
+                (
+                    "error",
+                    "\x1b[31m\x1b[1mERROR: \x1b[0ma/BUILD:1:1: Executing genrule //a:a failed: (Exit 3): bash failed\nfirst line\n"
+                ),
+                ("tail", "\x1b[1A\x1b[Kno newline\n"),
+            ]
+        );
+    }
+
+    /// Past a block's cap its further lines, and past the total cap whole
+    /// blocks, are counted, never kept in part.
+    #[test]
+    fn what_the_caps_leave_out_is_counted() {
+        let input = "\x1b[31m\x1b[1mERROR: \x1b[0mfirst\n0123456789\n\x1b[32m[1 / 9]\x1b[0m x\n\x1b[31m\x1b[1mERROR: \x1b[0msecond one\n\x1b[32m[1 / 9]\x1b[0m x\n";
+        let kept = collected(input, 30, 40);
+        let texts: Vec<&str> = kept.blocks.iter().map(|b| b.text.as_str()).collect();
+        let first = "\x1b[31m\x1b[1mERROR: \x1b[0mfirst\n";
+        assert_eq!(texts, vec![first]);
+        assert_eq!(
+            kept.not_kept,
+            11 + "\x1b[31m\x1b[1mERROR: \x1b[0msecond one\n".len() as u64
+        );
+    }
+
+    /// The recap `records` make at once (`after` 0), escapes left out.
+    fn recap_of(records: &[&str]) -> String {
+        let mut p = RecapErrors::new(10, 0, Style::default());
+        let out = feed(&mut p, records);
+        String::from_utf8_lossy(&ansi::strip(out.as_bytes())).into_owned()
+    }
+
+    /// What Bazel and the CLI write after an error is never part of its
+    /// body: the history's note of a kept log, in the CLI's own colours
+    /// (`INFO` then a reset, then the colon), and Bazel's status rows after
+    /// its progress lines (a target no toolchain matches, as Bazel 9.3.3
+    /// ends its error).
+    #[test]
+    fn notes_and_status_rows_stay_out_of_a_body() {
+        let toolchain = [
+            "\x1b[31m\x1b[1mERROR: \x1b[0mtc/BUILD.bazel:3:9: While resolving toolchains for target //tc:tc (2d89340): No matching toolchains found for types:",
+            "  //tc:toolchain_type",
+            "To debug, rerun with --toolchain_resolution_debug='//tc:toolchain_type'",
+            "For more information on platforms or toolchains see https://bazel.build/concepts/platforms-intro.",
+        ];
+        let note = "\x1b[1;90mINFO\x1b[0m: //:bad Genrule stderr: /h/bad.stderr";
+        let analyzed =
+            "\x1b[32mINFO: \x1b[0mAnalyzed 8 targets (2 packages loaded, 53 targets configured).";
+        let cases: [(&str, Vec<&str>); 2] = [
+            (
+                "in a pipe",
+                [&toolchain[..], &[note, "\x1b[32mAnalyzing:\x1b[0m 8 targets (2 packages loaded, 24 targets configured)", "\x1b[32m[4 / 4]\x1b[0m no actions running", analyzed]].concat(),
+            ),
+            ("the note right after", [&toolchain[..], &[note, "\x1b[32m[4 / 4]\x1b[0m no actions running", analyzed]].concat()),
+        ];
+        for (name, records) in cases {
+            // The note as the forwarder writes it, classified on its own and
+            // marked as the CLI's.
+            let mut p = RecapErrors::new(10, 0, Style::default());
+            let mut c = super::super::line::Classifier::default();
+            for r in &records {
+                let r = bazel(r);
+                let mut line = if r == bazel(note) {
+                    super::super::line::Classifier::default().classify(r.as_bytes())
+                } else {
+                    c.classify(r.as_bytes())
+                };
+                line.note = r == bazel(note);
+                p.see(&line);
+                p.process(r.as_bytes());
+            }
+            let out = String::from_utf8(p.report().unwrap_or_default()).unwrap();
+            let out = String::from_utf8_lossy(&ansi::strip(out.as_bytes())).into_owned();
+            assert!(
+                out.ends_with(
+                    "    //tc:toolchain_type\n    To debug, rerun with --toolchain_resolution_debug='//tc:toolchain_type'\n    For more information on platforms or toolchains see https://bazel.build/concepts/platforms-intro.\n"
+                ),
+                "{name}: {out}"
+            );
+            assert!(!out.contains("bad.stderr"), "{name}: {out}");
+        }
+    }
+
+    /// Bazel's closing lines restate the errors before them: none is
+    /// repeated (`command succeeded, but …`, every form Bazel 7 to 9 writes).
+    #[test]
+    fn bazels_closing_lines_are_not_recapped() {
+        assert_eq!(
+            recap_of(&[
+                "ERROR: command succeeded, but there were errors parsing the target pattern",
+                "ERROR: command succeeded, but there were loading phase errors",
+                "ERROR: command succeeded, but not all targets were analyzed",
+                "ERROR: Build did NOT complete successfully",
+            ]),
+            ""
+        );
+    }
+
+    /// A signal-killed action's header is cut after the signal, as after an
+    /// exit code (`//f:killed`, Bazel 7.7.3 and 9.3.3): no command line.
+    #[test]
+    fn a_killed_actions_header_is_cut_after_the_signal() {
+        for (line, want) in [
+            (
+                "ERROR: f/BUILD.bazel:3:8: Executing genrule //f:killed failed: (Killed): bash failed: error executing Genrule command (from genrule rule target //f:killed) /bin/bash -c 'kill -9 $$'",
+                "ERROR: f/BUILD.bazel:3:8: Executing genrule //f:killed failed: (Killed)",
+            ),
+            (
+                "ERROR: f/BUILD.bazel:4:8: Executing genrule //f:segv failed: (Segmentation fault): bash failed: error executing Genrule command (from target //f:segv) /bin/bash -c 'kill -11 $$'",
+                "ERROR: f/BUILD.bazel:4:8: Executing genrule //f:segv failed: (Segmentation fault)",
+            ),
+            (
+                "ERROR: sig/BUILD.bazel:1:8: Executing genrule //sig:s5 failed: (Trace/breakpoint trap): bash failed: error executing Genrule command (from genrule rule target //sig:s5) /bin/bash -c 'kill -5 $$'",
+                "ERROR: sig/BUILD.bazel:1:8: Executing genrule //sig:s5 failed: (Trace/breakpoint trap)",
+            ),
+            (
+                "ERROR: sig/BUILD.bazel:1:8: Executing genrule //sig:s10 failed: (User defined signal 1): bash failed: error executing Genrule command (from target //sig:s10) /bin/bash -c 'kill -10 $$'",
+                "ERROR: sig/BUILD.bazel:1:8: Executing genrule //sig:s10 failed: (User defined signal 1)",
+            ),
+            (
+                "ERROR: sig/BUILD.bazel:1:8: Executing genrule //sig:s24 failed: (Signal 24): bash failed: error executing Genrule command (from target //sig:s24) /bin/bash -c 'kill -24 $$'",
+                "ERROR: sig/BUILD.bazel:1:8: Executing genrule //sig:s24 failed: (Signal 24)",
+            ),
+        ] {
+            let out = recap_of(&[line, "about to die", "\x1b[32m[1 / 9]\x1b[0m running"]);
+            assert!(
+                out.contains(&format!("  {want}\n    about to die\n")),
+                "{out}"
+            );
+        }
+    }
+
+    /// Themed, the rule and each quoted `ERROR` label are red.
+    #[test]
+    fn a_themed_recap_reads_as_errors() {
+        let mut p = RecapErrors::new(5, RECAP_AFTER_RECORDS, Style::themed(&dark()));
+        let mut records = vec![
+            "ERROR: /ws/a/BUILD:1:8: Executing genrule //a:gen failed: (Exit 1)",
+            "\x1b[32m[1 / 9]\x1b[0m running",
+        ];
+        records.extend(std::iter::repeat_n("noise", RECAP_AFTER_RECORDS));
+        assert_eq!(
+            feed(&mut p, &records),
+            "\x1b[1;38;5;203m── Error recap (1) ──\x1b[0m\n  \
+             \x1b[1;38;5;203mERROR\x1b[0m: /ws/a/BUILD:1:8: Executing genrule //a:gen failed: (Exit 1)\n"
+        );
+    }
+
+    /// A nested macro's `fail()` (ws/nm, Bazel 9.3.3): the excerpt keeps the
+    /// BUILD frame and its code line, then the `Error in` line, the frames
+    /// between a gap.
+    #[test]
+    fn a_tracebacks_excerpt_is_its_build_frame_and_its_error() {
+        let out = recap_of(&[
+            "ERROR: Traceback (most recent call last):",
+            "\tFile \"nm/BUILD.bazel\", line 2, column 6, in <toplevel>",
+            "\t\touter(name = \"m\")",
+            "\tFile \"nm/defs.bzl\", line 4, column 10, in outer",
+            "\t\tinner(name = name + \"_i\")",
+            "\tFile \"nm/defs.bzl\", line 2, column 9, in inner",
+            "\t\tfail(\"inner refuses \" + name)",
+            "Error in fail: inner refuses m_i",
+            "\x1b[32m[1 / 9]\x1b[0m running",
+        ]);
+        assert!(
+            out.ends_with(
+                "    \tFile \"nm/BUILD.bazel\", line 2, column 6, in <toplevel>\n    \t\touter(name = \"m\")\n    … 4 more lines\n    Error in fail: inner refuses m_i\n"
+            ),
+            "{out}"
+        );
+    }
+
     #[test]
     fn recap_repeats_errors_that_scrolled_away() {
         let mut p = RecapErrors::new(2, RECAP_AFTER_RECORDS, Style::default());
@@ -854,6 +1952,22 @@ mod tests {
              ERROR: /ws/BUILD:1:1: Compiling a.cc failed\n  \
              ERROR: /ws/BUILD:2:1: Compiling b.cc failed\n"
         );
+    }
+
+    /// With the failure summary naming the raw log, the end of the console
+    /// leaves it out, but still says what it hid.
+    #[test]
+    fn the_summary_names_the_raw_log_elsewhere() {
+        let log = std::path::PathBuf::from("/h/console.log");
+        let cut = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(0));
+        let mut s = Summary::new(
+            std::sync::Arc::new(Stats::default()),
+            RawLogState::Kept(log, cut),
+            Style::default(),
+            None,
+        )
+        .log_named_elsewhere(true);
+        assert_eq!(s.report(), None, "nothing hidden, the log named elsewhere");
     }
 
     #[test]
@@ -956,9 +2070,8 @@ mod tests {
             feed(&mut p, &records),
             "── Error recap (1) ──\n  \
              ERROR: Traceback (most recent call last):\n    \
-             … 1 more line\n    \tFile \"/ws/b.bzl\", line 2\n    \
-             \tFile \"/ws/c.bzl\", line 3\n    \tFile \"/ws/d.bzl\", line 4\n    \
-             \tFile \"/ws/e.bzl\", line 5\n    Error in fail: the real reason\n"
+             … 4 more lines\n    \tFile \"/ws/e.bzl\", line 5\n    \
+             Error in fail: the real reason\n"
         );
     }
 

@@ -1,0 +1,11 @@
+exit 1
+── Other errors from Bazel ──
+ERROR: Traceback (most recent call last):
+  │         File "nm/BUILD.bazel", line 2, column 6, in <toplevel>
+  │                 outer(name = "m")
+  │ …
+  │ Error in fail: inner refuses m_i
+0 built, 0 failed · 0 tests passed, 0 failed · Bazel's raw log: ${FIXTURE}/9.3.3.console
+All of it: aspect history show t-replay
+--- Failures tab
+! Traceback (most recent call last):

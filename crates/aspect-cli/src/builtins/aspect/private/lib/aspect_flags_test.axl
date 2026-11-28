@@ -28,6 +28,7 @@ load(
     "omit_flags",
     "protected_omissions",
     "publish_all_actions",
+    "publish_all_actions_unless_sent_out",
     "runner_bes_flags",
     "runner_cache_flags",
     "runner_diagnostics_flags",
@@ -262,6 +263,54 @@ def _test_publish_all_actions_asks_the_runtime_once(_ctx):
     publish_all_actions(t)
     _eq("once", _texts(t.extra_flags), ["--build_event_publish_all_actions=%aspect_cli%"])
 
+def _test_publish_all_actions_unless_sent_out(_ctx):
+    t = _fake_trait()
+    published = {}
+    publish_all_actions_unless_sent_out(t, published)
+    _eq("decided per build", t.extra_flags, [])
+    hook = t.rc_flags[0]
+
+    def _asks(flags, command = "build"):
+        got = hook(_ctx, _ctx.bazel.new_rc(flags = flags), command)
+        _eq("said as asked: %s" % flags, published["all_actions"], got != [])
+        return got != []
+
+    _eq("nothing sends events out", _asks([]), True)
+
+    # r42/ws12 with --remote_cache=grpc://127.0.0.1:1: every action's event
+    # names a local file, the uploader cannot reach the cache, and Bazel's
+    # stream stops after `configuration` (16 events; 31 with failed ones only).
+    _eq("a remote cache", _asks(["--remote_cache=grpc://127.0.0.1:1"]), False)
+    _eq("a remote executor", _asks(["--remote_executor=grpc://e"]), False)
+    _eq("files kept local", _asks(["--remote_cache=grpc://c", "--experimental_build_event_upload_strategy=local"]), True)
+    _eq("a cache turned off", _asks(["--remote_cache="]), True)
+    _eq("test-scoped cache, on build", _asks([("--remote_cache=grpc://c", "", "test")]), True)
+    _eq("test-scoped cache, on test", _asks([("--remote_cache=grpc://c", "", "test")], "test"), False)
+
+    # A BES backend Bazel streams to itself would get every action's event.
+    _eq("Bazel's own BES", _asks(["--bes_backend=grpcs://bes"]), False)
+    _eq("even with files kept local", _asks(["--bes_backend=grpcs://bes", "--experimental_build_event_upload_strategy=local"]), False)
+
+    # The opt-out reaches it as any injected flag.
+    t.injected_flag_filters.append(lambda flags: omit_flags(flags, ["--build_event_publish_all_actions"]))
+    _eq("omitted", _asks([]), False)
+
+    # The user's own ask, with a remote cache: Bazel sends every action, so
+    # the build has them, and nothing is added.
+    user = _fake_trait()
+    publish_all_actions_unless_sent_out(user, published)
+    _eq("the user's own, nothing more", user.rc_flags[0](_ctx, _ctx.bazel.new_rc(flags = ["--remote_cache=grpc://c", "--build_event_publish_all_actions"]), "build"), [])
+    _eq("every action", published["all_actions"], True)
+    _eq("turned off again", user.rc_flags[0](_ctx, _ctx.bazel.new_rc(flags = ["--remote_cache=grpc://c", "--build_event_publish_all_actions", "--nobuild_event_publish_all_actions"]), "build"), [])
+    _eq("failed ones only", published["all_actions"], False)
+
+    # Another feature's unconditional ask stands, and this one adds nothing.
+    both = _fake_trait()
+    publish_all_actions(both)
+    publish_all_actions_unless_sent_out(both, published)
+    _eq("nothing more", both.rc_flags[0](_ctx, _ctx.bazel.new_rc(flags = ["--remote_cache=grpc://c"]), "build"), [])
+    _eq("still every action", published["all_actions"], True)
+
 def _test_add_task_flags_defers_the_keepalive(_ctx):
     # The keepalive goes through an rc hook; everything else straight onto
     # `extra_flags`, where it beats the repository's rc.
@@ -390,6 +439,7 @@ _UNIT_TESTS = [
     _test_runner_executor_flags,
     _test_add_task_flags_defers_the_keepalive,
     _test_publish_all_actions_asks_the_runtime_once,
+    _test_publish_all_actions_unless_sent_out,
     _test_unset_flags,
     _test_color_flags,
     _test_exec_log_flags,

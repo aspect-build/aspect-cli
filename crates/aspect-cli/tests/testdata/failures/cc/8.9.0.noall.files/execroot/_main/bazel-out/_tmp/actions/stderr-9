@@ -1,0 +1,4 @@
+[1mcc2/sub/d.cc:1:19: [0m[0;1;31merror: [0m[1muse of undeclared identifier 'r'[0m
+    1 | [0;34mint[0m d2() { [0;34mreturn[0m r }[0m
+      | [0;1;32m                  ^
+[0m1 error generated.

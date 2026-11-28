@@ -144,6 +144,10 @@ fn fixture(report: &Path, handshake: &Path, scenario: &str, f: Fixture) -> Strin
         // registers one in practice — the Artifact Upload feature does,
         // unconditionally — so this is how a task with no BES consumer is reached.
         setup.push_str("    t.build_start.append(lambda _ctx: t.build_event.clear())\n");
+        // Keeping action and test logs (failed ones by default) reads the
+        // stream too.
+        setup.push_str("    t.keep_action_logs = \"none\"\n");
+        setup.push_str("    t.keep_test_logs = \"none\"\n");
     }
     setup.push_str(if f.late {
         // `build_start` fires on attempt 0 only, so this appends exactly once.
@@ -986,4 +990,58 @@ fn a_task_id_already_in_the_history_is_refused() {
         stderr.contains("already used by an earlier run") && stderr.contains(id),
         "{stderr}"
     );
+}
+
+/// The caller's own binary execution log, beside a hook: Bazel takes one log
+/// format, so the CLI adds no compact one for the hook (which then gets no
+/// entries) rather than have Bazel refuse the build.
+#[test]
+fn a_callers_binary_log_beside_a_hook_adds_no_compact_one() {
+    let case = Case::new("execlog_beyond_capacity", Fixture::default(), None);
+    let binary = case.dir.path().join("own.binlog");
+    let flag = format!("--execution_log_binary_file={}", binary.display());
+    let output = case
+        .command(&["build", "//...", &flag])
+        .output()
+        .expect("running the CLI");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        case.bazel_argv().iter().any(|a| a == &flag),
+        "the caller's flag reaches Bazel"
+    );
+    assert_eq!(
+        case.execution_log_paths(),
+        Vec::<String>::new(),
+        "no compact log beside it"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("gets no entries"),
+        "a hook's handle ends quietly: {stderr}"
+    );
+}
+
+/// A task's own iterator beside the caller's binary log ends with no
+/// entries, and the CLI says why, once.
+#[test]
+fn a_tasks_own_iterator_beside_a_callers_binary_log_is_told() {
+    let case = Case::new("execlog_beyond_capacity", Fixture::default(), None);
+    let binary = case.dir.path().join("own.binlog");
+    std::fs::write(
+        case.dir.path().join(".aspect/own.axl"),
+        format!(
+            "def _impl(ctx):\n    it = bazel.execution_log.iterator()\n    b = ctx.bazel.build(\"//...\", flags = [\"--execution_log_binary_file={}\"], execution_log = [it])\n    n = 0\n    for _ in it:\n        n += 1\n    b.wait()\n    print(\"ENTRIES %d\" % n)\n    return 0\n\nown = task(implementation = _impl, summary = \"x\")\n",
+            binary.display()
+        ),
+    )
+    .expect("own.axl");
+    let output = case.command(&["own"]).output().expect("running the CLI");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    assert!(stderr.contains("ENTRIES 0"), "{stderr}");
+    assert_eq!(stderr.matches("gets no entries").count(), 1, "{stderr}");
 }

@@ -1,0 +1,44 @@
+[32mComputing main repo mapping:[0m 
+[1A[K[32mLoading:[0m 
+[1A[K[32mLoading:[0m 0 packages loaded
+[1A[K[32mAnalyzing:[0m 3 targets (0 packages loaded, 0 targets configured)
+[1A[K[32mAnalyzing:[0m 3 targets (0 packages loaded, 0 targets configured)
+[32m[0 / 1][0m checking cached actions
+[1A[K[1A[K[32mINFO: [0mAnalyzed 3 targets (0 packages loaded, 0 targets configured).
+[32m[0 / 3][0m [Prepa] BazelWorkspaceStatusAction stable-status.txt
+[1A[K[31m[1mERROR: [0m${WORKSPACE}/uni/BUILD.bazel:3:8: Executing genrule //uni:café failed: (Exit 2): bash failed: error executing Genrule command (from genrule rule target //uni:café) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo '\''café broke'\'' >&2; exit 2'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+café broke
+[32m[15 / 18][0m 3 actions running
+    Executing genrule //uni:café; 0s darwin-sandbox
+    Executing genrule //uni:привет; 0s darwin-sandbox
+    Testing //uni:тест; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[1A[K[31m[1mERROR: [0m${WORKSPACE}/uni/BUILD.bazel:2:8: Executing genrule //uni:привет failed: (Exit 3): bash failed: error executing Genrule command (from genrule rule target //uni:привет) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo '\''ошибка: всё сломалось ✗ 中文'\'' >&2; exit 3'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+ошибка: всё сломалось ✗ 中文
+[32m[16 / 18][0m 2 actions running
+    Executing genrule //uni:привет; 0s darwin-sandbox
+    Testing //uni:тест; 0s darwin-sandbox
+[1A[K[1A[K[1A[K[31m[1mFAIL: [0m//uni:тест (Exit 1) (see ${OUTPUT_BASE}/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/uni/тест/test.log)
+[32m[17 / 18][0m Testing //uni:тест; 0s darwin-sandbox
+[1A[K[32mINFO: [0mBuild succeeded for only 1 of 3 top-level targets
+[32m[18 / 18][0m 1 / 1 tests, [31m[1m1 failed[0m;[0m no actions running[0m; last test: [31m[1m//uni:тест[0m
+[1A[K[32mINFO: [0mFound 2 targets and 1 test target...
+[32m[18 / 18][0m 1 / 1 tests, [31m[1m1 failed[0m;[0m no actions running[0m; last test: [31m[1m//uni:тест[0m
+[1A[KUse --verbose_failures to see the command lines of failed build steps.
+[32m[18 / 18][0m 1 / 1 tests, [31m[1m1 failed[0m;[0m no actions running[0m; last test: [31m[1m//uni:тест[0m
+[1A[K[32mINFO: [0mElapsed time: 0.250s, Critical Path: 0.10s
+[32m[18 / 18][0m 1 / 1 tests, [31m[1m1 failed[0m;[0m no actions running[0m; last test: [31m[1m//uni:тест[0m
+[1A[K[32mINFO: [0m4 processes: 14 action cache hit, 3 internal, 2 darwin-sandbox.
+[32m[18 / 18][0m 1 / 1 tests, [31m[1m1 failed[0m;[0m no actions running[0m; last test: [31m[1m//uni:тест[0m
+[1A[K[31m[1mERROR: [0mBuild did NOT complete successfully
+[31m[1mFAILED:[0m 
+[1A[K[31m[1mFAILED:[0m 
+[1A[K[31m[1mFAILED:[0m 
+[1A[K[31m[1mFAILED:[0m 
+[1A[K[31m[1mFAILED:[0m 
+[1A[K[31m[1mFAILED:[0m 
+[1A[K[32mINFO: [0mBuild Event Protocol files produced successfully.
+[0m

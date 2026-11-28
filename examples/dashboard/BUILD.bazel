@@ -1,0 +1,99 @@
+"""Slow genrules, one of them broken, and a failing test, to watch the
+`Dashboard` feature (`--dashboard:enabled=true`) with actions
+running:
+
+    aspect build //examples/dashboard:demo --keep_going \
+        --action_env=CACHEBUST=$RANDOM --dashboard:enabled=true
+
+Naming the tests as well runs them, for test logs in the Failures tab
+beside the broken genrule's: one that fails, and flaky ones whose attempts
+and shards `}` and `{` step through (a test, `testonly`, cannot be in
+`demo`):
+
+    aspect test //examples/dashboard:demo //examples/dashboard:tests \
+        --keep_going --action_env=CACHEBUST=$RANDOM --dashboard:enabled=true
+
+Every target is `manual`, so `//...` leaves them out.
+"""
+
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+
+[genrule(
+    name = "step%d" % i,
+    outs = ["step%d.txt" % i],
+    cmd = "for n in 1 2 3; do echo working $$n; sleep 1; done; echo WARNING: step %d is slow >&2; echo $$CACHEBUST > $@" % i,
+    tags = [
+        "manual",
+        "no-cache",
+        "no-remote",
+    ],
+) for i in range(12)]
+
+genrule(
+    name = "broken",
+    outs = ["broken.txt"],
+    cmd = "sleep 2; echo 'ERROR: this step is broken on purpose' >&2; exit 1",
+    tags = [
+        "manual",
+        "no-cache",
+        "no-remote",
+    ],
+)
+
+sh_test(
+    name = "failing",
+    srcs = ["fails.sh"],
+    tags = ["manual"],
+)
+
+# Flaky tests, for stepping through a test's attempts (`}` and `{`): one
+# that passes on its third attempt, one that fails all three, and one whose
+# two shards each fail once.
+_FLAKY_TAGS = [
+    "manual",
+    "no-cache",
+    "no-remote",
+    "no-sandbox",
+]
+
+sh_test(
+    name = "flaky",
+    srcs = ["flaky.sh"],
+    args = ["2"],
+    flaky = True,
+    tags = _FLAKY_TAGS,
+)
+
+sh_test(
+    name = "flaky_fails",
+    srcs = ["flaky.sh"],
+    args = ["9"],
+    flaky = True,
+    tags = _FLAKY_TAGS,
+)
+
+sh_test(
+    name = "flaky_sharded",
+    srcs = ["flaky.sh"],
+    args = ["1"],
+    flaky = True,
+    shard_count = 2,
+    tags = _FLAKY_TAGS,
+)
+
+test_suite(
+    name = "tests",
+    tags = ["manual"],
+    tests = [
+        ":failing",
+        ":flaky",
+        ":flaky_fails",
+        ":flaky_sharded",
+    ],
+)
+
+filegroup(
+    name = "demo",
+    srcs = [":broken"] + [":step%d" % i for i in range(12)],
+    tags = ["manual"],
+)

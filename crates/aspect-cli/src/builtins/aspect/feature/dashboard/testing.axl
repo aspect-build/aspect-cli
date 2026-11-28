@@ -1,0 +1,54 @@
+"""Helpers the Dashboard's test suites share: an empty environment, a
+whole state over a console (`_screen`), a drawn row without its escapes,
+and the build metrics a few tests read."""
+
+load("@aspect//feature/dashboard.axl", "new_state")
+load("@std//theme.axl", "theme")
+
+# An environment with nothing set, for the states the tests build.
+_NO_ENV = struct(var = lambda name: None)
+
+def _visible(row):
+    """`row` without its escape sequences (`ESC [ … letter`)."""
+    out = []
+    skipping = False
+    for c in row.elems():
+        if c == "\x1b":
+            skipping = True
+        elif skipping:
+            if c.isalpha():
+                skipping = False
+        else:
+            out.append(c)
+    return "".join(out)
+
+def _eq(label, got, want):
+    if got != want:
+        fail("%s: got %r, want %r" % (label, got, want))
+
+def _screen(ctx, log, **kw):
+    """A dashboard's whole state, as the feature keeps it (`new_state`), over
+    `log`, a build running, read by no machine's environment."""
+    return new_state(**dict(dict(task = "build", phase = "", log = log, re = ctx.std.re, env = _NO_ENV, building = True, logged_index = None), **kw))
+
+def _role(name):
+    return theme.sgr(name, stream = True)
+
+# A cached build's, as a remote cache leaves one: most of it unchanged.
+_REUSED = struct(action_summary = struct(
+    actions_executed = 1204,
+    runner_count = [struct(name = "total", count = 1204), struct(name = "internal", count = 459), struct(name = "remote cache hit", count = 600), struct(name = "disk cache hit", count = 40), struct(name = "linux-sandbox", count = 105, exec_kind = "Local")],
+    action_cache_statistics = struct(hits = 7359, misses = 1204, miss_details = [struct(reason = "NOT_CACHED", count = 1204)]),
+))
+
+_SUCCESS = struct(exit_code = struct(name = "SUCCESS", code = 0))
+
+dashboard_testing = namespace(
+    eq = _eq,
+    NO_ENV = _NO_ENV,
+    REUSED = _REUSED,
+    role = _role,
+    screen = _screen,
+    SUCCESS = _SUCCESS,
+    visible = _visible,
+)

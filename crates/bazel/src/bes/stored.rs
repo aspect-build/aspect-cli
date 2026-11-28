@@ -1,6 +1,9 @@
 //! A build event stream kept on disk, read back whole: the length-delimited
 //! `BuildEvent` messages of a `--build_event_binary_file`, such as the one the
-//! task history keeps in each build's folder (`build_events.binpb`).
+//! task history keeps in each build's folder (`build_events.binpb`), or the
+//! lines of a `--build_event_json_file`, each a `BuildEvent` in proto3's JSON
+//! form ([`Format`]), decoded by the descriptors the CLI was built with, so
+//! a field newer than them is left out as the binary form's would be.
 //!
 //! Unlike [`super::binary_file::Reader`], which follows a file Bazel is still
 //! writing, this reads one that is finished: it ends at the end of the file.
@@ -10,11 +13,13 @@
 //! whole event, with [`Stored::error`] saying why.
 
 use std::fs::File;
-use std::io::{self, BufReader, ErrorKind, Read};
+use std::io::{self, BufRead, BufReader, ErrorKind, Read};
 use std::path::Path;
+use std::sync::LazyLock;
 
 use axl_proto::build_event_stream::BuildEvent;
 use prost::Message;
+use prost_reflect::{DescriptorPool, DeserializeOptions, DynamicMessage, MessageDescriptor};
 
 use crate::delimited;
 
@@ -22,25 +27,56 @@ use crate::delimited;
 /// rather than allocated.
 const MAX_MESSAGE: usize = 256 << 20;
 
+/// How a stream kept on disk is written.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Format {
+    /// `--build_event_binary_file`'s: length-delimited messages.
+    Binary,
+    /// `--build_event_json_file`'s: a message a line, in proto3's JSON form.
+    Json,
+}
+
+impl Format {
+    /// The format named `name`: `binary` or `json`.
+    pub fn parse(name: &str) -> Option<Format> {
+        match name {
+            "binary" => Some(Format::Binary),
+            "json" => Some(Format::Json),
+            _ => None,
+        }
+    }
+}
+
 /// The events of a stream kept on disk, in order.
 pub struct Stored<R = BufReader<File>> {
     reader: R,
+    format: Format,
+    /// For JSON, the lines read so far, for an error to name.
+    line: usize,
     done: bool,
     last_message: bool,
     error: Option<String>,
 }
 
 impl Stored {
-    /// Read the stream at `path`.
-    pub fn open(path: &Path) -> io::Result<Self> {
-        Ok(Self::new(BufReader::new(File::open(path)?)))
+    /// Read the stream at `path`, written in `format`.
+    pub fn open(path: &Path, format: Format) -> io::Result<Self> {
+        Ok(Self::with_format(BufReader::new(File::open(path)?), format))
     }
 }
 
-impl<R: Read> Stored<R> {
+impl<R: BufRead> Stored<R> {
+    /// A binary stream.
     pub fn new(reader: R) -> Self {
+        Self::with_format(reader, Format::Binary)
+    }
+
+    /// A stream written in `format`.
+    pub fn with_format(reader: R, format: Format) -> Self {
         Self {
             reader,
+            format,
+            line: 0,
             done: false,
             last_message: false,
             error: None,
@@ -66,12 +102,70 @@ impl<R: Read> Stored<R> {
     }
 }
 
-impl<R: Read> Iterator for Stored<R> {
+impl<R: BufRead> Stored<R> {
+    /// The next line's event of a JSON stream; blank lines are none.
+    fn next_json(&mut self) -> Option<BuildEvent> {
+        loop {
+            let mut line = String::new();
+            match self.reader.read_line(&mut line) {
+                Ok(0) => {
+                    self.done = true;
+                    return None;
+                }
+                Ok(_) => self.line += 1,
+                Err(e) => return self.stop(format!("reading line {}: {e}", self.line + 1)),
+            }
+            if line.trim().is_empty() {
+                continue;
+            }
+            return match from_json(&line) {
+                Ok(event) => {
+                    self.last_message = event.last_message;
+                    Some(event)
+                }
+                Err(_) if !line.ends_with('\n') => self.stop(format!(
+                    "the stream ends partway through line {}: it was cut short",
+                    self.line
+                )),
+                Err(e) => self.stop(format!("line {} does not decode: {e}", self.line)),
+            };
+        }
+    }
+}
+
+/// The `BuildEvent` message's descriptor, from the set the CLI was built
+/// with ([`axl_proto::FILE_DESCRIPTOR_SET`]).
+static BUILD_EVENT: LazyLock<Result<MessageDescriptor, String>> = LazyLock::new(|| {
+    DescriptorPool::decode(axl_proto::FILE_DESCRIPTOR_SET)
+        .map_err(|e| format!("the build event descriptors do not decode: {e}"))?
+        .get_message_by_name("build_event_stream.BuildEvent")
+        .ok_or_else(|| "no BuildEvent among the descriptors".to_owned())
+});
+
+/// A `BuildEvent` from its proto3 JSON form, as `--build_event_json_file`
+/// writes one a line. A field the descriptors do not know is left out.
+pub fn from_json(text: &str) -> Result<BuildEvent, String> {
+    let descriptor = BUILD_EVENT.clone()?;
+    let mut de = serde_json::Deserializer::from_str(text);
+    let message = DynamicMessage::deserialize_with_options(
+        descriptor,
+        &mut de,
+        &DeserializeOptions::new().deny_unknown_fields(false),
+    )
+    .map_err(|e| e.to_string())?;
+    de.end().map_err(|e| e.to_string())?;
+    BuildEvent::decode(message.encode_to_vec().as_slice()).map_err(|e| e.to_string())
+}
+
+impl<R: BufRead> Iterator for Stored<R> {
     type Item = BuildEvent;
 
     fn next(&mut self) -> Option<BuildEvent> {
         if self.done {
             return None;
+        }
+        if self.format == Format::Json {
+            return self.next_json();
         }
         // The end of the file at a message boundary is the end; one partway
         // through a length is a stream cut short.
@@ -201,6 +295,58 @@ mod tests {
         let mut huge = Stored::new(Cursor::new(vec![0xff, 0xff, 0xff, 0xff, 0x7f]));
         assert_eq!(huge.next(), None);
         assert!(huge.error().unwrap().contains("damaged"));
+    }
+
+    /// A JSON stream's lines read as the binary form's messages would, a
+    /// field the descriptors do not know left out; one cut short or not JSON
+    /// stops with an error.
+    #[test]
+    fn a_json_stream_reads_as_the_binary_one() {
+        let text = concat!(
+            r#"{"id":{"started":{}},"children":[{"pattern":{"pattern":["//..."]}}],"started":{"uuid":"u-1","startTimeMillis":"5","buildToolVersion":"9.3.3","newerField":{"x":1}}}"#,
+            "\n\n",
+            r#"{"id":{"actionCompleted":{"primaryOutput":"bazel-out/a","label":"//a:b"}},"action":{"success":false,"type":"Genrule","exitCode":1,"stderr":{"name":"stderr","uri":"file:///x/a%20b"},"failureDetail":{"message":"failed","spawn":{"code":"NON_ZERO_EXIT","spawnExitCode":3}}}}"#,
+            "\n",
+            r#"{"id":{"buildFinished":{}},"finished":{"exitCode":{"name":"BUILD_FAILURE","code":1}},"lastMessage":true}"#,
+            "\n",
+        );
+        let mut stored = Stored::with_format(Cursor::new(text), Format::Json);
+        let read: Vec<BuildEvent> = stored.by_ref().collect();
+        assert!(stored.complete(), "{:?}", stored.error());
+        assert_eq!(read.len(), 3);
+        use axl_proto::build_event_stream::build_event::Payload;
+        let Some(Payload::Started(started)) = &read[0].payload else {
+            panic!("{:?}", read[0]);
+        };
+        assert_eq!(
+            (started.uuid.as_str(), started.start_time_millis),
+            ("u-1", 5)
+        );
+        let Some(Payload::Action(action)) = &read[1].payload else {
+            panic!("{:?}", read[1]);
+        };
+        assert_eq!((action.exit_code, action.r#type.as_str()), (1, "Genrule"));
+        let detail = action.failure_detail.as_ref().unwrap();
+        assert_eq!(detail.message, "failed");
+        let Some(Payload::Finished(finished)) = &read[2].payload else {
+            panic!("{:?}", read[2]);
+        };
+        assert_eq!(finished.exit_code.as_ref().unwrap().code, 1);
+
+        let mut cut = Stored::with_format(Cursor::new(&text[..text.len() - 10]), Format::Json);
+        assert_eq!(cut.by_ref().count(), 2);
+        assert!(
+            cut.error().unwrap().contains("cut short"),
+            "{:?}",
+            cut.error()
+        );
+        let mut garbage = Stored::with_format(Cursor::new("{]\n"), Format::Json);
+        assert_eq!(garbage.next(), None);
+        assert!(
+            garbage.error().unwrap().contains("line 1"),
+            "{:?}",
+            garbage.error()
+        );
     }
 
     #[test]

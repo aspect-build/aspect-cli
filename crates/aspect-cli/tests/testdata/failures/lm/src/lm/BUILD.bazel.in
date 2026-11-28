@@ -1,0 +1,2 @@
+load(":nope.bzl", "thing")
+genrule(name = "x", outs = ["x.txt"], cmd = "true")

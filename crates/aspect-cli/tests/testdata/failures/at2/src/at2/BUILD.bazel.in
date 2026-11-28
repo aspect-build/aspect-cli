@@ -1,0 +1,4 @@
+genrule(name = "t1", outs = "a.txt", cmd = "true")
+genrule(name = "t2", outs = ["b.txt"], cmd = 5)
+genrule(name = "ok", outs = ["ok.txt"], cmd = "true")
+genrule(name = "ok2", outs = ["ok2.txt"], cmd = "true")

@@ -5,7 +5,6 @@
 //! [`bazel::console`].
 
 use std::cell::RefCell;
-use std::io::IsTerminal;
 use std::sync::mpsc;
 use std::time::Duration;
 
@@ -494,11 +493,12 @@ pub(crate) struct ProcessorSettings {
 
 /// The console processor `processor(...)` makes; see its docs.
 pub(crate) fn processor_config(s: ProcessorSettings) -> Config {
-    let stderr_tty = std::io::stderr().is_terminal();
+    // As they were before a screen a feature holds captured them.
+    let stderr_tty = crate::engine::stderr_is_terminal();
     let curses_out = match s.display {
         DisplayMode::Curses => true,
         DisplayMode::Lines | DisplayMode::None => false,
-        DisplayMode::Auto => std::io::stdout().is_terminal() && stderr_tty,
+        DisplayMode::Auto => crate::engine::stdout_is_terminal() && stderr_tty,
     };
     let style = if crate::color::console_supports_color() {
         Style::themed(&s.palette)
@@ -640,6 +640,45 @@ pub(crate) fn user_choice(flags: &[String], name: &str) -> Option<bool> {
         }
     }
     choice
+}
+
+/// The errors `observations` collected for the failure summary, as AXL
+/// reads them (`build.output_collected_errors()`): `{"blocks": [{"kind",
+/// "text", "body_len", "last_line"}], "not_kept": n, "froms_not_kept": n,
+/// "stdout": bool, "color": bool, "relay_cap": n | None}`, each block whose
+/// first line is an `ERROR:` (an `error`, or a `tail` that is Bazel's next
+/// message) with that line's `location`, `message`, `coloured`,
+/// `boilerplate` and `body` too ([`ErrorHeader`]); None before the console
+/// has ended or without a `collect_errors()` stage.
+///
+/// [`ErrorHeader`]: bazel::console::processors::ErrorHeader
+pub(crate) fn collected_errors(
+    observations: &bazel::console::processors::Observations,
+) -> Option<serde_json::Value> {
+    let kept = observations.collected_errors()?;
+    let blocks: Vec<serde_json::Value> = kept
+        .blocks
+        .iter()
+        .map(|b| {
+            let mut block = serde_json::json!({"kind": b.kind.as_str(), "text": b.text, "body_len": b.body_len, "last_line": b.last_line});
+            if let Some(h) = b.error_header() {
+                block["location"] = h.location.into();
+                block["message"] = h.message.into();
+                block["coloured"] = h.coloured.into();
+                block["boilerplate"] = h.boilerplate.into();
+                block["body"] = h.body.into();
+            }
+            block
+        })
+        .collect();
+    Some(serde_json::json!({
+        "blocks": blocks,
+        "not_kept": kept.not_kept,
+        "froms_not_kept": kept.froms_not_kept,
+        "stdout": observations.stdout_shared(),
+        "color": kept.color,
+        "relay_cap": kept.relay_cap,
+    }))
 }
 
 #[starlark_module]
@@ -784,6 +823,31 @@ pub(crate) fn register_output(globals: &mut GlobalsBuilder) {
     ) -> anyhow::Result<bool> {
         let re = bazel::console::compile(pattern, pattern)?;
         Ok(re.is_match(&bazel::console::ansi::text(line.as_bytes())))
+    }
+
+    /// Each of `lines` (escape sequences stripped) read as
+    /// `build.output_feed()` reads its lines, in order from a fresh start,
+    /// for lines that are no build's feed (the CLI's own, a log being
+    /// viewed): `{"kinds": [...], "bazel": [...]}`, each line's kind
+    /// (`error`, `warning` or ``) and whether it is one of Bazel's own,
+    /// `colours` the lines as written, colour kept, where known.
+    fn line_kinds<'v>(
+        #[starlark(require = pos)] lines: UnpackList<String>,
+        #[starlark(require = named, default = NoneOr::None)] colours: NoneOr<UnpackList<String>>,
+        heap: starlark::values::Heap<'v>,
+    ) -> anyhow::Result<starlark::values::Value<'v>> {
+        let colours = colours.into_option().map(|c| c.items).unwrap_or_default();
+        let mut carried = bazel::console::feed::Kinds::default();
+        let mut kinds = Vec::with_capacity(lines.items.len());
+        let mut own = Vec::with_capacity(lines.items.len());
+        for (i, line) in lines.items.iter().enumerate() {
+            kinds.push(carried.kind(line));
+            own.push(bazel::console::feed::Kinds::bazel(
+                line,
+                colours.get(i).map_or(line.as_str(), String::as_str),
+            ));
+        }
+        Ok(heap.alloc(serde_json::json!({"kinds": kinds, "bazel": own})))
     }
 
     /// Record each line matching a `{id: regex}` pattern as an `(id, line)`
@@ -950,12 +1014,20 @@ pub(crate) fn register_output(globals: &mut GlobalsBuilder) {
     /// Repeat the first `max` distinct `ERROR:` lines once the console ends,
     /// when at least `after` lines followed the first error, enough to have
     /// scrolled it away (blank and progress lines do not count; 0 always
-    /// recaps). Bazel's closing `Build did NOT complete successfully` and
-    /// `Build failed. Not running tests` are never repeated.
+    /// recaps). Bazel's closing lines, `Build did NOT complete
+    /// successfully`, `Build failed. Not running tests` and `command
+    /// succeeded, but …`, are never repeated.
+    ///
+    /// With `summary = True` it writes nothing: a failure summary tells the
+    /// errors instead (the Console feature's reads Bazel's build events and,
+    /// through a `collect_errors()` stage, `build.output_collected_errors()`),
+    /// and the end of the console leaves naming Bazel's raw log to that
+    /// summary.
     fn recap_errors(
         #[starlark(require = named, default = bazel::console::report::RECAP_MAX as i32)] max: i32,
         #[starlark(require = named, default = bazel::console::report::RECAP_AFTER_RECORDS as i32)]
         after: i32,
+        #[starlark(require = named, default = false)] summary: bool,
     ) -> anyhow::Result<OutputStage> {
         if max <= 0 {
             anyhow::bail!("max must be > 0, got {max}");
@@ -964,11 +1036,57 @@ pub(crate) fn register_output(globals: &mut GlobalsBuilder) {
             anyhow::bail!("after must be >= 0, got {after}");
         }
         Ok(OutputStage {
-            stage: Stage::RecapErrors {
-                max: max as usize,
-                after: after as usize,
+            stage: if summary {
+                Stage::RecapInSummary
+            } else {
+                Stage::RecapErrors {
+                    max: max as usize,
+                    after: after as usize,
+                }
             },
         })
+    }
+
+    /// Collect, for the failure summary and the Dashboard, Bazel's own
+    /// `ERROR:` messages and what may be an action's held last line, as
+    /// Bazel wrote them, and of each action's `INFO: From` output its header,
+    /// its body's length (`body_len`) and its last line (`last_line`):
+    /// `build.output_collected_errors()`. It writes nothing and changes
+    /// nothing shown; however many are added, one collects.
+    fn collect_errors() -> anyhow::Result<OutputStage> {
+        Ok(OutputStage {
+            stage: Stage::CollectErrors,
+        })
+    }
+
+    /// The collected errors of a console `text` written as Bazel would
+    /// write it (through a PTY unless `pty = False`), as a
+    /// `collect_errors()` stage keeps them and `build.output_collected_errors()`
+    /// gives them for a build's: for a test that replays a recorded console.
+    /// `stdout` is what they give as whether the console carried Bazel's
+    /// stdout too, and `relay_cap` the build's
+    /// `--experimental_ui_max_stdouterr_bytes` (Bazel's default when not
+    /// given; -1 for no limit). Private to the builtins' tests.
+    fn _collected_errors<'v>(
+        #[starlark(require = pos)] text: &str,
+        #[starlark(require = named, default = true)] pty: bool,
+        #[starlark(require = named, default = false)] stdout: bool,
+        #[starlark(require = named, default = bazel::console::report::BAZEL_UI_MAX_STDOUTERR_BYTES as i64)]
+        relay_cap: i64,
+        heap: starlark::values::Heap<'v>,
+    ) -> anyhow::Result<starlark::values::Value<'v>> {
+        let mode = if pty { Mode::Pty } else { Mode::Pipe };
+        let mut config = Config::new(mode, vec![Stage::CollectErrors], Style::default());
+        config.relay_cap = u64::try_from(relay_cap).ok();
+        let mut pipeline = config.pipeline();
+        let mut forwarder = bazel::console::forward::Forwarder::spawn(
+            Box::new(std::io::Cursor::new(text.as_bytes().to_vec())),
+            Box::new(std::io::sink()),
+            std::mem::take(&mut pipeline.chain),
+        )?;
+        forwarder.join()?;
+        pipeline.observations.set_stdout_shared(stdout);
+        Ok(heap.alloc(collected_errors(&pipeline.observations).unwrap_or(serde_json::Value::Null)))
     }
 
     /// Fold each run of identical lines into the first plus a `(last line
@@ -1308,6 +1426,24 @@ BazelTrait = trait(
         "recap_errors", "collapse_similar",
     ]: return 1
     if o.drop(["x"]).name != "drop": return 2
+    return 0"#)
+        .expect("run_task");
+        assert_eq!(exit, Some(0));
+    }
+
+    /// The collected errors report what Bazel relays of an action's output:
+    /// the build's own `--experimental_ui_max_stdouterr_bytes`, its last.
+    #[test]
+    fn collected_errors_report_the_builds_relay_cap() {
+        let exit = run(r#"
+    processor = bazel.output.processor(display = "lines", stages = [bazel.output.collect_errors()])
+    flags = ["--scenario=success", "--experimental_ui_max_stdouterr_bytes=9", "--experimental_ui_max_stdouterr_bytes=5"]
+    build = ctx.bazel.build(flags = flags + processor.flags, output = processor)
+    if not build.wait().success: return 1
+    if build.output_collected_errors()["relay_cap"] != 5: return 2
+    plain = ctx.bazel.build(flags = ["--scenario=success"] + processor.flags, output = processor)
+    if not plain.wait().success: return 3
+    if plain.output_collected_errors()["relay_cap"] != 1024 * 1024: return 4
     return 0"#)
         .expect("run_task");
         assert_eq!(exit, Some(0));
@@ -1834,6 +1970,26 @@ def _twice(ctx, line):
                 "{err}"
             );
         }
+    }
+
+    /// The collected errors of a replayed console: each `ERROR:` block with
+    /// what its header says, the counts of what the caps left out, and
+    /// whether Bazel coloured the console.
+    #[test]
+    fn collected_errors_carry_their_headers_and_the_consoles_colour() {
+        let got = crate::test::eval(
+            r#"
+r = bazel.output._collected_errors("\x1b[31m\x1b[1mERROR: \x1b[0m/ws/a/BUILD:1:2: bad\n")
+b = r["blocks"][0]
+(b["kind"], b["location"], b["message"], b["coloured"], b["boilerplate"], r["color"], r["not_kept"], r["froms_not_kept"])
+"#,
+        )
+        .repr()
+        .unwrap();
+        assert_eq!(
+            got,
+            r#"("error", "/ws/a/BUILD:1:2", "bad", True, False, True, 0, 0)"#
+        );
     }
 
     #[test]

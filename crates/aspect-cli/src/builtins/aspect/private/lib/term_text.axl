@@ -1,0 +1,300 @@
+"""Text for a terminal: the cells it takes (`text_width`, `fit`), escape
+sequences, links, colours by role, and counts as the Dashboard and the
+failure summary write them."""
+
+load("@std//theme.axl", "theme")
+
+# The screen's colours, by the run's theme (`@std//theme.axl`), looked up
+# as they are drawn: the theme the run has then (the background the screen
+# learns, a config's), whatever the stream's own colour.
+def _c(role: str) -> str:
+    return theme.sgr(role, stream = True)
+
+_RESET = theme.reset
+
+# Escape sequences a log file may hold (colour, cursor moves, OSC links,
+# character set choices, two-byte ones such as saving the cursor).
+ANSI = "\\x1b\\[[0-?]*[ -/]*[@-~]|\\x1b\\][^\\x07\\x1b]*(?:\\x07|\\x1b\\\\)|\\x1b[ -/]+[0-~]|\\x1b[0-~]"
+
+# Control characters a log line may still hold once its escape sequences are
+# gone, C1's 8-bit ones among them, which would move the cursor off the row
+# (a tab is spaced by `fit`).
+CONTROLS = "[\\x00-\\x08\\x0b-\\x1f\\x7f-\\x9f]"
+
+def _cells(c: int) -> int:
+    """How many cells a terminal draws code point `c` in (`std.term.width`)."""
+    return std.term.width(chr(c))
+
+def _widths(text: str) -> list:
+    """Each code point of `text` and the cells it adds: as `_cells` has it,
+    but for the emoji selector (U+FE0F), which widens a narrow character
+    before it (`⚠️`) to two."""
+    out = []
+    last = 0
+    for c in text.codepoints():
+        n = 1 if c < 0x0300 else _cells(c)
+        if c == 0xFE0F and last == 1:
+            n = 1
+        out.append((c, n))
+        last = n if n else last
+    return out
+
+def text_width(text: str) -> int:
+    """How many cells a terminal draws `text` in: a wide character (`✅`,
+    `⚠️`) two, a combining mark none (`std.term.width`)."""
+    return std.term.width(text)
+
+def fit(text: str, width: int) -> str:
+    """`text` cut (with `…`) or padded with spaces to `width` cells, a tab
+    as two spaces (`std.term.fit`): a row wider than the screen would wrap
+    and scroll the screen up."""
+    return std.term.fit(text, width)
+
+def wrap_line(text: str, width: int) -> list:
+    """`text` as the rows it wraps to at `width` cells, each `(piece,
+    start)`, `start` the character of `text` it starts at; a tab two cells,
+    as `fit` draws it; one row for an empty line."""
+    width = max(1, width)
+    rows = []
+    start = 0
+    used = 0
+    i = 0
+    for c, n in _widths(text):
+        n = 2 if c == 0x09 else n
+        if used + n > width and i > start:
+            rows.append((text[start:i], start))
+            start = i
+            used = 0
+        used += n
+        i += 1
+    rows.append((text[start:], start))
+    return rows
+
+def _tail(text: str, cells: int) -> str:
+    """The longest end of `text` a terminal draws in `cells` cells."""
+    widths = _widths(text)
+    used = 0
+    for i in range(len(widths) - 1, -1, -1):
+        if used + widths[i][1] > cells:
+            return "".join([chr(c) for c, _ in widths[i + 1:]])
+        used += widths[i][1]
+    return text
+
+def elapsed(ms: int) -> str:
+    """`ms` as `1m02s` or `12s`."""
+    s = ms // 1000
+    if s < 60:
+        return "%ds" % s
+    sec = s % 60
+    return "%dm%s%ds" % (s // 60, "0" if sec < 10 else "", sec)
+
+def link(url: str, text: str) -> str:
+    """`text` as an OSC 8 hyperlink to `url`, which a terminal that knows the
+    sequence opens on a click and any other shows as `text`."""
+    return "\x1b]8;;" + url + "\x1b\\" + text + "\x1b]8;;\x1b\\"
+
+def _escape_state(state: int, c: int) -> int:
+    """Where an escape sequence is after code point `c`: 0 outside one, 1
+    just after ESC, 2 in a CSI (`ESC [`), 3 in an OSC (`ESC ]`), 4 in an
+    OSC after an ESC, which a `\\` ends."""
+    if state == 0:
+        return 1 if c == 0x1b else 0
+    if state == 1:
+        return 2 if c == 0x5b else (3 if c == 0x5d else 0)
+    if state == 2:
+        return 0 if c >= 0x40 and c <= 0x7e else 2
+    if state == 3:
+        return 0 if c == 0x07 else (4 if c == 0x1b else 3)
+    return 0 if c == 0x5c else 3
+
+def mark_cells(row: str, marks: list) -> str:
+    """`row`, a drawn row with its escapes, with each of `marks`, `(start,
+    end, open, close, again)` in cells from 0 and sorted, wrapped: `open`
+    before the first cell it covers, `close` after the last, and `again`
+    after every colour change inside it (a reset would undo `open`)."""
+    if not marks:
+        return row
+    out = []
+    at = 0
+    k = 0
+    inside = None
+    esc = 0
+    sgr = False
+    for c in row.codepoints():
+        if esc != 0 or c == 0x1b:
+            out.append(chr(c))
+            before = esc
+            esc = _escape_state(esc, c)
+            if before == 2 and esc == 0 and c == 0x6d and inside != None:
+                out.append(inside[4])
+            continue
+        if inside != None and at >= inside[1]:
+            out.append(inside[3])
+            inside = None
+        if inside == None and k < len(marks) and marks[k][0] <= at:
+            inside = marks[k]
+            k += 1
+            out.append(inside[2])
+        out.append(chr(c))
+        at += 1 if c < 0x0300 else _cells(c)
+    if inside != None:
+        out.append(inside[3])
+    return "".join(out)
+
+def _drawn_cell(c: int, prev: int) -> tuple:
+    """How a code point of a coloured line is drawn, `(cells, text)`, as
+    `fit` and `_widths` draw the plain line: a tab as two spaces, U+FE0F
+    widening the narrow character before it."""
+    if c == 0x09:
+        return (2, "  ")
+    if c == 0xFE0F:
+        return (1 if prev == 1 else 0, chr(c))
+    return (1 if c < 0x0300 else _cells(c), chr(c))
+
+def _slice_escaped(text: str, skip: int, cells: int) -> str:
+    """`text`, escapes and all, from its `skip`th visible character on, cut
+    after `cells` cells: the colour set before the cut kept, and ended."""
+    out = []
+    seen = 0
+    at = 0
+    esc = 0
+    prev = 0
+    for c in text.codepoints():
+        if esc != 0 or c == 0x1b:
+            out.append(chr(c))
+            esc = _escape_state(esc, c)
+            continue
+        if seen < skip:
+            seen += 1
+            n, _ = _drawn_cell(c, prev)
+            prev = n if n else prev
+            continue
+        n, shown = _drawn_cell(c, prev)
+        if at + n > cells:
+            break
+        out.append(shown)
+        at += n
+        prev = n if n else prev
+    return "".join(out) + _RESET
+
+def _cut_escaped(text: str, cells: int) -> str:
+    """`text`, escapes and all, cut after `cells` visible cells, its colour
+    ended."""
+    out = []
+    at = 0
+    esc = 0
+    prev = 0
+    for c in text.codepoints():
+        if esc != 0 or c == 0x1b:
+            out.append(chr(c))
+            esc = _escape_state(esc, c)
+            continue
+        n, shown = _drawn_cell(c, prev)
+        if at + n > cells:
+            break
+        out.append(shown)
+        at += n
+        prev = n if n else prev
+    return "".join(out) + "\x1b[39m"
+
+def _cell_slice(text: str, start: int, end: int, overhang: bool = False) -> str:
+    """The characters of plain `text` that start at cell `start` or after
+    and end by cell `end`: never wider than `end - start`, a wide character
+    the end would split left out. With `overhang`, one that starts before
+    `end` is kept whole (a selection's copy, which draws nothing)."""
+    out = []
+    at = 0
+    for c, n in _widths(text):
+        if at >= end or (at + n > end and not overhang):
+            break
+        if at >= start:
+            out.append(chr(c))
+        at += n
+    return "".join(out)
+
+def _middle(text: str, width: int) -> str:
+    """`text` in `width` cells, cut in its middle (`…`) when longer, so its
+    start and its end both show."""
+    if text_width(text) <= width:
+        return text
+    if width < 8:
+        return fit(text, width).rstrip(" ")
+    left = (width - 1) * 2 // 3
+    return _cell_slice(text, 0, left) + "…" + _tail(text, width - 1 - left)
+
+def _tenths(ms: int) -> str:
+    """`ms` as seconds to a tenth (`12.4s`), or minutes and seconds past a
+    minute as `elapsed` writes them (`1m05s`)."""
+    if ms >= 60000:
+        return elapsed(ms)
+    return "%d.%ds" % (ms // 1000, (ms % 1000) // 100)
+
+def _plain(s: str) -> str:
+    """`s` without its colour sequences (`ESC [ ... m`)."""
+    parts = s.split("\x1b[")
+    out = parts[0]
+    for part in parts[1:]:
+        end = part.find("m")
+        out += part[end + 1:] if end >= 0 else part
+    return out
+
+def short_count(n: int) -> str:
+    """`n` in at most four or five cells: `526`, `1.2k`, `48k`, `1.2M`,
+    rounded down."""
+    if n < 1000:
+        return str(n)
+    if n < 10000:
+        return "%d.%dk" % (n // 1000, n % 1000 // 100)
+    if n < 1000000:
+        return "%dk" % (n // 1000)
+    return "%d.%dM" % (n // 1000000, n % 1000000 // 100000)
+
+def _counts(template: str, args) -> str:
+    """`template % args` with every count in `args` (a tuple, or one value)
+    written as `_thousands` writes it: `%d` takes a count's text."""
+    values = args if type(args) == "tuple" else (args,)
+    return template.replace("%d", "%s") % tuple([_thousands(v) if type(v) == "int" else v for v in values])
+
+def _thousands(n: int) -> str:
+    """`n` with commas between its thousands, as Bazel writes its counts."""
+    digits = str(n)
+    out = ""
+    for i, d in enumerate(digits.elems()):
+        if i and (len(digits) - i) % 3 == 0:
+            out += ","
+        out += d
+    return out
+
+# Where a tab's values start, past its names.
+_VALUE_COLUMN = 24
+
+def _row_of(name: str, value) -> str:
+    """A `name  value` row of a tab, the names in a column."""
+    return "  " + name + " " * max(1, _VALUE_COLUMN - len(name)) + str(value)
+
+term_text = namespace(
+    ANSI = ANSI,
+    c = _c,
+    cell_slice = _cell_slice,
+    cells = _cells,
+    CONTROLS = CONTROLS,
+    counts = _counts,
+    cut_escaped = _cut_escaped,
+    elapsed = elapsed,
+    escape_state = _escape_state,
+    fit = fit,
+    link = link,
+    mark_cells = mark_cells,
+    middle = _middle,
+    plain = _plain,
+    RESET = _RESET,
+    row_of = _row_of,
+    short_count = short_count,
+    slice_escaped = _slice_escaped,
+    tail = _tail,
+    tenths = _tenths,
+    text_width = text_width,
+    thousands = _thousands,
+    widths = _widths,
+    wrap_line = wrap_line,
+)

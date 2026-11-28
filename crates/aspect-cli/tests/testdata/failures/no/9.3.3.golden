@@ -1,0 +1,38 @@
+exit 1
+── Failures (6) ──
+✗ //no:x  Prep · exit 1 · no/BUILD.bazel:3:6
+  │ A side broke
+  log ${OUTPUT_BASE}/execroot/_main/bazel-out/_tmp/actions/stderr-2
+
+✗ //no:p  Proc · exit 1 · no/BUILD.bazel:2:4
+  │ same text
+  log ${OUTPUT_BASE}/execroot/_main/bazel-out/_tmp/actions/stderr-8
+
+✗ //no:n  W · exit 1 · no/BUILD.bazel:4:6
+  │ same
+  log ${OUTPUT_BASE}/execroot/_main/bazel-out/_tmp/actions/stderr-5
+
+✗ //no:p  Proc · exit 1 · no/BUILD.bazel:2:4
+  │ same text
+  log ${OUTPUT_BASE}/execroot/_main/bazel-out/_tmp/actions/stderr-6
+
+✗ //no:n  W · exit 1 · no/BUILD.bazel:4:6
+  │ same
+  log ${OUTPUT_BASE}/execroot/_main/bazel-out/_tmp/actions/stderr-3
+
+✗ //no:x  Fin · exit 1 · no/BUILD.bazel:3:6
+0 built, 3 failed · 0 tests passed, 0 failed · Bazel's raw log: ${FIXTURE}/9.3.3.console
+All of it: aspect history show t-replay
+--- Failures tab
+✗ //no:x  Prep · exit 1 · no/BUILD.bazel:3:6
+  │ A side broke
+✗ //no:p  Proc · exit 1 · no/BUILD.bazel:2:4
+  │ same text
+✗ //no:n  W · exit 1 · no/BUILD.bazel:4:6
+  │ same
+✗ //no:p  Proc · exit 1 · no/BUILD.bazel:2:4
+  │ same text
+✗ //no:n  W · exit 1 · no/BUILD.bazel:4:6
+  │ same
+✗ //no:x  Fin · exit 1 · no/BUILD.bazel:3:6
+  │ B side broke

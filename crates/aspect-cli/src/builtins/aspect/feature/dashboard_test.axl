@@ -1,0 +1,2865 @@
+"""Tests for the `Dashboard` feature: its layout helpers, keys and
+`render`.
+
+Run with:
+  aspect dev test-dashboard
+
+Golden frames of `render` are in crates/aspect-cli/tests/testdata/dashboard;
+`aspect dev test-dashboard --update` writes them anew.
+"""
+
+load("@aspect//feature/dashboard/actions.axl", "dashboard_actions")
+load("@aspect//feature/dashboard/keys.axl", "dashboard_keys")
+load("@aspect//feature/dashboard/log.axl", "dashboard_log")
+load("@aspect//feature/dashboard/pointer.axl", "dashboard_pointer")
+load("@aspect//feature/dashboard/render.axl", "dashboard_render")
+load("@aspect//feature/dashboard/testing.axl", "dashboard_testing")
+load("@aspect//feature/dashboard/view.axl", "dashboard_view")
+load("@aspect//feature/dashboard.axl", "end_build", "fold_build", "frame", "new_build", "new_state", "refusal", "testonly_hold")
+load("@std//theme.axl", "theme")
+load("../private/lib/failure_records.axl", "failure_records")
+load("../private/lib/failures.axl", "failures")
+load("../private/lib/results_pages.axl", "ASPECT_PAGE", "BES_PAGE")
+load("../private/lib/term_text.axl", "term_text")
+load("../private/lib/test_theme.axl", "test_theme")
+
+_NO_ENV = dashboard_testing.NO_ENV
+_visible = dashboard_testing.visible
+_eq = dashboard_testing.eq
+_screen = dashboard_testing.screen
+_role = dashboard_testing.role
+_REUSED = dashboard_testing.REUSED
+_SUCCESS = dashboard_testing.SUCCESS
+ANSI = term_text.ANSI
+CONTROLS = term_text.CONTROLS
+elapsed = term_text.elapsed
+fit = term_text.fit
+link = term_text.link
+mark_cells = term_text.mark_cells
+text_width = term_text.text_width
+wrap_line = term_text.wrap_line
+bazel_line = failure_records.bazel_line
+blocked_targets = failure_records.blocked_targets
+blocked_text = failure_records.blocked_text
+bounded_log = failure_records.testonly_bounded_log
+count_aborted = failure_records.testonly_count_aborted
+count_aborted_test = failure_records.testonly_count_aborted_test
+count_event = failure_records.testonly_count_event
+count_spawn = failure_records.count_spawn
+cut_text = failure_records.cut_text
+failure_of = failure_records.testonly_failure_of
+local_test_logs = failure_records.testonly_local_test_logs
+new_counts = failure_records.testonly_new_counts
+note_blocked = failure_records.testonly_note_blocked
+note_event = failure_records.testonly_note_event
+output_of = failure_records.testonly_output_of
+progress_counts = failure_records.progress_counts
+repaired = bazel.build_events.repaired
+excerpt_rows = failures.excerpt_rows
+failure_detail = failures.failure_detail
+failure_summary = failures.failure_summary
+quoted_rows = failures.testonly_quoted_rows
+test_group = failures.testonly_test_group
+action_counts = dashboard_actions.action_counts
+action_row = dashboard_actions.action_row
+action_seconds = dashboard_actions.action_seconds
+aged_time = dashboard_actions.testonly_aged_time
+analysing = dashboard_actions.testonly_analysing
+built = dashboard_actions.built
+cache_hits = dashboard_actions.cache_hits
+note_phase = dashboard_actions.note_phase
+note_progress = dashboard_actions.note_progress
+note_spawn_time = dashboard_actions.note_spawn_time
+own_execution_log = dashboard_actions.testonly_own_execution_log
+phase_status = dashboard_actions.phase_status
+running_actions = dashboard_actions.running_actions
+slowest_rows = dashboard_actions.slowest_rows
+slowest_title = dashboard_actions.slowest_title
+test_progress = dashboard_actions.test_progress
+tests_cached_text = dashboard_actions.tests_cached_text
+tests_text = dashboard_actions.tests_text
+add_lines = dashboard_log.add_lines
+console_lines = dashboard_log.testonly_console_lines
+new_search = dashboard_log.new_search
+paste_text = dashboard_log.testonly_paste_text
+replay_lines = dashboard_log.replay_lines
+report_lines = dashboard_log.report_lines
+say_note = dashboard_log.say_note
+_shows = dashboard_log.testonly_shows
+shown_lines = dashboard_log.shown_lines
+crumbs = dashboard_view.crumbs
+fit_logs = dashboard_view.testonly_fit_logs
+listed_failures = dashboard_view.listed_failures
+log_view = dashboard_view.testonly_log_view
+panes_shown = dashboard_view.panes_shown
+picked_build = dashboard_view.picked_build
+refresh_test_view = dashboard_view.refresh_test_view
+shown_tips = dashboard_view.shown_tips
+tips_count = dashboard_view.tips_count
+copy_text = dashboard_pointer.testonly_copy_text
+highlightable = dashboard_pointer.testonly_highlightable
+link_at = dashboard_pointer.link_at
+link_marks = dashboard_pointer.link_marks
+link_spans = dashboard_pointer.link_spans
+open_in_editor = dashboard_pointer.open_in_editor
+open_link = dashboard_pointer.testonly_open_link
+open_peek = dashboard_pointer.testonly_open_peek
+opens = dashboard_pointer.testonly_opens
+help_rows = dashboard_keys.help_rows
+KEYS = dashboard_keys.testonly_KEYS
+keys_row = dashboard_keys.keys_row
+on_key = dashboard_keys.on_key
+action_rows = dashboard_render.testonly_action_rows
+build_row = dashboard_render.testonly_build_row
+console_height = dashboard_render.console_height
+failure_rows = dashboard_render.testonly_failure_rows
+headed_row = dashboard_render.testonly_headed_row
+invocation_lines = dashboard_render.testonly_invocation_lines
+links_row = dashboard_render.testonly_links_row
+metrics_lines = dashboard_render.testonly_metrics_lines
+render = dashboard_render.render
+results_capacity = dashboard_render.testonly_results_capacity
+scrollbar = dashboard_render.testonly_scrollbar
+scrolled_rows = dashboard_render.testonly_scrolled_rows
+tips_lines = dashboard_render.testonly_tips_lines
+tips_role = dashboard_render.testonly_tips_role
+
+# The style the console's state is drawn in, muted, at the border's end.
+ANSI_MUTED = theme.sgr("muted", stream = True)
+ANSI_HEADING = theme.sgr("heading", stream = True)
+
+# The roles a running action's time and the header's time are drawn in.
+ANSI_ROLES = {role: theme.sgr(role) for role in ("muted", "warning", "error", "strong", "heading", "status_bar")}
+
+def _held_line_reads(ctx):
+    """Telling a held last line reads, of each successful action's log
+    that ends in a newline, its last bytes alone (a character's), once,
+    however many of Bazel's errors follow an output; of one that does not,
+    its end, as far as the held line is long, once for each line it is
+    checked against; each output's logs are found once. A held line after
+    a line longer than that read is the tool's too, and each stream Bazel
+    relays holds its own."""
+    files = {}
+    outputs = []
+
+    def output(name, **logs):
+        outputs.append({"kind": "action", "label": "//o:" + name, "detail": "Work", "files": [(stream, "file:///fx/" + path) for stream, path in logs.items()], "output": name, "success": True})
+
+    for i in range(200):
+        files["/fx/out-%d" % i] = ("tool line %d\n" % i) * 50
+        output("o%d" % i, stderr = "out-%d" % i)
+    files["/fx/open"] = "open out\n\x1b[31m\x1b[1mERROR: \x1b[0mheld open"
+    output("open", stderr = "open")
+    files["/fx/longprev"] = "a" * 600 + "\n\x1b[31m\x1b[1mERROR: \x1b[0mheld after a long line"
+    output("longprev", stderr = "longprev")
+    files["/fx/erropen-out"] = "out line ends\n"
+    files["/fx/erropen-err"] = "\x1b[31m\x1b[1mERROR: \x1b[0mheld on stderr"
+    output("erropen", stdout = "erropen-out", stderr = "erropen-err")
+    reads = []
+
+    # As `std.fs.try_read_tail` reads: a cut text starts at a line's start,
+    # else, with no whole line in it, at a character's.
+    def read(path, n):
+        reads.append((path, n))
+        if path not in files:
+            return None
+        text = files[path]
+        start = max(0, len(text) - n)
+        if start > 0 and text[start - 1] != "\n":
+            nl = text.find("\n", start)
+            if nl >= 0 and nl + 1 < len(text):
+                start = nl + 1
+        return (text[start:], start)
+
+    blocks = []
+    for i in range(30):
+        # A header naming no label, then Bazel's own coloured error.
+        blocks.append({"kind": "from", "text": "\r\x1b[1A\x1b[K\x1b[32mINFO: \x1b[0mFrom Doing work %d:\n" % i, "body_len": 12, "last_line": "tool line 0\n"})
+        blocks.append(_headed({"kind": "tail", "text": "\r\x1b[1A\x1b[K\x1b[31m\x1b[1mERROR: \x1b[0mpkg/BUILD:%d:1: bazel's own %d\n" % (i + 1, i)}))
+    for held in ("held open", "held after a long line", "held on stderr"):
+        blocks.append({"kind": "from", "text": "\r\x1b[1A\x1b[K\x1b[32mINFO: \x1b[0mFrom Doing more work:\n", "body_len": 9, "last_line": "open out\n"})
+        blocks.append(_headed({"kind": "tail", "text": "\r\x1b[1A\x1b[K\x1b[31m\x1b[1mERROR: \x1b[0m%s\n" % held}))
+    state = new_state(read = read, ansi = ctx.std.re.compile(ANSI), building = True)
+    state.update(outputs = outputs, building = False, ended = True, collected_errors = {"blocks": blocks, "not_kept": 0, "stdout": True, "color": True})
+    tab = dict(state, log_path = "", bazel_exit = 0, focus = "console", selected = 0, expand_failures = True, excerpts = {}, ties_cache = None, entries_cache = None)
+    ansi = ctx.std.re.compile(ANSI)
+    others = [r for r in [ansi.replace(r, "") for r in failure_rows(tab, 400, 120)] if r.startswith("! ")]
+    _eq("held: Bazel's own errors listed, the tools' held lines not", (len(others), [r for r in others if "held " in r]), (30, []))
+    closed = [r for r in reads if r[0].startswith("/fx/out-") or r[0] == "/fx/erropen-out"]
+    _eq("held: a log ending in a newline read for its last bytes alone", [r for r in closed if r[1] > 4], [])
+    _eq("held: and once, found once", (len([r for r in closed if r[1] > 0]), len(closed) <= 2 * 201), (201, True))
+    for path in ("/fx/open", "/fx/longprev", "/fx/erropen-err"):
+        opened = [r[1] for r in reads if r[0] == path and r[1] > 4]
+        _eq("held: %s read from its end, at most once a line, as far as that line is long" % path, (len(opened) <= 33, [n for n in opened if n > 256]), (True, []))
+
+def _interrupted_mark(ctx):
+    """A build Bazel was interrupted in, nothing else to list: the Failures
+    tab's row is its `■` mark, the tab's badge and Results count no failure,
+    and a real failure's code keeps its `✗` row and count."""
+    for name, row, failed in [("INTERRUPTED", "■ Bazel was interrupted (exit 8)", False), ("BUILD_FAILURE", "✗ Bazel exited 8", True)]:
+        st = _screen(ctx, ["x"], building = False, ended = True, task = "build", bazel_exit = 8, log_path = "", panes = True, tab = "failures", focus = "console")
+        st["inv"]["build_finished"] = struct(exit_code = struct(name = name, code = 8))
+        st["counts"]["configured"] = 1
+        rows = [_visible(r).rstrip() for r in failure_rows(st, 10, 60)]
+        _eq("%s: its row" % name, rows, [row])
+        frame = _visible(render(st, 120, 30))
+        _eq("%s: a failure counted" % name, ("Failures ✗1" in frame, "Failed   ✗ 1" in frame), (failed, failed))
+
+def _narrow_failure_rows(ctx):
+    """A Failures row narrower than its heading keeps whole fields, the
+    last dropped first, never a field cut mid-word (`failed 1 of 2
+    at…0.5s`); narrower than its label alone, the label cut in the middle."""
+    details = ["test", "failed 1 of 2 attempts", "0.5s"]
+    whole = "✗ //t:flaky  test · failed 1 of 2 attempts · 0.5s"
+    for width, want in [(60, whole), (len(whole), whole), (len(whole) - 1, "✗ //t:flaky  test · failed 1 of 2 attempts"), (30, "✗ //t:flaky  test"), (12, "✗ //t:flaky")]:
+        _eq("headed at %d" % width, headed_row("✗", "//t:flaky", details, width)[0], want)
+    for width in range(4, 70):
+        text, label = headed_row("✗", "//t:flaky", details, width)
+        if text_width(text) > width or ("…" in text and label == "//t:flaky"):
+            fail("headed_row at %d: %r" % (width, text))
+    _eq("too narrow for the label", headed_row("✗", "//pkg/sub:a_long_target_name", details, 16), ("✗ //pkg/su…_name", "//pkg/su…_name"))
+
+def _frame_order(ctx):
+    """The CLI's own lines and Bazel's that one frame reads together go to
+    the console in the order they arrived, by the number each line got as
+    it ended (`seq`, `seqs`), as `output.log` has them: `▸ Build` before
+    Bazel's first line, `interrupted, stopping…` after the Bazel lines
+    before it, and lines that alternate, alternating."""
+    for name, cli, bazel, want in [
+        ("the CLI's first", [("▸ Setup", 1), ("▸ Build", 2)], [("INFO: Analyzed target //a:b.", 3), ("INFO: Found 1 target...", 4)], ["▸ Setup", "▸ Build", "INFO: Analyzed target //a:b.", "INFO: Found 1 target..."]),
+        ("Bazel's first", [("aspect-cli: interrupted, stopping…", 3)], [("[17 / 41] 16 actions running", 1), ("INFO: Elapsed time: 5.6s", 2)], ["[17 / 41] 16 actions running", "INFO: Elapsed time: 5.6s", "aspect-cli: interrupted, stopping…"]),
+        ("alternating", [("▸ Build", 1), ("a hook's print", 4)], [("INFO: Analyzed target //a:b.", 2), ("INFO: Found 1 target...", 3), ("INFO: Build completed", 5)], ["▸ Build", "INFO: Analyzed target //a:b.", "INFO: Found 1 target...", "a hook's print", "INFO: Build completed"]),
+    ]:
+        written = []
+        screen = struct(
+            held = True,
+            output = lambda: [[line, [], line, seq] for line, seq in cli],
+            size = lambda: (100, 30),
+            key = lambda: None,
+            write = lambda frame: written.append(frame),
+        )
+        feed = {"lines": [l for l, _ in bazel], "seqs": [n for _, n in bazel], "links": None, "colours": None, "kinds": None, "bazel": None, "progress": [], "dropped": 0}
+        build = struct(output_feed = lambda: feed)
+        st = _screen(ctx, [], building = False, screen = screen, task = "build")
+        frame(st, None, build)
+        _eq("arrival order, %s" % name, [l for l in st["log"] if l in want], want)
+        _eq("drawn once, %s" % name, len(written), 1)
+
+def _hold_burst(ctx):
+    """The finished screen takes a burst of keys `_MAX_KEYS` (512) at a
+    time, and a key fetched past a burst's last is the next turn's first,
+    never dropped: 512 keys then Ctrl+C leave, and a 513th key is applied
+    before the Ctrl+C after it. Every wait for a key is `reading`."""
+    for name, after, zoomed in [("512 keys then Ctrl+C", ["ctrl-c"], False), ("a 513th key", ["z", "ctrl-c"], True)]:
+        keys = ["j"] * 512 + after
+        waits = []
+        first = [True]
+
+        def key(timeout_ms = 0, reading = False):
+            if timeout_ms:
+                waits.append(reading)
+            if first[0]:
+                # The drain of keys typed while the build finished.
+                first[0] = False
+                return None
+            return keys.pop(0) if keys else "ctrl-c"
+
+        screen = struct(key = key, interrupts = lambda on: None, held = True, size = lambda: (100, 30), write = lambda frame: None, output = lambda: [])
+        st = _screen(ctx, ["x"] * 50, building = False, ended = True)
+        testonly_hold(st, struct(cancellation = struct(root = struct(cancelled = False))), screen, 0)
+        _eq("%s: every key taken, the zoom" % name, (keys, bool(st.get("zoom"))), ([], zoomed))
+        _eq("%s: each wait reading" % name, all(waits) and len(waits) > 0, True)
+
+def _headed(block):
+    """A kept block, its `ERROR:` header read as the collector reads one
+    (`location`, `message`, `coloured`, `boilerplate`, `body`)."""
+    got = (bazel.output._collected_errors(block["text"]) or {}).get("blocks") or []
+    return dict(block, **{k: got[0][k] for k in ("location", "message", "coloured", "boilerplate", "body") if got and k in got[0]})
+
+def _fake_process(have, ran, exit = 0):
+    """A `ctx.std.process` with only `have` on PATH, recording each command
+    it runs in `ran` as `[argv, what its stdin was given, in writes]`, each
+    child exiting with `exit` at once (None: still running)."""
+
+    def command(name):
+        run = [[name], []]
+
+        def spawn(cancellation = None):
+            ran.append(run)
+            pipe = struct(write = lambda t: run[1].append(t), close = lambda: None)
+            status = None if exit == None else struct(success = exit == 0, code = exit)
+            return struct(
+                stdin = lambda: pipe,
+                wait = lambda: None,
+                try_wait = lambda timeout_ms = 0: status,
+            )
+
+        builder = struct(
+            args = lambda a: (run[0].extend(a), builder)[1],
+            process_group = lambda _: builder,
+            stdin = lambda _: builder,
+            stdout = lambda _: builder,
+            stderr = lambda _: builder,
+            spawn = spawn,
+        )
+        return builder
+
+    return struct(which = lambda n: "/bin/" + n if n in have else None, command = command)
+
+def _fake_env(values):
+    return struct(var = lambda k: values.get(k))
+
+_GOLDEN_DIR = "crates/aspect-cli/tests/testdata/dashboard"
+
+def _frame_text(drawn: str) -> str:
+    """A rendered frame as its visible rows, one per line, ends trimmed."""
+    body = drawn[drawn.find("\x1b[H") + 3:] if "\x1b[H" in drawn else drawn
+    return "\n".join([_visible(r).rstrip() for r in body.split("\r\n")]) + "\n"
+
+def _goldens(ctx, view_state, act, update):
+    """Golden frames: what `render` draws for the screens a change to the
+    layout, keys or output paths must not move by accident. `--update`
+    writes them anew; review the diff."""
+    fs = ctx.std.fs
+    root = ctx.std.env.aspect_root_dir() + "/" + _GOLDEN_DIR
+    running = dict(
+        progress = ["[3 / 9] 2 actions running", "    Compiling src/a.cc; 3s", "    Linking //app:bin; 1s"],
+        now_ms = 12000,
+    )
+    log = ["INFO: Analyzed 3 targets (12 packages loaded).", "INFO: Found 3 targets...", "src/a.cc:3:1: warning: unused variable", "Building..."]
+    tipped = _screen(ctx, ["x"], tips = [
+        {"id": "remote-miss", "severity": "suggestion", "title": "41% of actions missed the cache", "body": "Use a remote cache."},
+        {"id": "disk-full", "severity": "warning", "title": "the disk is 98% full", "body": ""},
+    ], tab = "tips", ended = True, building = False)
+    viewed = dict(_screen(ctx, ["console line"], fails = [act], ended = True, building = False, verdict = False), **{k: view_state[k] for k in ["read", "ansi", "controls", "env"] if k in view_state})
+    for k in view_state:
+        if k not in viewed:
+            viewed[k] = view_state[k]
+    on_key(viewed, "tab", 10)
+    on_key(viewed, "enter", 10)
+    analysing = _screen(ctx, log, progress = ["Analyzing: 8000 targets (1 packages loaded, 3879 targets configured)", "[3,830 / 8,563] 16 actions, 15 running", "    Compiling src/a.cc; 3s", "    Linking //app:bin; 1s"], now_ms = 12000)
+    analysing["counts"].update(spawns = 1300, spawn_hits = 1100, configured = 3)
+    finished = _screen(ctx, log + ["INFO: Build completed successfully, 8563 total actions"], ended = True, verdict = True, building = False, critical = "Linking //app:bin 4.1s", done_total = (8563, 8563, False), inv = {"build_finished": _SUCCESS, "build_metrics": _REUSED})
+    finished["counts"].update(configured = 3, built = 3, test_runs = 15, test_cached = 9, tests_cached = 9, tests_passed = 15)
+    fold_build(finished, 9000)
+    states = [
+        ("running", _screen(ctx, log, **running), 100, 30),
+        ("analysing-140", analysing, 140, 30),
+        ("analysing-80", analysing, 80, 30),
+        ("final-140", finished, 140, 30),
+        ("final-80", finished, 80, 30),
+        ("success", _screen(ctx, log + ["INFO: Build completed successfully, 9 total actions"], ended = True, verdict = True, building = False), 100, 30),
+        ("failure", _screen(ctx, log + ["ERROR: Build did NOT complete successfully"], fails = [act], ended = True, verdict = False, building = False), 100, 30),
+        ("failures-log", viewed, 100, 30),
+        ("tips", tipped, 100, 30),
+        ("narrow", _screen(ctx, log, **running), 40, 12),
+        ("short", _screen(ctx, log, **running), 100, 10),
+        ("keys", _screen(ctx, log, help = True, **running), 100, 30),
+    ]
+    stale = []
+    for name, state, cols, rows in states:
+        got = _frame_text(render(state, cols, rows))
+        path = "%s/%s.golden" % (root, name)
+        if update:
+            fs.create_dir_all(root)
+            fs.write(path, got)
+            continue
+        want = fs.read_to_string(path) if fs.exists(path) else None
+        if got != want:
+            stale.append((name, got, want))
+    for name, got, want in stale:
+        print("golden frame %s differs (aspect dev test-dashboard --update rewrites it):" % name)
+        g, w = got.split("\n"), (want or "").split("\n")
+        for i in range(max(len(g), len(w))):
+            a = g[i] if i < len(g) else "<none>"
+            b = w[i] if i < len(w) else "<none>"
+            if a != b:
+                print("  row %d\n    got:  %r\n    want: %r" % (i, a, b))
+                break
+    if stale:
+        fail("%d golden frame(s) differ: %s" % (len(stale), ", ".join([s[0] for s in stale])))
+
+def _impl(ctx: TaskContext) -> int:
+    # The glyphs these compare are the default theme's, whatever the caller's.
+    rerun = test_theme.rerun_in_default_theme(ctx, ["dev", "test-dashboard"] + (["--update"] if ctx.args.update else []))
+    if rerun != None:
+        return rerun
+    _eq("rows under the status", running_actions(["[1 / 9] 2 actions running", "    a.cc; 1s", "    b.cc; 2s"]), ["a.cc; 1s", "b.cc; 2s"])
+    _eq("one action in the status", running_actions(["[18,401 / 18,434] Compiling Rust rlib axl-proto (2 files); 11s darwin-sandbox"]), ["Compiling Rust rlib axl-proto (2 files); 11s darwin-sandbox"])
+    _eq("a count, no rows", running_actions(["[5 / 9] 3 actions, 1 running"]), [])
+    _eq("none running", running_actions(["[9 / 9] no actions running"]), [])
+    _eq("analysis", running_actions(["Analyzing: 3 targets"]), [])
+    _eq("nothing", running_actions([]), [])
+    _eq("fit pads", fit("ab", 4), "ab  ")
+    _eq("fit cuts", fit("abcdef", 4), "abc…")
+    _eq("fit nothing", fit("ab", 0), "")
+    _eq("fit tabs", fit("a\tb", 5), "a  b ")
+    _eq("wide characters are two cells", text_width("→ ✅ ok ✨📋"), 12)
+    _eq("a combining mark is none", text_width("e\u0301✔"), 2)
+    _eq("fit pads by cells", fit("✅ a", 6), "✅ a  ")
+    _eq("fit cuts by cells", fit("ab✅✅✅", 6), "ab✅… ")
+    _eq("a wide character never straddles the edge", fit("a✅b", 2), "a…")
+    _eq("an emoji selector widens the character before it", text_width("⚠️ x"), 4)
+    _eq("a long line is cut by cells", fit("✅" * 5000, 7), "✅✅✅…")
+    _eq("zero-width marks past the measured head", fit("a" + "\u0301" * 50 + "b", 3), "a" + "\u0301" * 50 + "b ")
+    _eq("everything fits: no scrollbar", scrollbar(10, 10, 0), None)
+    bar_rows = scrollbar(100, 10, 0)
+    _eq("following: the thumb at the bottom", [r.find("┃") >= 0 for r in bar_rows], [False] * 9 + [True])
+    _eq("at the oldest line: at the top", [r.find("┃") >= 0 for r in scrollbar(100, 10, 90)], [True] + [False] * 9)
+    _eq("half shown: half the height", len([r for r in scrollbar(20, 10, 5) if r.find("┃") >= 0]), 5)
+    _eq("status counts", progress_counts("[5,619 / 13,381] 15 actions running"), (5619, 13381))
+    _eq("no status", progress_counts("Analyzing: 3 targets"), None)
+    _eq("kinds as the feed reads them", bazel.output.line_kinds(["ERROR: x failed", "WARNING: y", "INFO: z"])["kinds"], ["error", "warning", ""])
+    _eq("seconds", elapsed(12500), "12s")
+    _eq("minutes", elapsed(62000), "1m02s")
+    state = {
+        "task": "build",
+        "phase": "",
+        "start_ms": 0,
+        "now_ms": 3000,
+        "frames": 1,
+        "progress": ["[1 / 2] 1 action running", "    Compiling a.cc; 1s"],
+        "log": ["INFO: one", "ERROR: two"],
+        "scroll": 0,
+        "filter": "all",
+        "search": new_search(),
+        "fails": [],
+        "selected": 0,
+        "focus": "console",
+        "view": None,
+        "re": ctx.std.re,
+        "cancelling": False,
+        "ended": False,
+        "counts": new_counts(),
+        "building": True,
+        "pages": [],
+    }
+    screen = render(state, 100, 30)
+    _eq("drawn from home", screen.startswith("\x1b[H\x1b[K"), True)
+    _eq("no row is cleared after it is written", "\x1b[K\r\n" in screen, False)
+    _eq("one row per terminal row", screen.count("\r\n"), 29)
+    for want in ["aspect build", "Compiling a.cc", "Running (1)", "ERROR: two", "q cancel"]:
+        if want not in _visible(screen):
+            fail("render: %r missing" % want)
+    state["filter"] = "errors"
+    if "INFO: one" in render(state, 100, 30) or "errors only" not in render(state, 100, 30):
+        fail("render: errors only still shows INFO, or its title is missing")
+    for filter, want in [("all", [True, True, True]), ("warnings", [False, True, True]), ("errors", [False, False, True])]:
+        _eq("shown by " + filter, [_shows(filter, k) for k in ["", "warning", "error"]], want)
+    aspect_url = "https://app.example.com/i/sink-1"
+    bes_url = "https://bes.example.com/invocation/uuid-1"
+    state["pages"] = [(ASPECT_PAGE, aspect_url), (BES_PAGE, bes_url)]
+    linked = render(state, 100, 30)
+    for url in [aspect_url, bes_url]:
+        if link(url, "").replace("\x1b]8;;\x1b\\", "") not in linked:
+            fail("render: no link to %s" % url)
+    _eq("links row", links_row([], 80), "")
+    if link(bes_url, "").replace("\x1b]8;;\x1b\\", "") not in links_row(state["pages"], 40):
+        fail("links_row: a shortened url still links whole")
+    _eq("a tiny terminal still renders", render(state, 20, 8).count("\r\n") <= 7, True)
+    state["scroll"] = 0
+    state["progress"] = ["[18,401 / 18,434] 3 actions running"]
+    for cols in [16, 24, 30, 40, 60]:
+        for row in render(state, cols, 20)[len("\x1b[H"):].split("\r\n"):
+            visible = row
+            for url in [aspect_url, bes_url]:
+                visible = visible.replace("\x1b]8;;" + url + "\x1b\\", "")
+            visible = visible.replace("\x1b]8;;\x1b\\", "")
+            visible = _visible(visible.replace("\x1b[K", "").replace("\x1b[J", ""))
+            if len(visible) > cols:
+                fail("render at %d columns: a row is %d wide: %r" % (cols, len(visible), visible))
+    state["filter"] = "all"
+    state["scroll"] = 1000
+    render(state, 100, 30)
+    _eq("scrolling stops at the top", state["scroll"], 0)
+    state["log"] = ["line %d" % i for i in range(200)]
+    render(state, 100, 30)
+    page = console_height(state, 100, 30)
+    shown = [l for l in render(state, 100, 30).split("\r\n") if l.find("line ") >= 0]
+    _eq("a page is the lines the console shows", page, len(shown))
+    _eq("a scrolled console has a scrollbar", len([l for l in shown if l.find("┃") >= 0]) > 0, True)
+    state["log"] = ["→ ✅ Passed ✨ step %d " % i + "x" * 95 for i in range(200)]
+    for row in render(state, 100, 30).split("\r\n"):
+        if row.find("step ") >= 0:
+            _eq("a row of wide characters is the screen's width", text_width(_visible(row)), 100)
+    state["search"] = new_search()
+    state["search"]["open"] = True
+    state["search"]["query"] = "日本語" * 30
+    bar_row = render(state, 100, 30).split("\r\n")[-1]
+    _eq("a wide query keeps the search bar within the screen", text_width(_visible(bar_row)) <= 100, True)
+    state["search"] = new_search()
+    state["log"] = ["line %d" % i for i in range(200)]
+    state["scroll"] = 0
+    state["search"] = new_search()
+    on_key(state, "b", page)
+    _eq("b scrolls up one console height", state["scroll"], page)
+    _eq("a smaller terminal, a smaller page", console_height(state, 100, 20) < page, True)
+    state["progress"] = ["[1 / 9] 8 actions running"] + ["    a%d; 1s" % i for i in range(8)]
+    crowded = render(state, 100, 18)
+    if "Running (8)" not in crowded or "more" not in crowded:
+        fail("render: a crowded pane should count every action and say how many more")
+
+    for status, want in [
+        ("[1 / 9] 300 actions running", (300, 300)),
+        ("[1,204 / 9,000] 400 actions, 300 running", (300, 400)),
+        ("[1 / 9] 16 actions, 8 running", (8, 16)),
+        ("[10,797 / 18,453] 14 / 39 tests; 16 actions, 15 running; last test: //a:b", (15, 16)),
+        ("[5 / 9] 3 / 9 tests; 4 actions running; last test: //a:b", (4, 4)),
+        ("[1 / 9,000] 2,400 actions, 1,200 running", (1200, 2400)),
+        ("[5 / 9] 1 action running", (1, 1)),
+        ("[5 / 9] Compiling a.cc; 3s remote", (-1, -1)),
+        ("[9 / 9] no actions running", (-1, -1)),
+    ]:
+        _eq("action_counts %r" % status, action_counts([status]), want)
+    state["progress"] = ["[1,204 / 9,000] 400 actions, 300 running"] + ["    a%d; 1s remote" % i for i in range(8)]
+    remote = render(state, 100, 30)
+    if "Running (300 of 400 started)" not in remote or "and 292 more" not in remote:
+        fail("render: a remote build's pane should count all 300, the 400 started, and the 292 it has no room for")
+
+    counts = new_counts()
+    target = struct(label = "//a:a")
+    count_event(counts, "target_configured", target, struct())
+    count_event(counts, "target_configured", struct(label = "//a:a", aspect = "//x:x.bzl%y"), struct())
+    count_event(counts, "target_completed", target, struct(success = True))
+    count_event(counts, "target_completed", struct(label = "//b:b"), struct(success = False))
+    count_aborted(counts, "//c:c", "skipped")
+    count_aborted(counts, "//d:d", "analysis_failure")
+    count_aborted(counts, "//d:d", "analysis_failure")
+    count_aborted(counts, "", "loading_failure")
+    count_event(counts, "target_completed", struct(label = "//a:a", aspect = "//x:x.bzl%y"), struct(success = False))
+    count_event(counts, "test_summary", struct(label = "//t:pass"), struct(overall_status = "passed"))
+    count_event(counts, "test_summary", struct(label = "//t:flaky"), struct(overall_status = "flaky"))
+    count_event(counts, "test_summary", struct(label = "//t:fail"), struct(overall_status = "failed"))
+    count_event(counts, "test_summary", struct(label = "//t:none"), struct(overall_status = "no_status"))
+    count_event(counts, "progress", None, None)
+    _eq("counts", (counts["configured"], counts["built"], counts["failed"], counts["skipped"], counts["tests_passed"], counts["tests_failed"], counts["tests_flaky"]), (1, 1, 2, 1, 1, 1, 1))
+    _eq("a flaky test noted", counts["flaky"], {"//t:flaky": True})
+    _eq("failures", counts["failures"], ["//b:b", "//d:d", "//t:fail"])
+    count_event(counts, "target_completed", struct(label = "//t:fail"), struct(success = False))
+    _eq("a label is listed once", len([l for l in counts["failures"] if l == "//t:fail"]), 1)
+    interrupted = []
+    keys = {"scroll": 0, "log": ["x"] * 40, "filter": "all", "search": new_search(), "fails": [], "selected": 0, "focus": "console", "view": None, "re": ctx.std.re, "cancelling": False, "ended": False, "screen": struct(interrupt = lambda: interrupted.append(1))}
+    steps = [("up", 1), ("shift-up", 6), ("ctrl-u", 11), ("b", 21), ("down", 20), ("ctrl-d", 15), (" ", 5), ("shift-down", 0), ("j", 0), ("k", 1), ("J", 0), ("K", 1 << 30), ("J", 0), ("home", 1 << 30), ("end", 0), ("pageup", 10), ("end", 0)]
+    for key, want in steps:
+        on_key(keys, key, 10)
+        _eq("scroll after %r" % key, keys["scroll"], want)
+    keys["scroll"] = 3
+    for want in ["warnings", "errors", "all"]:
+        on_key(keys, "e", 10)
+        _eq("e: the next filter, at the newest", (keys["filter"], keys["scroll"]), (want, 0))
+    on_key(keys, "q", 10)
+    on_key(keys, "q", 10)
+    _eq("q interrupts once", (keys["cancelling"], len(interrupted)), (True, 1))
+    keys["cancelling"] = False
+    keys["ended"] = True
+    on_key(keys, "q", 10)
+    _eq("q after the end does nothing", len(interrupted), 1)
+    cancelled = []
+    rooted = dict(keys, ended = False, cancelling = False, cancellation = struct(root = struct(cancel = lambda: cancelled.append(1))))
+    on_key(rooted, "q", 10)
+    on_key(rooted, "q", 10)
+    _eq("q cancels the run's root once, no SIGINT", (len(cancelled), len(interrupted)), (1, 1))
+
+    # The search bar: typed into live, a regex, toggles, Enter keeps, Esc clears.
+    find = {"scroll": 4, "filter": "all", "search": new_search(), "fails": [], "selected": 0, "focus": "console", "view": None, "re": ctx.std.re, "cancelling": False, "ended": False, "log": [
+        "INFO: Build ok",
+        "ERROR: //a:b failed",
+        "WARNING: //a:c deprecated",
+        "ERROR: //a:d FAILED to build",
+    ]}
+    on_key(find, "ctrl-f", 10)
+    _eq("ctrl-f opens the bar, finding", (find["search"]["open"], find["search"]["mode"]), (True, "jump"))
+    on_key(find, "tab", 10)
+    _eq("tab in the bar filters instead", find["search"]["mode"], "filter")
+    for c in "fail".elems():
+        on_key(find, c, 10)
+    _eq("typed live, any case", console_lines(find, find["log"]), ["ERROR: //a:b failed", "ERROR: //a:d FAILED to build"])
+    _eq("typing goes back to the newest line", find["scroll"], 0)
+    on_key(find, "q", 10)
+    _eq("q types while the bar is open", (find["search"]["query"], find["cancelling"]), ("failq", False))
+    on_key(find, "backspace", 10)
+    on_key(find, "ctrl-t", 10)
+    _eq("case-sensitive", console_lines(find, find["log"]), ["ERROR: //a:b failed"])
+    on_key(find, "alt-c", 10)
+    on_key(find, "ctrl-b", 10)
+    _eq("whole words: 'fail' is not 'failed'", console_lines(find, find["log"]), [])
+    on_key(find, "alt-w", 10)
+    saved = find["search"]["query"]
+    for c in " more words".elems():
+        on_key(find, c, 10)
+    on_key(find, "ctrl-w", 10)
+    _eq("Ctrl+W deletes a word", find["search"]["query"], saved + " more ")
+    on_key(find, "alt-backspace", 10)
+    _eq("as does Alt+Backspace, in the bar", (find["search"]["query"], find["search"]["open"]), (saved + " ", True))
+    on_key(find, "ctrl-u", 10)
+    for c in "a:(b|c".elems():
+        on_key(find, c, 10)
+    _eq("an unclosed group: the error, the last good pattern kept", (find["search"]["error"] != "", find["search"]["pattern"].pattern), (True, "a:"))
+    on_key(find, ")", 10)
+    _eq("a regex", console_lines(find, find["log"]), ["ERROR: //a:b failed", "WARNING: //a:c deprecated"])
+    find["filter"] = "errors"
+    _eq("with the e filter too", console_lines(find, find["log"]), ["ERROR: //a:b failed"])
+    find["filter"] = "all"
+    on_key(find, "up", 10)
+    _eq("the arrows still scroll", (find["scroll"], find["search"]["query"]), (1, "a:(b|c)"))
+    on_key(find, "enter", 10)
+    _eq("enter closes the bar and keeps the filter", (find["search"]["open"], len(console_lines(find, find["log"]))), (False, 2))
+    on_key(find, "/", 10)
+    on_key(find, "esc", 10)
+    _eq("esc clears it", (find["search"]["open"], console_lines(find, find["log"])), (False, find["log"]))
+
+    # Drawn: matches highlighted, the bar fits, at any width.
+    state["log"] = find["log"]
+    state["search"] = new_search()
+    state["search"]["open"] = True
+    state["search"]["query"] = "fail"
+    state["search"]["pattern"] = ctx.std.re.compile("fail", case_sensitive = False)
+    drawn = render(state, 100, 30)
+    if theme.sgr("search.match", stream = True) + "fail" + theme.reset not in drawn or "/fail/ 2" not in _visible(drawn) or "2 matches" not in _visible(drawn):
+        fail("render: search matches, title or bar missing")
+    state["search"]["query"] = "fail(x"
+    if "/fail/ 2" not in render(state, 100, 30):
+        fail("render: the title shows a query that does not compile, not the pattern filtering")
+    state["search"]["query"] = "a very long query that will not fit in a narrow terminal at all"
+    for cols in [12, 20, 40, 80]:
+        last = render(state, cols, 20).split("\r\n")[-1]
+        last = _visible(last)
+        if len(last) > cols:
+            fail("search bar at %d columns is %d wide: %r" % (cols, len(last), last))
+    _eq("re.check", (ctx.std.re.check("ok"), ctx.std.re.check("(") != None), (None, True))
+    _eq("re.check takes compile's options", ctx.std.re.check("(?x)a # c", whole_word = True) != None, True)
+
+    # Esc then a key, read together as Alt: the two keys. A paste types into
+    # the bar on one line, never as Enter or commands.
+    keyed = {"scroll": 0, "filter": "all", "search": new_search(), "fails": [], "selected": 0, "focus": "console", "view": None, "re": ctx.std.re, "cancelling": False, "ended": False, "log": []}
+    on_key(keyed, "/", 10)
+    on_key(keyed, "alt-j", 10)
+    _eq("esc+j: the bar closed, then j scrolls", (keyed["search"]["open"], keyed["scroll"]), (False, 0))
+    on_key(keyed, "/", 10)
+    on_key(keyed, "alt-c", 10)
+    _eq("alt-c in the bar toggles case", (keyed["search"]["open"], keyed["search"]["case"]), (True, True))
+    on_key(keyed, "paste:a\nq", 10)
+    _eq("a paste on one line", (keyed["search"]["query"], keyed["search"]["open"], keyed["cancelling"]), ("a q", True, False))
+    _eq("a paste's control characters are dropped", paste_text("paste:a\x1b[2J\x08b\r\nc"), "a[2Jb  c")
+    _eq("and C1 controls, but not other text", paste_text("paste:x\u009by\u0085é"), "xyé")
+    closed = {"scroll": 0, "filter": "all", "search": new_search(), "fails": [], "selected": 0, "focus": "console", "view": None, "re": ctx.std.re, "cancelling": False, "ended": False, "log": []}
+    on_key(closed, "paste:q", 10)
+    _eq("a paste with the bar closed does nothing", (closed["cancelling"], closed["search"]["query"]), (False, ""))
+
+    # The finished screen: q, Enter or Esc leave; with the bar open they are
+    # its keys, and an Esc read with q (Alt) closes the bar, then q leaves.
+    done = {"scroll": 0, "filter": "all", "search": new_search(), "fails": [], "selected": 0, "focus": "console", "view": None, "re": ctx.std.re, "cancelling": False, "ended": True, "log": []}
+    for key, want in [("q", True), ("enter", True), ("esc", True), ("alt-j", True), ("j", False)]:
+        _eq("finished, bar closed: %s" % key, on_key(done, key, 10), want)
+    for key, want in [("q", False), ("enter", False), ("esc", False), ("alt-c", False)]:
+        done["search"] = new_search()
+        done["search"]["open"] = True
+        _eq("finished, bar open: %s" % key, on_key(done, key, 10), want)
+    done["search"] = new_search()
+    done["search"]["open"] = True
+    _eq("finished, bar open: alt-q", on_key(done, "alt-q", 10), True)
+    done["search"] = new_search()
+    done["search"]["open"] = True
+    _eq("finished, bar open: alt-j closes the bar, stays", (on_key(done, "alt-j", 10), done["search"]["open"]), (False, False))
+
+    # The bar shows a query that fits whole, and highlighting never lights
+    # the padding.
+    state["search"] = new_search()
+    state["search"]["open"] = True
+    state["search"]["query"] = "abcdefghijklmnop"
+    if "abcdefghijklmnop" not in render(state, 60, 20).split("\r\n")[-1]:
+        fail("search bar: a query that fits was cut")
+    state["search"] = new_search()
+    state["search"]["query"] = " "
+    state["search"]["pattern"] = ctx.std.re.compile(" ")
+    state["log"] = ["a b"]
+    _eq("the query matches the row's own space", state["search"]["pattern"].highlight("a b", "<", ">"), "a< >b")
+    if _role("search.match") + " " + theme.reset + _role("search.match") + " " + theme.reset in render(state, 60, 20):
+        fail("render: a highlight lit a row's padding")
+    _eq("re.highlight", ctx.std.re.compile("b+").highlight("abbcb", "<", ">"), "a<bb>c<b>")
+
+    # Failures: records from events, their logs found and shown.
+    _eq("a passing action is no failure", failure_of("action_completed", struct(label = "//a:a"), struct(success = True)), None)
+    act = failure_of("action_completed", struct(label = "//pkg:broken"), struct(
+        success = False,
+        type = "Genrule",
+        stderr = struct(file = "file:///tmp/err"),
+        stdout = struct(file = "file:///tmp/out"),
+    ))
+    _eq("a failed action", (act["label"], act["detail"], [n for n, _ in act["files"]]), ("//pkg:broken", "Genrule", ["stderr", "stdout"]))
+    for status in ["passed", "incomplete", "no_status"]:
+        _eq("a %s attempt is no failure" % status, failure_of("test_result", struct(label = "//t:t"), struct(status = status)), None)
+    for status in ["failed", "timeout", "tool_halted_before_testing"]:
+        _eq("a %s attempt is a failure" % status, failure_of("test_result", struct(label = "//t:t"), struct(status = status)) != None, True)
+    cfg = struct(id = "c1")
+    flaky = failure_of("test_result", struct(label = "//t:t", run = 1, shard = 2, attempt = 1, configuration = cfg), struct(
+        status = "failed",
+        test_action_output = [struct(name = "test.xml", file = "x"), struct(name = "test.log", file = "bytestream://cache/blobs/abc/1")],
+    ))
+    _eq("a failed attempt keeps its test.log", (flaky["detail"], flaky["shard"], [n for n, _ in flaky["files"]]), ("attempt 1", 2, ["test.log"]))
+
+    fs = {
+        "spread": {},
+        "exec_root": "/x",
+        "output_dirs": {"c1": "k8-opt"},
+        "test_counts": {("//t:t", "c1"): (1, 2)},
+        "last_attempts": {("//t:t", "c1", 1, 2): 2},
+    }
+    _eq("an earlier attempt's log", local_test_logs(fs, flaky), ["/x/bazel-out/k8-opt/testlogs/t/t/shard_2_of_2/test_attempts/attempt_1.log"])
+    fs["last_attempts"] = {}
+    _eq("the last attempt's, once summarised", local_test_logs(fs, flaky), ["/x/bazel-out/k8-opt/testlogs/t/t/shard_2_of_2/test.log"])
+    fs["test_counts"] = {}
+    shard_state = {"test_counts": {("//t:t", "c1"): (1, 4)}, "spread": {}}
+    _eq("a sharded test's attempt names its shard", failure_detail(shard_state, flaky), "shard 2 · attempt 1")
+    _eq("an unsharded one, its attempt alone", failure_detail({"test_counts": {("//t:t", "c1"): (1, 0)}, "spread": {}}, dict(flaky, shard = 1)), "attempt 1")
+    before = {"test_counts": {}, "spread": {("//t:t", "c1"): (3, 2)}}
+    _eq("before the summary, from what was seen: shard and run", failure_detail(before, dict(flaky, shard = 1, run = 3)), "shard 1 · run 3 · attempt 1")
+    _eq("runs alone", failure_detail({"test_counts": {}, "spread": {("//t:t", "c1"): (2, 1)}}, dict(flaky, shard = 1, run = 2)), "run 2 · attempt 1")
+    _eq("an action, its mnemonic", failure_detail(shard_state, act), "Genrule")
+    _eq("before the summary, no guess", (local_test_logs(fs, flaky), local_test_logs(fs, dict(flaky, shard = 1))), ([], []))
+    early = log_view(dict(fs, read = lambda p, c: None, ansi = ctx.std.re.compile(ANSI), controls = ctx.std.re.compile(CONTROLS), env = _NO_ENV), flaky)
+    _eq("and the view says when it will be", early["lines"], ["(test.log is found once the test has finished: a remote cache names it)"])
+
+    # The bookkeeping: an aborted summary has no counts; a real one shows an
+    # open log anew.
+    noted = dict(fs, read = lambda p, c: ("attempt one\n", 0) if p.endswith("test_attempts/attempt_1.log") else None, ansi = ctx.std.re.compile(ANSI), controls = ctx.std.re.compile(CONTROLS), env = _NO_ENV, fails = [], outputs = [], view = None, search = new_search(), scroll = 0)
+    noted["test_counts"] = {}
+    noted["last_attempts"] = {}
+    noted["spread"] = {}
+    tid = struct(label = "//t:t", run = 1, shard = 1, attempt = 1, configuration = cfg)
+    remote_log = [struct(name = "test.log", file = "bytestream://cache/blobs/abc/1")]
+    note_event(noted, "test_result", tid, struct(status = "failed", test_action_output = remote_log), False)
+    note_event(noted, "test_result", struct(label = "//t:t", run = 1, shard = 1, attempt = 2, configuration = cfg), struct(status = "passed"), False)
+    noted["view"] = log_view(noted, noted["fails"][0])
+    note_event(noted, "test_summary", struct(label = "//t:t", configuration = cfg), struct(), True)
+    refresh_test_view(noted, struct(kind = "test_summary", id = struct(label = "//t:t", configuration = cfg), payload = struct(), payload_kind = "aborted"))
+    _eq("an aborted summary counts nothing", noted["test_counts"], {})
+    noted["scroll"] = 5
+    noted["search"]["back"] = 0
+    note_event(noted, "test_summary", struct(label = "//t:t", configuration = cfg), struct(run_count = 1, shard_count = 1), False)
+    refresh_test_view(noted, struct(kind = "test_summary", id = struct(label = "//t:t", configuration = cfg), payload = struct(run_count = 1, shard_count = 1)))
+    _eq("a real one shows the open log anew", noted["view"]["lines"], ["attempt one"])
+    _eq("from its end, no current match", (noted["scroll"], noted["search"]["back"]), (0, -1))
+    note_event(noted, "test_result", struct(label = "//t:t", run = 3, shard = 2, attempt = 1, configuration = cfg), struct(status = "passed"), False)
+    _eq("note_event keeps the most runs and shards seen", noted["spread"][("//t:t", "c1")], (3, 2))
+
+    # A retried attempt, as the build's frame hook starts one (`new_build`).
+    retried = dict(noted, fresh = True, scroll = 7, focus = "failures", log = ["x"], selected = 3, bazel_uuid = "old", filter = "errors", search = dict(new_search(), query = "kept", back = 0, origin = 1, anchored = True))
+    new_build(retried, 42)
+    _eq("a retry starts its own build", (retried["fails"], retried["focus"], retried["test_counts"], retried["build_start_ms"], retried["fresh"]), ([], "console", {}, 42, False))
+    _eq("its counts and the rest too", (retried["counts"], retried["last_attempts"], retried["selected"], retried["bazel_uuid"], retried["spread"]), (new_counts(), {}, 0, "", {}))
+    _eq("the console and its search are the task's, kept", (retried["log"], retried["scroll"], retried["search"]["query"], retried["search"]["back"], retried["search"]["origin"], retried["search"]["anchored"], retried["filter"]), (["x"], 7, "kept", 0, 1, True, "errors"))
+    _eq("and what is the run's", (retried["exec_root"], retried["output_dirs"], retried["read"] != None), ("/x", {"c1": "k8-opt"}, True))
+    other = log_view(noted, act)
+    noted["view"] = other
+    note_event(noted, "test_summary", struct(label = "//t:t", configuration = cfg), struct(run_count = 1, shard_count = 1), False)
+    refresh_test_view(noted, struct(kind = "test_summary", id = struct(label = "//t:t", configuration = cfg), payload = struct(run_count = 1, shard_count = 1)))
+    _eq("another failure's open view is left alone", noted["view"] == other, True)
+    fails_before = len(noted["fails"])
+    note_event(noted, "test_result", struct(label = "//t:t", run = 1, shard = 1, attempt = 9, configuration = cfg), struct(), True)
+    _eq("an aborted attempt adds nothing", (len(noted["fails"]), noted["last_attempts"].get(("//t:t", "c1", 1, 1))), (fails_before, 2))
+    _eq("two-byte escapes go whole", ctx.std.re.compile(ANSI).replace("a\x1b7b\x1b8c\x1b=d", ""), "abcd")
+    _eq("and C1 controls", ctx.std.re.compile(CONTROLS).replace("a\u009bb\u0085c", ""), "abc")
+    _eq("a lone ESC before other text, as the view cleans a line", ctx.std.re.compile(CONTROLS).replace(ctx.std.re.compile(ANSI).replace("\x1bé", ""), ""), "é")
+    _eq("printable Latin-1 stays", ctx.std.re.compile(CONTROLS).replace(" é ñ", ""), " é ñ")
+
+    files = {
+        "/x/bazel-out/k8-opt/testlogs/t/t/test.log": ("\x1b[31mFAIL\x1b(B\x1b[m: boom\r\n10%\r50%\r100%\x07\nlast line\n", 0),
+        "/tmp/err": ("ERROR: broken\n", 2048),
+        "/tmp/out": ("some out\n", 0),
+    }
+    view_state = dict(fs, read = lambda path, cap: files.get(path), ansi = ctx.std.re.compile(ANSI), controls = ctx.std.re.compile(CONTROLS), env = _NO_ENV)
+    view_state["test_counts"] = {("//t:t", "c1"): (1, 1)}
+    one_shard = dict(flaky, shard = 1)
+    _eq(
+        "a remote cache's test.log, from the output tree; escapes, CRs and controls gone",
+        log_view(view_state, one_shard)["lines"],
+        ["FAIL: boom", "100%", "last line"],
+    )
+    _eq("a cut log from its next line", cut_text("xtail of one\nnext\nlast\n"), "next\nlast\n")
+    _eq("a cut at a line's start keeps that line", cut_text("\nnext\nlast\n"), "next\nlast\n")
+    _eq("its only newline its end: from a character", cut_text("x\ufffdone long line\n"), "one long line\n")
+    _eq("no newline at all", cut_text("x\ufffdabc"), "abc")
+
+    # Inline contents: bounded at once, shown from a line's start.
+    big = bounded_log(bytes("first\nsecond\nthird\n"), cap = 9)
+    _eq("inline bytes over the cap: the end and the byte before", (str(big[0]), big[1]), ("ond\nthird\n", True))
+    _eq("under it, whole", str(bounded_log(bytes("ok\n"), cap = 9)[0]), "ok\n")
+    inline_rec = {"kind": "action", "label": "//i:i", "detail": "Genrule", "files": [("stderr", big)]}
+    v_inline = log_view(dict(fs, read = lambda p, c: None, ansi = ctx.std.re.compile(ANSI), controls = ctx.std.re.compile(CONTROLS), env = _NO_ENV), inline_rec)
+    _eq("an inline log in the view", (v_inline["lines"], v_inline["cut"]), (["third"], True))
+    _eq("an action's mnemonic defaults", failure_of("action_completed", struct(label = "//a:a"), struct(success = False))["detail"], "Action")
+    v = log_view(view_state, act)
+    _eq("an action's stderr and stdout, divided; a cut file says so", (v["lines"], v["cut"]), (["── stderr ──", "ERROR: broken", "── stdout ──", "some out"], True))
+    _eq("logs that fit are whole", fit_logs([["a"] * 3, ["b"] * 2], 10), [3, 2])
+    _eq("a short log's share goes to a long one", fit_logs([["a"] * 6000, ["b"]], 5000), [4999, 1])
+    _eq("no logs", fit_logs([], 5000), [])
+    _eq("ties, an odd remainder, in order", fit_logs([["a"] * 3000, ["b"] * 3000, ["c"] * 3000], 5000), [1666, 1667, 1667])
+    _eq("two long ones split it", fit_logs([["a"] * 4000, ["b"] * 4000], 5000), [2500, 2500])
+    _eq("one, over", fit_logs([["a"] * 6000], 5000), [5000])
+    files["/tmp/big"] = ("\n".join(["e%d" % i for i in range(6000)]) + "\n", 0)
+    big_view = log_view(view_state, dict(act, files = [("stderr", "file:///tmp/big"), ("stdout", "file:///tmp/out")]))
+    _eq("a long stderr keeps its divider and its end", (big_view["lines"][0], big_view["lines"][1], big_view["lines"][-3:], big_view["cut"]), ("── stderr ──", "e1001", ["e5999", "── stdout ──", "some out"], True))
+    gone = dict(act, files = [("stderr", "file:///nowhere")], output = "bazel-out/x")
+    _eq("a log Bazel removed, nothing kept", log_view(view_state, gone)["lines"], ["(stderr is gone: Bazel removed it, and the history keeps no action logs; --history:action-logs=failed keeps a copy)"])
+    _eq("a log only in the remote cache", log_view(view_state, dict(gone, files = [("stderr", "bytestream://cache/blobs/1")]))["lines"], ["(stderr is not on this machine: only in the remote cache)"])
+    files["/history/kept.stderr"] = ("ERROR: kept\n", 0)
+    keeping = dict(view_state, build = struct(kept_action_log = lambda output: {"stderr": "/history/kept.stderr"} if output == "bazel-out/x" else {}))
+    _eq("the history's copy, though Bazel removed its own", log_view(keeping, gone)["lines"], ["ERROR: kept"])
+    keeping["build"] = struct(kept_action_log = lambda output: {})
+    _eq("a log gone with no copy", log_view(keeping, gone)["lines"], ["(stderr is gone: Bazel removed it, and the history has no copy)"])
+    _eq("a successful action's, kept only under all", log_view(keeping, dict(gone, success = True))["lines"], ["(stderr is gone: Bazel removed it; the history keeps a successful action's only with --history:action-logs=all)"])
+    listed = output_of("action_completed", struct(label = "//a:b", primary_output = "bazel-out/bin/a"), struct(success = True, type = "Genrule", stdout = struct(file = "file:///gone"), stderr = None))
+    _eq("an actions-list record names its output", (listed["output"], listed["success"]), ("bazel-out/bin/a", True))
+
+    # Keys: Tab to the list, ↑↓ choose, Enter shows; ] and [ step; Esc closes
+    # the innermost thing open.
+    browse = dict(view_state, scroll = 0, filter = "all", search = new_search(), fails = [act, one_shard], selected = 0, focus = "console", view = None, re = ctx.std.re, cancelling = False, ended = True, log = ["console line"], counts = new_counts())
+    on_key(browse, "tab", 10)
+    on_key(browse, "down", 10)
+    _eq("tab focuses the list, down chooses", (browse["focus"], browse["selected"]), ("failures", 1))
+    _eq("enter shows its log", (on_key(browse, "enter", 10), browse["view"]["title"], browse["focus"]), (False, "//t:t · attempt 1", "console"))
+    _eq("the log is what the console shows", console_lines(browse, browse["view"]["lines"]), ["FAIL: boom", "100%", "last line"])
+    _eq("enter in a log stays", (on_key(browse, "enter", 10), browse["view"] != None), (False, True))
+    on_key(browse, "]", 10)
+    _eq("] steps on, around", browse["selected"], 0)
+    browse["view"] = None
+    on_key(browse, "[", 10)
+    _eq("[ with no log open shows the chosen one", (browse["selected"], browse["view"] != None), (0, True))
+    on_key(browse, "[", 10)
+    _eq("[ then steps back, around", browse["selected"], 1)
+    on_key(browse, "]", 10)
+    on_key(browse, "]", 10)
+    _eq("] once more", browse["selected"], 1)
+    browse["focus"] = "failures"
+    on_key(browse, "up", 10)
+    browse["focus"] = "console"
+    on_key(browse, "]", 10)
+    _eq("] after choosing another shows the chosen one", (browse["selected"], browse["view"]["record"]["label"]), (0, "//pkg:broken"))
+    on_key(browse, "]", 10)
+    _eq("] on the one shown steps", browse["selected"], 1)
+    browse["scroll"] = 3
+    browse["search"]["open"] = True
+    _eq("esc closes the bar first", (on_key(browse, "esc", 10), browse["search"]["open"], browse["view"] != None), (False, False, True))
+    _eq("] shows the log in the Failures tab", (browse["tab"], len(crumbs(browse))), ("failures", 1))
+    browse["scroll"] = 2
+    on_key(browse, "tab", 10)
+    _eq("Tab to Metrics: its own pane", (browse["tab"], browse["view"]), ("metrics", None))
+    on_key(browse, "shift-tab", 10)
+    _eq("and back: the log still open, as it was scrolled", (browse["tab"], browse["view"] != None, browse["scroll"]), ("failures", True, 2))
+    _eq("Esc: back to the list", (on_key(browse, "esc", 10), browse["tab"], browse["view"], browse["focus"]), (False, "failures", None, "failures"))
+    _eq("then the console", (on_key(browse, "esc", 10), browse["tab"]), (False, "console"))
+    _eq("then leaves the finished screen", on_key(browse, "esc", 10), True)
+    _eq("shift-up pages half the console", (on_key(browse, "shift-up", 10), browse["scroll"]), (False, 5))
+
+    # Drawn: the rows fit the pane, the chosen one lit while focused, the
+    # failed targets without a log after them, and the log view's title.
+    browse["counts"]["failures"] = ["//t:t", "//pkg:lost"]
+    browse["counts"]["failed_labels"] = {"//t:t": True, "//pkg:lost": True}
+    browse["focus"] = "failures"
+    rows = failure_rows(browse, 10, 30)
+    heads = [r for r in rows if "│" not in r]
+    _eq("rows: both logs, then the target without one", len(heads), 3)
+    _eq("the chosen one is lit", heads[browse["selected"]].startswith(_role("active")), True)
+    _eq("its excerpt under it, at most five lines", (0 < len(rows) - 3, len(rows) - 3 <= 5), (True, True))
+    for row in rows:
+        row = _visible(row)
+        _eq("a row fits: %r" % row, len(row) <= 30, True)
+    many = dict(browse, fails = [dict(act, label = "//m:%d" % i, files = []) for i in range(10)], counts = new_counts(), logged_index = None, excerpts = {})
+    plain_rows = lambda st, room: [_visible(r) for r in failure_rows(st, room, 30)]
+    many["selected"] = 0
+    _eq("the first chosen: the rest below", plain_rows(many, 4)[-1], "… 7 more")
+    many["selected"] = 9
+    shown_last = plain_rows(many, 4)
+    _eq("the last chosen: what is above, nothing below", (shown_last[0], shown_last[-1].startswith("✗ //m:9")), ("… 7 earlier", True))
+    tiny = dict(many, logged_index = None, selected = 0, task = "t", phase = "", start_ms = 0, now_ms = 0, frames = 0, progress = [], pages = [], ended = False)
+    if "✗ //m:0" not in render(dict(tiny, tab = "failures", focus = "failures"), 80, 12):
+        fail("render: a short terminal still shows a failure in the list")
+    render(tiny, 80, 24)
+    at = tiny["failed_at"]
+    on_key(tiny, "mouse-press:%d:%d" % (at[1] + 3, at[0]), 10)
+    on_key(tiny, "mouse-release:%d:%d" % (at[1] + 3, at[0]), 10)
+    _eq("a click on the failures' count shows their tab", tiny["tab"], "failures")
+    mixed = dict(many, selected = 9)
+    mixed["counts"] = new_counts()
+    for label in ["//m:9", "//x:1", "//x:2", "//x:3"]:
+        mixed["counts"]["failed_labels"][label] = True
+        mixed["counts"]["failures"].append(label)
+    mixed["logged_index"] = None
+    mixed_rows = plain_rows(mixed, 5)
+    _eq(
+        "unlogged rows follow the logged ones in the window, counted",
+        (mixed_rows[0], mixed_rows[2].startswith("✗ //m:9"), mixed_rows[3], mixed_rows[4], len(mixed_rows)),
+        ("… 8 earlier", True, "✗ //x:1  no log", "… 2 more", 5),
+    )
+    for room in [1, 2, 3]:
+        for sel in [0, 5, 9]:
+            many["selected"] = sel
+            got = plain_rows(many, room)
+            _eq("room %d, row %d: fits" % (room, sel), len(got), room)
+            _eq("room %d, row %d: in sight" % (room, sel), len([r for r in got if r.startswith("✗ //m:%d " % sel)]), 1)
+    many["selected"] = 5
+    middle = plain_rows(many, 4)
+    _eq("in the middle: both", (middle[0], middle[-1], len(middle)), ("… 4 earlier", "… 4 more", 4))
+    browse.update(task = "test", phase = "", start_ms = 0, now_ms = 0, frames = 0, progress = [], pages = [])
+    _open_view = on_key(browse, "enter", 10)
+    drawn = render(browse, 100, 30)
+    for want in ["▹ //t:t ", "Esc back", "FAIL: boom"]:
+        if want not in _visible(drawn):
+            fail("render: %r missing from the log view:\n%s" % (want, drawn))
+
+    # Smart case: a capital of the query's own matches case.
+    for query, want in [("fail", False), ("Fail", True), ("a\\Wb", False), ("\\pL", False), ("\\p{Lu}x", False), ("(?P<Name>a)", False), ("(?<N>a)", False), ("\\w C", True), ("é", False), ("É", True), ("\\x4A", False), ("\\x{1F}", False), ("\\u{00C9}x", False), ("\\U0001F600", False), ("(?U)a", False), ("(?iR:a)", False), ("\\x4AB", True), ("(?i)A", True), ("\\(?User", True)]:
+        _eq("has_uppercase %r" % query, ctx.std.re.has_uppercase(query), want)
+    smart = _screen(ctx, ["ERROR: a FAILED", "ERROR: b failed"])
+    on_key(smart, "/", 10)
+    on_key(smart, "tab", 10)
+    for c in "FAILED".elems():
+        on_key(smart, c, 10)
+    _eq("a capital matches case", console_lines(smart, smart["log"]), ["ERROR: a FAILED"])
+    _eq("a capital lights Aa", smart["search"]["matches_case"], True)
+    if _role("active") + "Aa" not in render(smart, 100, 30):
+        fail("render: the case toggle should be lit while a capital matches case")
+
+    # A query being typed that does not compile keeps the last pattern, and
+    # the case it matches with: `Aa` says what the pattern does.
+    typing = _screen(ctx, ["ERROR: a FAILED", "ERROR: b failed"])
+    on_key(typing, "/", 10)
+    for c in "failed".elems():
+        on_key(typing, c, 10)
+    for c in "(X".elems():
+        on_key(typing, c, 10)
+    _eq("an uncompiled capital lights no Aa", (bool(typing["search"]["error"]), typing["search"]["matches_case"]), (True, False))
+
+    # Finding: the newest match at or above where the bar opened, centred;
+    # n older, N newer, nothing past either end; Esc goes back.
+    lines = ["line %d%s" % (i, " hit" if i in (5, 40, 90) else "") for i in range(100)]
+    jump = _screen(ctx, lines, scroll = 30)
+    on_key(jump, "/", 10)
+    for c in "hit".elems():
+        on_key(jump, c, 10)
+    _eq("typing finds the newest match above the view", (jump["search"]["back"], jump["scroll"]), (99 - 40, 100 - 40 - 1 - 4))
+    _eq("every line still shown", len(console_lines(jump, lines)), 100)
+    drawn = render(jump, 100, 30)
+    if "/hit/ 2 of 3" not in drawn or "┃ line 40 hit" not in _visible(drawn):
+        fail("render: the current match should be counted and marked:\n%s" % _visible(drawn))
+    on_key(jump, "enter", 10)
+    on_key(jump, "N", 10)
+    _eq("N: the previous (older) match", jump["search"]["back"], 99 - 5)
+    on_key(jump, "N", 10)
+    _eq("N past the oldest wraps round to the newest", (jump["search"]["back"], jump["note"]), (99 - 90, "wrapped round to the newest match"))
+    on_key(jump, "n", 10)
+    _eq("n past the newest wraps round to the oldest", jump["search"]["back"], 99 - 5)
+    on_key(jump, "n", 10)
+    on_key(jump, "n", 10)
+    _eq("n: the next (newer), twice", jump["search"]["back"], 99 - 90)
+    on_key(jump, "/", 10)
+    origin = jump["scroll"]
+    on_key(jump, "x", 10)
+    _eq("no match: back where the bar opened", (jump["search"]["back"], jump["scroll"]), (-1, origin))
+    on_key(jump, "backspace", 10)
+    on_key(jump, "esc", 10)
+    _eq("esc: cleared, back where the bar opened", (jump["search"]["pattern"], jump["scroll"]), (None, origin))
+    wrap = _screen(ctx, lines, scroll = 0)
+    wrap["log"] = lines[:95]
+    wrap["scroll"] = 60
+    on_key(wrap, "/", 10)
+    on_key(wrap, "9", 10)
+    on_key(wrap, "0", 10)
+    _eq("none above the view: the newest of all", wrap["search"]["back"], 94 - 90)
+
+    # New lines: the current match and the scroll stay on their lines, and
+    # are counted while scrolled up.
+    add_lines(jump, ["new 1", "new 2"])
+    _eq("scrolled up, new lines are counted", (jump["unseen"], jump["scroll"]), (2, origin + 2))
+    if "2 new, J to follow" not in render(jump, 100, 30):
+        fail("render: scrolled up, the new lines should be counted")
+    on_key(jump, "J", 10)
+    render(jump, 100, 30)
+    _eq("following again forgets them", jump["unseen"], 0)
+    kept = _screen(ctx, list(lines))
+    on_key(kept, "/", 10)
+    for c in "hit".elems():
+        on_key(kept, c, 10)
+    before = kept["log"][len(kept["log"]) - 1 - kept["search"]["back"]]
+    add_lines(kept, ["more"] * 3)
+    _eq("the current match is the same line", kept["log"][len(kept["log"]) - 1 - kept["search"]["back"]], before)
+    add_lines(kept, ["INFO: 1,204 processes: 1,000 remote cache hit, 3 disk cache hit, 200 internal, 1 darwin-sandbox."])
+    _eq("the cache tally is read", kept["cache"], (1003, 1004))
+
+    # The Actions rows count actions, one unit with the bar's: what ran
+    # and what a cache served from the execution log while the build runs,
+    # the rest of the done count unreported; the tests' cache hits from
+    # their results, in Bazel's word.
+    count_spawn(kept["counts"], struct(cache_hit = True, runner = "remote cache hit", outputs = [struct(type = 1)]))
+    count_spawn(kept["counts"], struct(cache_hit = False, runner = "darwin-sandbox", outputs = [struct(type = 2)]))
+    count_event(kept["counts"], "test_result", struct(label = "//t:a"), struct(cached_locally = True, execution_info = None))
+    count_event(kept["counts"], "test_result", struct(label = "//t:b"), struct(cached_locally = False, execution_info = struct(cached_remotely = False)))
+    for label in ("//t:a", "//t:b"):
+        count_event(kept["counts"], "test_summary", struct(label = label), struct(overall_status = "passed"))
+    kept["progress"] = ["[5 / 9] 2 actions running"]
+    drawn = _visible(render(kept, 140, 30))
+    for want in ["Actions  █ 1 ran", "▓ 1 remote cache hits", "? 3 unreported", "─ 2 running · 2 pending", "Tests    2 passed (1 cached) ", " 5 of 9 actions"]:
+        if want not in drawn:
+            fail("render: %r should be drawn:\n%s" % (want, drawn))
+    _eq("no spawns row in Results", ("spawns" in drawn, "test runs" in drawn, "Cached " in drawn), (False, False, False))
+    many = _screen(ctx, ["x"], progress = ["[3,830 / 8,563] 16 actions running"])
+    many["counts"].update(spawns = 1452, spawn_hits = 58, test_runs = 1500, test_cached = 1200, configured = 12345, built = 12000)
+    many["counts"]["log_kinds"] = {"ran": 1394, "disk": 58, "remote": 0}
+    shown = _visible(render(many, 140, 30))
+    _eq("counts with thousands separators", ["12,345 configured" in shown, "12,000 built" in shown], [True, True])
+    _eq("whole counts, what runs and is pending too", ["█ 1,394 ran" in shown, "▓ 58 disk cache hits" in shown, "? 2,378 unreported" in shown and "─ 16 running" in shown and "4,717 pending" in shown], [True, True, True])
+    many["counts"].update(test_runs = 15, test_cached = 9, tests_cached = 9, tests_passed = 9, tests_failed = 6)
+    _eq("the Tests row's cached count", "Tests    9 passed, 6 failed (9 cached)" in _visible(render(many, 140, 30)), True)
+    _eq("no part there is none of", ("Tests    9 passed (9 cached)  " in _visible(render(dict(many, counts = dict(many["counts"], tests_failed = 0)), 140, 30)), "0 failed" in _visible(render(dict(many, counts = dict(many["counts"], tests_failed = 0)), 140, 30)).split("Tests")[1].split("\n")[0]), (True, False))
+    _eq("narrow, the same", "Tests   ✗6 ✓9 (9 cached)" in _visible(render(many, 76, 30)), True)
+
+    # The finished test targets every run of which a cache gave, counted.
+    for got, want in [((0, 0), ""), ((0, 7), ""), ((1, 300), " (1 cached)"), ((300, 300), " (300 cached)"), ((9, 3), " (3 cached)")]:
+        _eq("cached %d of %d" % got, tests_cached_text({"tests_cached": got[0], "tests_passed": got[1]}), want)
+    sharded = new_counts()
+    for shard, hit in [(1, True), (2, False)]:
+        count_event(sharded, "test_result", struct(label = "//t:s"), struct(cached_locally = hit, execution_info = None))
+    count_event(sharded, "test_result", struct(label = "//t:c"), struct(cached_locally = True, execution_info = None))
+    for label in ("//t:s", "//t:c"):
+        count_event(sharded, "test_summary", struct(label = label), struct(overall_status = "passed"))
+    _eq("a skipped one is not finished", tests_cached_text({"tests_cached": 3, "tests_passed": 3, "tests_skipped": 9}), " (3 cached)")
+    _eq("a target with a shard run is not cached", (sharded["tests_cached"], tests_cached_text(sharded)), (1, " (1 cached)"))
+
+    # A test a filter took out (`--test_tag_filters=-slow`) is configured
+    # but never run: pending is of the tests Bazel's status line says it
+    # runs (`1 / 2 tests`), not of those configured.
+    tagged = _screen(ctx, ["x"], progress = ["[20 / 24] 1 / 2 tests; 1 action running", "    Testing //t:ok0; 0s darwin-sandbox"])
+    tagged["counts"].update(testing = True, tests_passed = 1, test_targets = {"//t:ok0": True, "//t:ok1": True, "//t:slow": True})
+    _eq("a filtered test is never pending", test_progress(tagged), (1, 0))
+
+    # Bazel's total grows as it finds test targets (r49m_neg, Bazel 9.3.3:
+    # `3 / 4 tests` with 4 finished and 1 running): never a negative or a
+    # zero part; with no total from Bazel (`--curses=no` between its
+    # status lines, `--noshow_progress`), no pending at all.
+    grown = _screen(ctx, ["x"], progress = ["[30 / 41] 3 / 4 tests; 1 action running", "    Testing //t:ok2; 0s darwin-sandbox"])
+    grown["counts"].update(testing = True, tests_passed = 4, test_targets = {"//t:ok%d" % i: True for i in range(6)})
+    _eq("a total smaller than what is done", test_progress(grown), (1, 0))
+    _eq("no `0 pending` drawn", _visible(tests_text(test_progress(grown))), "─ 1 running")
+    for rows in [["Testing //t:ok2; 0s"], ["[30 / 41] 1 action running", "    Testing //t:ok2; 0s darwin-sandbox"], []]:
+        quiet = dict(grown, progress = rows)
+        _eq("no total from Bazel, no pending: %r" % rows, (test_progress(quiet) or (0, None))[1], None)
+
+    # Tests running and pending while a `test` build runs: targets in
+    # Bazel's running list (a shard, a run, an attempt alike, each target
+    # once), the rest of the tests Bazel's status line says it runs pending
+    # once analysed, the parts summing to that total.
+    t = _screen(ctx, ["x"], progress = ["[40 / 52] 3 / 9 tests; 4 actions running", "    Testing //t:s (shard 1 of 3); 2s darwin-sandbox", "    Testing //t:s (shard 2 of 3); 2s darwin-sandbox", "    Testing //t:r (run 2 of 3); 1s darwin-sandbox", "    Testing //t:a; 0s darwin-sandbox", "    Compiling x.cc; 1s darwin-sandbox"])
+    t["counts"].update(testing = True, tests_passed = 2, tests_failed = 1, test_targets = {"//t:%d" % i: True for i in range(9)})
+    _eq("running and pending", test_progress(t), (3, 3))
+    _eq("in words", _visible(tests_text(test_progress(t))), "─ 3 running · 3 pending")
+    drawn = [r.partition("││ ")[2].rstrip(" │\r") for r in _visible(render(t, 140, 30)).split("\n") if "││ " in r]
+    at = [i for i, r in enumerate(drawn) if r.startswith("Tests")][0]
+    _eq("on a row under Tests", drawn[at:at + 2], ["Tests    2 passed, 1 failed", "         ─ 3 running · 3 pending"])
+    _eq("while it analyses, no pending", test_progress(dict(t, progress = ["Analyzing: 9 targets (1 packages loaded)", "[40 / 52] 4 actions running", "    Testing //t:a; 0s darwin-sandbox"])), (1, None))
+    _eq("not a test build", test_progress(dict(t, counts = dict(t["counts"], testing = False))), None)
+    _eq("nothing at the end", test_progress(dict(t, building = False)), None)
+    _eq("Bazel's total grows past what it said: running stays Bazel's, none pending", test_progress(dict(t, counts = dict(t["counts"], tests_passed = 7))), (3, 0))
+    _eq("a target with its result in is not running", test_progress(dict(t, counts = dict(t["counts"], tests_passed = 3, test_finished = {"//t:a": True}))), (2, 3))
+    _eq("a scheduled one waits", test_progress(dict(t, progress = ["[40 / 52] 3 / 9 tests; 4 actions running", "    Testing //t:a; 0s darwin-sandbox", "    [Sched] Testing //t:b; 2s"])), (1, 5))
+    metrics = "\n".join([_visible(l) for l in metrics_lines(kept)])
+    if "2 · 1 from a cache (50%) · 1 run" not in metrics or "remote cache hit" not in metrics:
+        fail("metrics: actions by the execution log:\n" + metrics)
+    for line, want in [
+        ("INFO: 1 process: 1 internal.", (0, 0)),
+        ("INFO: 7 processes: 4 action cache hit, 3 linux-sandbox.", (4, 7)),
+        ("INFO: Build completed successfully, 7 total actions", None),
+        ("INFO: 3 processes: lots.", None),
+    ]:
+        _eq("cache_hits %r" % line, cache_hits(line), want)
+
+    # The keys overlay: any key but the wheel closes it, doing nothing else;
+    # the console's scroll is left alone.
+    helped = _screen(ctx, lines, scroll = 12)
+    on_key(helped, "?", 10)
+    drawn = render(helped, 100, 30)
+    if "Keys · ↑↓ PgUp PgDn scroll · any other key closes" not in drawn or "these keys" not in drawn:
+        fail("render: ? should show the keys")
+    on_key(helped, "wheel-up", 10)
+    _eq("the wheel keeps the keys shown", (helped["help"], helped["scroll"]), (True, 12))
+    small = _visible(render(dict(helped, progress = ["[1 / 9] 8 actions running"] + ["    a%d; 1s" % i for i in range(8)]), 80, 16))
+    if "Running" in small or " more: ↓" not in small:
+        fail("render: the keys take the screen, counting what does not fit:\n%s" % small)
+    seen = False
+    for _ in range(80):
+        on_key(helped, "down", 10)
+        seen = seen or "cancel the build" in render(helped, 80, 16)
+    if not seen or "every run from a cache" not in render(helped, 80, 16):
+        fail("render: ↓ should reach the last key, then the end of the glyphs' key")
+
+    # PgDn and PgUp scroll it a page, past what `… N more: ↓` counts, and
+    # back to the top; neither closes it.
+    paged = _screen(ctx, lines)
+    on_key(paged, "?", 10)
+    first = _visible(render(paged, 80, 16))
+    on_key(paged, "pagedown", 10)
+    _eq("PgDn keeps the keys shown, a page on", (paged["help"], paged["help_top"]), (True, 9))
+    if _visible(render(paged, 80, 16)) == first:
+        fail("render: PgDn should show the keys' next page")
+    on_key(paged, "pageup", 10)
+    on_key(paged, "pageup", 10)
+    _eq("PgUp back to the top, still shown", (paged["help"], paged["help_top"]), (True, 0))
+    _eq("as it was", _visible(render(paged, 80, 16)), first)
+    on_key(helped, "q", 10)
+    _eq("a key closes them and does nothing else", (helped["help"], helped["scroll"], helped["cancelling"]), (False, 12, False))
+    on_key(helped, "?", 10)
+    _eq("reopened from the top", helped["help_top"], 0)
+    on_key(helped, "esc", 10)
+
+    # The keys row fits, ending with `? keys` where it can.
+    for focus, ended in [("console", False), ("console", True), ("failures", False)]:
+        for cols in [10, 40, 80, 200]:
+            row = keys_row(_screen(ctx, [], focus = focus, ended = ended, fails = [act]), cols)
+            if len(row) > cols:
+                fail("keys_row at %d columns is %d wide: %r" % (cols, len(row), row))
+            if cols >= 40 and "? keys" not in row:
+                fail("keys_row at %d: no ? keys: %r" % (cols, row))
+    near = _screen(ctx, ["a hit", "b", "c"])
+    on_key(near, "/", 10)
+    for c in "hit".elems():
+        on_key(near, c, 10)
+    on_key(near, "enter", 10)
+    add_lines(near, ["d"] * 20)
+    held = _visible(render(near, 100, 30))
+    if "┃ a hit" not in held:
+        fail("render: a match near the newest line should stay in view:\n%s" % held)
+    near["scroll"] = 0
+    if "on the match, J to follow" not in render(near, 100, 30):
+        fail("render: a view held on a match should not say following")
+    on_key(near, "J", 10)
+    add_lines(near, ["e"])
+    _eq("G follows again", (near["scroll"], near["search"]["back"]), (0, -1))
+    held_bar = _screen(ctx, ["x hit", "y"])
+    on_key(held_bar, "/", 10)
+    for c in "hit".elems():
+        on_key(held_bar, c, 10)
+    on_key(held_bar, "enter", 10)
+    on_key(held_bar, "/", 10)
+    add_lines(held_bar, ["z"] * 5)
+    on_key(held_bar, "esc", 10)
+    _eq("a bar opened on a held view goes back to it", held_bar["scroll"], 5)
+    following = _screen(ctx, ["x hit", "y"])
+    on_key(following, "/", 10)
+    for c in "hit".elems():
+        on_key(following, c, 10)
+    add_lines(following, ["z"] * 50)
+    on_key(following, "esc", 10)
+    _eq("opened following, esc follows again", following["scroll"], 0)
+    top = _screen(ctx, lines[:100])
+    on_key(top, "K", 10)
+    on_key(top, "/", 10)
+    _eq("g then /: from the top page", top["search"]["origin"], 90)
+    for c in "hit".elems():
+        on_key(top, c, 10)
+    _eq("finds the match on it", top["search"]["back"], 99 - 5)
+    top2 = _screen(ctx, lines[:100], search = dict(new_search(), query = "hit", pattern = ctx.std.re.compile("hit")))
+    on_key(top2, "K", 10)
+    on_key(top2, "N", 10)
+    _eq("K then N: the match above the top page's bottom", top2["search"]["back"], 99 - 5)
+    tabbed = _screen(ctx, lines, scroll = 30)
+    on_key(tabbed, "/", 10)
+    on_key(tabbed, "tab", 10)
+    _eq("tab with no query keeps the view", tabbed["scroll"], 30)
+    empty = _screen(ctx, ["a", "b"])
+    on_key(empty, "/", 10)
+    if "matches" in render(empty, 100, 30).split("\r\n")[-1]:
+        fail("render: an empty query counts no matches")
+    _eq("the countdown", keys_row(_screen(ctx, [], ended = True, countdown_ms = 2100), 80).rstrip(), " Done ✔ · leaving in 3s · q, Enter or Esc leave now · any other key stays")
+
+    # Scrolling by the wheel and plain keys; z and m.
+    wheel = _screen(ctx, lines)
+    for key, want in [("wheel-up", 3), ("u", 8), ("d", 3), ("wheel-down", 0)]:
+        on_key(wheel, key, 10)
+        _eq("scroll after %s" % key, wheel["scroll"], want)
+    on_key(wheel, "/", 10)
+    on_key(wheel, "wheel-up", 10)
+    _eq("the wheel scrolls with the bar open", (wheel["scroll"], wheel["search"]["query"]), (3, ""))
+    on_key(wheel, "esc", 10)
+    tall = console_height(wheel, 100, 30)
+    on_key(wheel, "z", 10)
+    _eq("z gives the console the screen", console_height(wheel, 100, 30) > tall, True)
+    if "Running" in render(wheel, 100, 30):
+        fail("render: zoomed, the panes should be gone")
+    mice = []
+    wheel["screen"] = struct(mouse = lambda on: mice.append(on))
+    on_key(wheel, "m", 10)
+    on_key(wheel, "m", 10)
+    _eq("m turns the mouse on and off", mice, [True, False])
+
+    # Running actions: oldest first, coloured by age.
+    for row, want in [("Compiling a.cc; 12s remote", 12), ("GoLink x; 1m 30s local", 90), ("T //a; 2.5s", 2), ("T //a; 500ms", 0), ("Analyzing", 0), ("x; 1h darwin-sandbox", 3600)]:
+        _eq("action_seconds %r" % row, action_seconds(row), want)
+    aged = _screen(ctx, [], progress = ["[1 / 9] 3 actions running", "    young; 2s", "    stuck; 400s", "    slow; 70s"])
+    drawn = _visible(render(aged, 100, 30))
+    if not (drawn.find("stuck; 400s") < drawn.find("slow; 70s") and drawn.find("slow; 70s") < drawn.find("young; 2s")):
+        fail("render: running actions should be oldest first")
+
+    # Under a theme, each running action's time alone is coloured by its age
+    # (BuildBuddy's theme does so in Bazel's progress area), the header's
+    # time strong.
+    painted = _screen(ctx, [], progress = ["[1 / 9] 3 actions running", "    young; 2s", "    stuck; 400s", "    slow; 1m 10s"], now_ms = 65000)
+    rows = render(painted, 100, 30).split("\n")
+    for label, took, role in [("young", "2s", "muted"), ("stuck", "400s", "error"), ("slow", "1m 10s", "warning")]:
+        _eq("%s's time and its role" % label, aged_time("%s; %s darwin-sandbox" % (label, took)), (took, role))
+        row = [r for r in rows if label + ";" in _visible(r)][0]
+        if ANSI_ROLES[role]:
+            _eq("%s's time in %s" % (label, role), (ANSI_ROLES[role] + took) in row, True)
+            _eq("%s's label plain" % label, (ANSI_ROLES[role] + label) in row, False)
+    _eq("no time, no colour", aged_time("Analyzing"), None)
+    _eq("the slowest pane's minutes", aged_time("CppCompile //a:long; 1m05s"), ("1m05s", "warning"))
+    _eq("and its seconds", aged_time("CppCompile //a:short; 12.4s"), ("12.4s", "muted"))
+
+    # The header's time is in its bar, as the rest of it: one style from
+    # the row's start to its end, no reset nor other role inside.
+    head = rows[0].rstrip("\r")
+    _eq("the header's time inside the bar", "1m05s" in _visible(head), True)
+    if ANSI_ROLES["status_bar"]:
+        inner = head[head.find("\x1b[H") + 3:] if "\x1b[H" in head else head
+        inner = inner[inner.find(ANSI_ROLES["status_bar"]) + len(ANSI_ROLES["status_bar"]):]
+        _eq("one style the whole bar", ("\x1b[" in inner.rpartition(theme.reset)[0]), False)
+
+    # The actions that wrote output: their own list, under `a`.
+    wrote = output_of("action_completed", struct(label = "//w:w"), struct(success = True, type = "Javac", stderr = struct(file = "file:///tmp/err")))
+    _eq("an action that wrote output", (wrote["label"], wrote["detail"], wrote["files"]), ("//w:w", "Javac", [("stderr", "file:///tmp/err")]))
+    _eq("one that wrote nothing", output_of("action_completed", struct(label = "//w:q"), struct(success = True)), None)
+    _eq("a failed one is a failure", output_of("action_completed", struct(label = "//w:f"), struct(success = False, stderr = struct(file = "file:///tmp/err"))), None)
+    listed = _screen(ctx, ["console"], **dict(view_state, fails = [act]))
+    listed["read"] = view_state["read"]
+    note_event(listed, "action_completed", struct(label = "//w:w"), struct(success = True, type = "Javac", stderr = struct(file = "file:///tmp/err")), False)
+    note_event(listed, "action_completed", struct(label = "//w:v"), struct(success = True, type = "Genrule", stdout = struct(file = "file:///tmp/out")), False)
+    _eq("note_event lists them", [r["label"] for r in listed["outputs"]], ["//w:w", "//w:v"])
+    on_key(listed, "a", 10)
+    on_key(listed, "tab", 10)
+    on_key(listed, "down", 10)
+    _eq("a: the actions list, its own choice", (listed["list"], listed["picked"], listed["selected"]), ("actions", 1, 0))
+    rows = [_visible(r).rstrip(" ") for r in action_rows(listed, 5, 30)]
+    _eq("its rows", rows, ["• //w:w  Javac", "• //w:v  Genrule"])
+    on_key(listed, "enter", 10)
+    _eq("enter shows the action's log", (listed["view"]["title"], listed["view"]["lines"]), ("//w:v · Genrule", ["some out"]))
+    on_key(listed, "]", 10)
+    _eq("] steps through the actions", listed["view"]["title"], "//w:w · Javac")
+    if "Actions with output" not in render(dict(listed, tab = "failures", focus = "failures", view = None), 100, 30):
+        fail("render: the list's tab should name the actions list")
+    on_key(listed, "a", 10)
+    _eq("a again: the failures", (listed["list"], listed["selected"]), ("failures", 0))
+
+    # Filtering, the bar's origin still counts every line the `e` filter
+    # shows, so Esc goes back to the same line.
+    drift = _screen(ctx, ["l%d" % i for i in range(300)], scroll = 100)
+    on_key(drift, "/", 10)
+    on_key(drift, "f", 10)
+    on_key(drift, "tab", 10)
+    add_lines(drift, ["x%d%s" % (i, " f" if i % 100 == 0 else "") for i in range(250)])
+    on_key(drift, "esc", 10)
+    _eq("esc after filtering: where the bar opened", drift["scroll"], 350)
+    kept_filter = _screen(ctx, ["a", "b f", "c"], scroll = 1)
+    kept_filter["search"].update(mode = "filter", query = "f", pattern = ctx.std.re.compile("f"))
+    on_key(kept_filter, "/", 10)
+    _eq("reopened over a kept filter: the newest", kept_filter["search"]["origin"], 0)
+
+    # The list is its own tab: Tab to it keeps the zoom.
+    zoomed = _screen(ctx, [], fails = [act], zoom = True)
+    on_key(zoomed, "tab", 10)
+    _eq("tab keeps the zoom", (zoomed["focus"], zoomed["zoom"]), ("failures", True))
+
+    # A short terminal still shows a failure, in its tab.
+    short = _screen(ctx, [], fails = [act], tab = "failures", focus = "failures")
+    if "//pkg:broken" not in render(short, 100, 14):
+        fail("render: a 14-row terminal should still show a failure")
+
+    # z on the Failures tab keeps its list's focus (the list is the tab,
+    # not a pane zoom hides); the countdown shows over an open bar; a retry
+    # forgets where the bar opened.
+    zfocus = _screen(ctx, [], fails = [act], focus = "failures", tab = "failures")
+    on_key(zfocus, "z", 10)
+    _eq("z keeps the list", (zfocus["zoom"], zfocus["focus"]), (True, "failures"))
+    counting = _screen(ctx, ["a"], ended = True, countdown_ms = 2000)
+    counting["search"]["open"] = True
+    if "leaving in 2s" not in render(counting, 100, 30):
+        fail("render: the countdown should show over an open bar")
+    opened = _screen(ctx, ["old"] * 300, fresh = True, last_attempts = {})
+    opened["search"].update(open = True, origin = 200, anchored = True)
+    new_build(opened, 0)
+    _eq("a retry keeps where the bar opened: the console is the task's", (opened["search"]["origin"], opened["search"]["anchored"]), (200, True))
+    opened.update(view = None)
+    add_lines(opened, ["new"] * 4)
+    _eq("and follows after it", opened["scroll"], 0)
+
+    # Links and selection: marks wrap cells, not escapes, and survive a
+    # colour reset inside them.
+    _eq("a mark across a colour", mark_cells("a\x1b[31mbc\x1b[0md", [(1, 3, "<", ">", "!")]), "a\x1b[31m<bc\x1b[0m!>d")
+    _eq("a wide character is two cells", mark_cells("✅x", [(2, 3, "<", ">", "")]), "✅<x>")
+    _eq("no marks", mark_cells("abc", []), "abc")
+    row = "see " + link("https://x.test", "here") + " now"
+    _eq("a link's cells", [link_at(row, c) for c in (3, 4, 7, 8)], [None, "https://x.test", "https://x.test", None])
+    _eq("a link after a tab", [m[:2] for m in link_marks("\ta.rs:3", [[1, 7, "file:///a.rs"]], 20)], [(2, 8)])
+    _eq("a link past the room is cut to it", [m[:2] for m in link_marks("abcdef", [[2, 6, "u"]], 4)], [(2, 4)])
+    web_on = link_marks("see https://e.com", [[4, 17, "https://e.com"]], 40)[0][2]
+    file_on = link_marks("a.rs:3", [[0, 6, "file:///a.rs"]], 40)[0][2]
+    _eq("a web link in the theme's link colour, a file's underlined alone", (web_on.endswith(_role("link")), file_on.endswith("\x1b[4m")), (True, True))
+
+    # The console's links drawn, so a click finds them.
+    linked = _screen(ctx, ["ERROR: src/a.rs:3 bad"], ansi = ctx.std.re.compile(ANSI), line_links = {"ERROR: src/a.rs:3 bad": [[7, 17, "cursor://file/w/src/a.rs:3"]]})
+    render(linked, 80, 12)
+    top = linked["pane"][0]
+    pane_row = [i for i, r in enumerate(linked["frame"]) if "src/a.rs:3" in r][-1]
+    col = _visible(ctx.std.re.compile(ANSI).replace(linked["frame"][pane_row], "")).find("src/a.rs")
+    _eq("the console row's link", link_at(linked["frame"][pane_row], col), "cursor://file/w/src/a.rs:3")
+    _eq("the pane's rows", top <= pane_row and pane_row <= linked["pane"][1], True)
+
+    # A real child as the clipboard: `stdin()` is a method, and one that
+    # exits before reading it all (`true`) is no error.
+    real = struct(which = lambda n: "/usr/bin/true" if n == "pbcopy" else None, command = lambda _n: ctx.std.process.command("true"))
+    _eq("a real copy", copy_text({"process": real, "env": _fake_env({}), "cancellation": ctx.cancellation}, "x" * 200000), "copied")
+
+    # Only web and editor links open; anything output wrote could make is
+    # copied instead.
+    _eq("opened", [opens(u) for u in ("https://x.test/a", "cursor://file/w/a.rs:3:1", "idea://open?file=/a&line=1")], [True, True, True])
+    _eq("not opened", [opens(u) for u in ("-aCalculator", "file:///tmp/x.command", "/Applications/X.app", "javascript:alert(1)", "https://x.test/a b", "smb://h/s", "vscode://vscode.git/clone?url=x", "https://x.test/\u009b2J", "https://")], [False] * 9)
+
+    # A click opens it; in an SSH session it is copied instead.
+    ran = []
+    linked.update(process = _fake_process(["open"], ran), env = _fake_env({}))
+    on_key(linked, "mouse-press:%d:%d" % (col, pane_row), 10)
+    on_key(linked, "mouse-release:%d:%d" % (col, pane_row), 10)
+    _eq("opened", (ran, linked["note"]), ([[["open", "cursor://file/w/src/a.rs:3"], []]], "opened cursor://file/w/src/a.rs:3"))
+    _eq("said in the keys row", _visible(keys_row(linked, 80)).strip(), "opened cursor://file/w/src/a.rs:3")
+    on_key(linked, "K", 10)
+    _eq("any other key clears it", linked["note"], "")
+    ran.clear()
+    linked["env"] = _fake_env({"SSH_CONNECTION": "1 2 3 4"})
+    linked["last_press"] = None
+    on_key(linked, "mouse-press:%d:%d" % (col, pane_row), 10)
+    on_key(linked, "mouse-release:%d:%d" % (col, pane_row), 10)
+    _eq("copied over SSH", (ran, linked["note"], linked["osc"].startswith("\x1b]52;c;")), ([], "link copied: cursor://file/w/src/a.rs:3", True))
+
+    # A drag selects within the pane's text, reversed, and its release
+    # copies it, to the clipboard of this machine and by OSC 52.
+    ran.clear()
+    linked.update(env = _fake_env({}), process = _fake_process(["pbcopy"], ran))
+    on_key(linked, "mouse-press:0:%d" % pane_row, 10)
+    on_key(linked, "mouse-drag:12:%d" % pane_row, 10)
+    if theme.bg("selection", stream = True) not in render(linked, 80, 12):
+        fail("render: a selection shows in its colour")
+    on_key(linked, "mouse-drag:12:%d" % pane_row, 10)
+    on_key(linked, "mouse-release:12:%d" % pane_row, 10)
+    _eq("copied with pbcopy, the border left out", (ran[-1], linked["note"]), ([["pbcopy"], ["ERROR: src/"]], "copied 11 characters"))
+    _eq("and by OSC 52 with the next frame", render(linked, 80, 12).startswith("\x1b]52;c;"), True)
+    _eq("once", render(linked, 80, 12).startswith("\x1b]52"), False)
+    ran.clear()
+    on_key(linked, "mouse-release:20:0", 10)
+    _eq("a release with no press since copies nothing", ran, [])
+    on_key(linked, "mouse-press:5:%d" % pane_row, 10)
+    on_key(linked, "mouse-drag:5:0", 10)
+    on_key(linked, "mouse-release:5:0", 10)
+    _eq("a selection begun in the pane stays in its rows", [r[1] for r in ran], [["ERRO"]])
+
+    # Bazel's lines as they come: indented, timestamped, a test summary's,
+    # and a tool's under its action's ERROR.
+    _eq("indented, timed out, a test summary's timeout, timestamped", bazel.output.line_kinds(["  ERROR: //a:b failed", "TIMEOUT: //t:x (Summary)", "//t:x    TIMEOUT in 4.0s", "(23:04:25) ERROR: //a:b failed"])["kinds"], ["error"] * 4)
+    _eq("the timestamp gone", bazel_line("(23:04:25.123) INFO: x"), "INFO: x")
+    _eq("not a timestamp", bazel_line("(see a.cc) x"), "(see a.cc) x")
+    _eq("Bazel's rule exactly", [bazel_line(l) for l in ["(23:04:25) a", "(1:04:25) b", "(23:04:25.) c", "(23:04:25.5x) d", "(23:4:255) e", "(23:04:25)f"]], ["a", "(1:04:25) b", "(23:04:25.) c", "(23:04:25.5x) d", "(23:4:255) e", "(23:04:25)f"])
+    _eq("a diagnostic is its ERROR's", bazel.output.line_kinds(["ERROR: a.cc:1: compile failed", "a.cc:1:2: error: no x", "  1 | x", "INFO: From y:", "y said", "WARNING: z", "z more"])["kinds"], ["error", "error", "error", "", "", "warning", ""])
+    _eq("a tool's INFO: is its own, Bazel's not", bazel.output.line_kinds(["INFO: x", "INFO: y"], colours = ["\x1b[32mINFO: \x1b[0mx", "\x1b[32mINFO:\x1b[0m y"])["bazel"], [True, False])
+    _eq("timestamped progress", (progress_counts("(23:04:25) [5 / 10] x"), cache_hits("(23:04:25) INFO: 4 processes: 3 remote cache hit, 1 internal.")), ((5, 10), (3, 3)))
+    diag = _screen(ctx, [], filter = "errors")
+    add_lines(diag, ["INFO: x", "ERROR: a.cc failed", "a.cc:1: error: no x", "INFO: done"])
+    _eq("e shows the diagnostic", console_lines(diag, diag["log"], diag["kinds"]), ["ERROR: a.cc failed", "a.cc:1: error: no x"])
+
+    # The newest `_MAX_LOG` kept, the rest counted, errors kept for `e`.
+    flood = _screen(ctx, [])
+    add_lines(flood, ["ERROR: first", "INFO: next"] + ["line %d" % i for i in range(20005)])
+    _eq("trimmed a tenth past the cap, and counted", (len(flood["log"]), flood["dropped"], flood["early"]), (18000, 2007, [("ERROR: first", "error")]))
+    for i in range(19):
+        add_lines(flood, ["more %d" % i] * 100)
+    _eq("then not again for a while (refolding once per trim)", flood["trims"], 1)
+    flood["filter"] = "errors"
+    _eq("e still finds it", _visible(render(flood, 80, 24)).count("ERROR: first"), 1)
+    flood["filter"] = "all"
+    _eq("the title says what is gone", "2,007 older not kept" in render(flood, 120, 24), True)
+
+    # What the scrollback keeps: Bazel's closing block as it wrote it, then
+    # the failure summary the plain console prints too: each failure with
+    # what its own log says and the history's copy of that log, the counts,
+    # the raw log, where the rest is.
+    done = _screen(ctx, [], log_path = "/out/console.log", bes_base = "", bazel_uuid = "", update = {}, read = lambda p, n: None, exec_root = "", output_dirs = {}, last_attempts = {})
+    add_lines(done, ["ERROR: //a:b failed", "a.cc:1: error: no x", "INFO: Elapsed time: 3.1s, Critical Path: 2.9s", "ERROR: Build did NOT complete successfully"])
+    done["fails"] = [{"kind": "action", "label": "//a:b", "detail": "CppCompile", "files": [("stderr", "file:///gone")], "output": "bazel-out/a.o", "success": False, "exit_code": 1}]
+    done["build"] = struct(kept_action_log = lambda output: {"stderr": "/history/CppCompile-1.stderr"} if output == "bazel-out/a.o" else {})
+    done["read"] = lambda p, n: ("a.cc:1: error: no x\n", 0) if p == "/history/CppCompile-1.stderr" else None
+    report = report_lines(done, "t-1", False)
+    _eq("Bazel's closing block", report[:2], ["INFO: Elapsed time: 3.1s, Critical Path: 2.9s", "ERROR: Build did NOT complete successfully"])
+    _eq("the summary", report[2:], [
+        "── Failures (1) ──",
+        "✗ //a:b  CppCompile · exit 1",
+        "  │ a.cc:1: error: no x",
+        "  log /history/CppCompile-1.stderr",
+        "0 built, 1 failed · 0 tests passed, 0 failed · Bazel's raw log: /out/console.log",
+        "All of it: aspect history show t-1",
+    ])
+    _eq("no Failed list of its own", [l for l in report if l.startswith("Failed") or l.startswith("Bazel's errors")], [])
+
+    # A state of every kind of failure record the hooks keep.
+    kinds = _screen(ctx, [], log_path = "/h/console.log", bes_base = "", bazel_uuid = "", update = {}, read = lambda p, n: None, exec_root = "", output_dirs = {}, last_attempts = {}, build = None)
+    kinds["fails"] = [
+        {"kind": "action", "label": "//:bad", "detail": "Genrule", "files": [], "output": "bazel-out/bad.txt", "success": False},
+        {"kind": "test", "label": "//t:fails", "detail": "attempt 1", "run": 1, "shard": 1, "attempt": 1, "config": "", "status": "failed", "duration_ms": 0, "files": []},
+    ]
+    kinds["counts"]["failures"] = ["//:bad", "//:uses_bad", "//tc:tc", "//anal:anal"]
+    kinds["root_causes"] = {"//:uses_bad": ["//:bad"]}
+    kinds["counts"]["failed_labels"] = {"//:uses_bad": True, "//tc:tc": True, "//anal:anal": True}
+    kinds["counts"]["failed"] = 4
+
+    # Every line through the writer's linker, the raw log a bare path it
+    # links as the CLI's own lines are (the console and the Dashboard alike).
+    seen = []
+    tested = dict(kinds, fails = kinds["fails"] + [{"kind": "test", "label": "//t:log", "detail": "attempt 1", "run": 1, "shard": 1, "attempt": 1, "config": "", "status": "failed", "duration_ms": 0, "files": [("test.log", ("file:///out/t/log/test.log", False))]}])
+    linked = failure_summary(tested, "t-9", True, "/h/console.log", lambda l: seen.append(l) or "<" + l + ">")
+    _eq("each line linked", (len(seen), all([l.startswith("<") and l.endswith(">") for l in linked])), (len(linked), True))
+    _eq("the raw log a bare path", seen[-2].endswith("Bazel's raw log: /h/console.log"), True)
+    _eq("through report_lines too", report_lines(dict(tested, log_path = "/h/console.log", closing = [], closing_tail = [], bes_base = "", bazel_uuid = "", update = {}), "t-9", True, linked = lambda l: "L")[-1], "L")
+
+    # At 60 columns, 17 failures: every tab, the shown one whole
+    # (it lost its first letters to the tabs before it).
+    narrow = dict(kinds, tab = "failures", counts = dict(kinds["counts"], failures = ["//f:%d" % i for i in range(17)], failed_labels = {"//f:%d" % i: True for i in range(17)}), fails = [], root_causes = {"//b:b": ["//f:0"]}, logged_index = None, view = None)
+    top = [r for r in _visible(render(narrow, 60, 20)).split("\n") if r.startswith("┌─ Console")]
+    _eq("the shown tab whole at 60 columns", len(top) == 1 and "Failures ✗" in top[0], True)
+
+    # Test excerpts, from real Bazel 9.3.3 test.log shapes (w44's //t
+    # package): Bazel's preamble left out, the last attempt of the first
+    # failed shard, the other shards a line each, a timeout's two lines, a
+    # log only in the remote cache said so.
+    preamble = "exec ${PAGER:-/usr/bin/less} \"$0\" || exit 1\nExecuting tests from //t:x\n-----------------------------------------------------------------------------\n"
+    logs = {
+        "/out/t/fails/test.log": preamble + "assertion failed: want 2 got 3\n",
+        "/out/t/s/shard_1_of_3/test.log": preamble + "running shard 0 of 3\ntest_parse (shard 0) ... FAILED\nAssertionError: shard zero\n",
+        "/out/t/s/shard_3_of_3/test.log": preamble + "running shard 2 of 3\nAssertionError: shard two\n",
+        "/out/t/slow/test.log": preamble + "starting the slow suite\nwaiting on the fixture server\n-- Test timed out at 2026-11-26 23:14:08 UTC --\n",
+        "/out/t/r/test.log": preamble + "try 3: boom\n",
+    }
+
+    def _t(label, path, **kw):
+        rec = {"kind": "test", "label": label, "detail": "attempt 1", "run": 1, "shard": 1, "attempt": 1, "config": "", "status": "failed", "duration_ms": 412, "files": [("test.log", "file://" + path)]}
+        rec.update(kw)
+        return rec
+
+    # A flaky test (--flaky_test_attempts=2, r49m_flaky): failed 1 of the
+    # 2 attempts Bazel made, the passed one counted from its results.
+    flaky_rec = _t("//t:flaky", "/out/t/flaky/test.log", attempt = 1)
+    flaky_state = dict(kinds, fails = [flaky_rec], last_attempts = {("//t:flaky", "", 1, 1): 2}, test_counts = {}, spread = {})
+    _eq("failed 1 of 2 attempts", test_group(flaky_state, [flaky_rec])["details"], ["failed 1 of 2 attempts", "0.4s"])
+    _eq("without its results, of those it failed", test_group(dict(flaky_state, last_attempts = {}), [flaky_rec])["details"][0], "failed 1 of 1 attempt")
+
+    # Failed counts rows, as the summary has entries: two tests failing 3
+    # attempts each are 2, not 6.
+    attempts = [_t("//t:%s" % n, "/out/t/%s/test.log" % n, attempt = k) for n in ("x", "y") for k in (1, 2, 3)]
+    counted = dict(kinds, fails = attempts, counts = dict(new_counts(), failures = ["//t:x", "//t:y"], failed_labels = {"//t:x": True, "//t:y": True}, tests_failed = 2), test_counts = {}, spread = {}, listed_cache = None, logged_index = None, blocked_cache = None, root_causes = {}, building = False, ended = True)
+    drawn = _visible(render(counted, 140, 30))
+    _eq("Failed counts rows, not attempts", ("Failed   ✗ 2" in drawn, "Failures ✗2" in drawn), (True, True))
+
+    tests = dict(kinds, kept_errors = None, read = lambda p, n: (logs[p], 0) if p in logs else None, counts = new_counts(), root_causes = {}, fails = [
+        _t("//t:fails", "/out/t/fails/test.log"),
+        _t("//t:s", "/out/t/s/shard_3_of_3/test.log", shard = 3),
+        _t("//t:s", "/out/t/s/shard_1_of_3/test.log", shard = 1),
+        _t("//t:slow", "/out/t/slow/test.log", status = "timeout", duration_ms = 5000),
+        _t("//t:r", "/out/t/r/test.log", attempt = 1),
+        _t("//t:r", "/out/t/r/test.log", attempt = 2),
+        _t("//t:r", "/out/t/r/test.log", attempt = 3),
+        _t("//t:remote", "/nowhere", files = [("test.log", "bytestream://cache/blobs/abc/12")]),
+    ], test_counts = {("//t:s", ""): (1, 3)}, spread = {})
+    got = [_visible(l) for l in failure_summary(tests, "t-7", False, excerpt = ctx.std.excerpt)]
+    _eq("test entries", got[:-2], [
+        "── Failures (5) ──",
+        "✗ //t:fails  test · failed 1 of 1 attempt · 0.4s",
+        "  │ assertion failed: want 2 got 3",
+        "  log /out/t/fails/test.log",
+        "",
+        "✗ //t:s  test · shard 1 of 3 · failed 1 of 1 attempt · 0.4s",
+        "  │ running shard 0 of 3",
+        "  │ test_parse (shard 0) ... FAILED",
+        "  │ AssertionError: shard zero",
+        "  log /out/t/s/shard_1_of_3/test.log",
+        "  shard 3 of 3 also failed · log /out/t/s/shard_3_of_3/test.log",
+        "",
+        "✗ //t:slow  test · timed out after 5.0s",
+        "  │ waiting on the fixture server",
+        "  │ -- Test timed out at 2026-11-26 23:14:08 UTC --",
+        "  log /out/t/slow/test.log",
+        "",
+        "✗ //t:r  test · failed 3 of 3 attempts · 0.4s",
+        "  │ try 3: boom",
+        "  log /out/t/r/test.log",
+        "",
+        "✗ //t:remote  test · failed 1 of 1 attempt · 0.4s",
+        "  log is only in the remote cache",
+    ])
+
+    # Shards and --runs_per_test both: each named by both.
+    both = dict(tests, fails = [
+        _t("//t:sr", "/out/t/fails/test.log", shard = 2, run = 1),
+        _t("//t:sr", "/out/t/s/shard_3_of_3/test.log", shard = 2, run = 2),
+    ], test_counts = {("//t:sr", ""): (2, 3)})
+    _eq("shard and run", [_visible(l) for l in failure_summary(both, "t-7", False, excerpt = ctx.std.excerpt)][1:5], [
+        "✗ //t:sr  test · shard 2 of 3 · run 1 of 2 · failed 1 of 1 attempt · 0.4s",
+        "  │ assertion failed: want 2 got 3",
+        "  log /out/t/fails/test.log",
+        "  shard 2 of 3 · run 2 of 2 also failed · log /out/t/s/shard_3_of_3/test.log",
+    ])
+    _eq("a flaky test: no entry", [l for l in failure_summary(dict(tests, counts = dict(tests["counts"], flaky = {"//t:fails": True})), "t-7", False) if "//t:fails" in l], [])
+
+    # A line cut at its byte cap or its third row, `…` where; a wrapped one
+    # two cells further in; at most five lines, the rest counted.
+    _eq("three rows at most", quoted_rows("x" * 200, 40), ["x" * 40, "x" * 38, "x" * 37 + "…"])
+    words = "E: " + " ".join(["word%d" % i for i in range(12)])
+    _eq("broken at a space", quoted_rows(words, 30), ["E: word0 word1 word2 word3", "word4 word5 word6 word7", "word8 word9 word10 word11"])
+    _eq("a word wider than a row fills it, so the end is kept", quoted_rows("short " + "w" * 40, 20), ["short " + "w" * 14, "w" * 18, "w" * 8])
+
+    # //t:long at 100 columns: the message after the long
+    # name stays.
+    long_fail = "FAIL: TestLongName/case_with_a_very_long_name" + "_that_goes_on_and_on" * 9 + ": expected the frobnicator to return 42 but it returned 41"
+    _eq("the end of a long line kept", quoted_rows(long_fail, 96)[-1].endswith("it returned 41"), True)
+
+    # //two:tabs at 60 columns: tabs to 8-column stops, never past the row.
+    tabbed = quoted_rows("E:\t" + "\t".join(["col%d" % i for i in range(1, 21)]), 56)
+    _eq("tabs as spaces", ("\t" in "".join(tabbed), tabbed[0].startswith("E:      col1    col2")), (False, True))
+    _eq("each row fits", [text_width(r) <= (56 if i == 0 else 54) for i, r in enumerate(tabbed)], [True for _ in tabbed])
+
+    # Lines left out between two shown: a `│ …` row among them, counted
+    # into the one total.
+    _eq("an interior gap, counted by its row alone", excerpt_rows(["a", "b", "c"], [(1, 4)]), (["a", "\x00gap", "b", "c"], 0))
+    _eq("no gap first or last, the one after the last counted", excerpt_rows(["a"], [(0, 2), (1, 1)]), (["a"], 1))
+    _eq("five rows, the gap one of them, the end kept", excerpt_rows(["a", "b", "c", "d", "z"], [(4, 9)]), (["a", "b", "c", "\x00gap", "z"], 0))
+    _eq("past the cap: the lines after the last row", excerpt_rows(["a", "b", "c", "d", "e", "f", "g"], [(1, 2)]), (["a", "\x00gap", "b", "c", "d"], 3))
+    _eq("after a line shown already, a gap before the first is drawn", excerpt_rows(["Error in fail: x"], [(0, 4)], after_shown = True), (["\x00gap", "Error in fail: x"], 0))
+    _eq("a line going into a gap after another: one gap", excerpt_rows(["a", "b", "c", "d", "e", "f"], [(1, 2), (4, 7)]), (["a", "\x00gap", "e", "f"], 0))
+    _eq("a line saying it is a gap is a line", excerpt_rows(["a", "… 4 more lines"]), (["a", "… 4 more lines"], 0))
+    _eq("its byte cap", quoted_rows("y" * 400, 1000), ["y" * 300 + "…"])
+    many_lines = dict(kinds, counts = new_counts(), root_causes = {}, read = lambda p, n: ("x\n", 0), fails = [{"kind": "action", "label": "//a:a", "detail": "Genrule", "files": [("stderr", "file:///h/a.stderr")], "output": "o", "success": False, "exit_code": 2}])
+    long = lambda text, **kw: {"lines": ["line %d" % i for i in range(8)] + ["… 4 more lines"], "gaps": [[8, 4]]}
+    _eq("five lines, the rest counted", [_visible(l) for l in failure_summary(many_lines, "t-7", False, excerpt = long)][1:9], [
+        "✗ //a:a  Genrule · exit 2",
+        "  │ line 0",
+        "  │ line 1",
+        "  │ line 2",
+        "  │ line 3",
+        "  │ line 4",
+        "  │ … 7 more lines",
+        "  log /h/a.stderr",
+    ])
+
+    gapped = lambda text, **kw: {"lines": ["first", "… 6 more lines", "last"], "gaps": [[1, 6]]}
+    _eq("drawn as │ …, which no count after the last line repeats", [_visible(l) for l in failure_summary(many_lines, "t-7", False, excerpt = gapped)][2:6], ["  │ first", "  │ …", "  │ last", "  log /h/a.stderr"])
+
+    # Past the first five, a heading alone; past ten, counted.
+    twelve = dict(many_lines, fails = [{"kind": "action", "label": "//a:%d" % i, "detail": "Genrule", "files": [("stderr", "file:///h/a%d.stderr" % i)], "output": "o%d" % i, "success": False, "exit_code": 1} for i in range(12)])
+    capped = [_visible(l) for l in failure_summary(twelve, "t-7", False, excerpt = lambda text, **kw: {"lines": ["why"], "gaps": []})]
+    _eq("excerpts for five", len([l for l in capped if l.startswith("  │ why")]), 5)
+    _eq("then headings", capped[capped.index("✗ //a:5  Genrule · exit 1") + 1], "")
+    _eq("the rest counted", [l for l in capped if l.startswith("… and")], ["… and 2 more failures · aspect history show t-7"])
+    _eq("the heading says how many", capped[0], "── Failures (first 10 of 12) ──")
+    fewer = [_visible(l) for l in failure_summary(twelve, "t-7", False, excerpt = lambda text, **kw: {"lines": ["why"], "gaps": []}, max_entries = 3)]
+    _eq("max_entries (--console:recap-max) caps the list", (fewer[0], [l for l in fewer if l.startswith("… and")]), ("── Failures (first 3 of 12) ──", ["… and 9 more failures · aspect history show t-7"]))
+
+    # The Failures tab: one row each; the chosen one's excerpt under it,
+    # every one's with ^O, back with it again.
+    tab = dict(tests, tab = "failures", focus = "failures", list = "failures", selected = 0, view = None, excerpts = {}, excerpt = ctx.std.excerpt, logged_index = None)
+    rows = [_visible(r).rstrip() for r in failure_rows(tab, 20, 80)]
+    _eq("the chosen row's excerpt", rows[:3], ["✗ //t:fails  test · failed 1 of 1 attempt · 0.4s", "  │ assertion failed: want 2 got 3", "✗ //t:s  test · shard 1 of 3 · failed 1 of 1 attempt · 0.4s"])
+    _eq("a row a test, headed as the summary heads it", len([r for r in rows if r.startswith("✗ //t:r  ")]), 1)
+    on_key(tab, "ctrl-o", 10)
+    rows = [_visible(r) for r in failure_rows(tab, 30, 80)]
+    _eq("^O: every one's", len([r for r in rows if r.startswith("  │")]) > 3, True)
+    on_key(tab, "ctrl-o", 10)
+    _eq("^O again: the chosen one's", len([r for r in [_visible(r) for r in failure_rows(tab, 30, 80)] if r.startswith("  │")]), 1)
+
+    # `test //t:sharded //t:fails --runs_per_test=2`: ↑↓ go a
+    # row at a time, Enter opens the record the row heads, } { go in
+    # shard and run order.
+    rows_of = [
+        _t("//t:fails", "/out/t/fails/test.log", run = 2),
+        _t("//t:s", "/out/t/s/shard_3_of_3/test.log", shard = 3, run = 1),
+        _t("//t:fails", "/out/t/fails/test.log", run = 1),
+        _t("//t:s", "/out/t/s/shard_1_of_3/test.log", shard = 1, run = 2),
+        _t("//t:s", "/out/t/s/shard_1_of_3/test.log", shard = 1, run = 1),
+    ]
+    walk = dict(tab, fails = rows_of, test_counts = {("//t:fails", ""): (2, 1), ("//t:s", ""): (2, 3)}, selected = 0, excerpts = {}, listed_cache = None, logged_index = None, counts = new_counts(), view = None, views = [], ansi = ctx.std.re.compile(ANSI), controls = ctx.std.re.compile(CONTROLS))
+    listed = listed_failures(walk)
+    _eq("a row a test, its first shard and run", [(rows_of[i]["label"], rows_of[i]["shard"], rows_of[i]["run"]) for i in listed], [("//t:fails", 1, 1), ("//t:s", 1, 1)])
+    walk["selected"] = listed[0]
+    on_key(walk, "down", 10)
+    _eq("down: the next row", walk["selected"], listed[1])
+    on_key(walk, "down", 10)
+    _eq("and stays on the last", walk["selected"], listed[1])
+    on_key(walk, "up", 10)
+    on_key(walk, "enter", 10)
+    shown = walk["view"]["record"] if walk.get("view") else None
+    _eq("Enter: the row's own record", (shown["label"], shown["run"]) if shown else None, ("//t:fails", 1))
+    on_key(walk, "}", 10)
+    _eq("}: the next run", walk["view"]["record"]["run"], 2)
+    walk.update(selected = listed[1], view = None, views = [], focus = "failures")
+    on_key(walk, "enter", 10)
+    _eq("Enter on the sharded row", (walk["view"]["record"]["shard"], walk["view"]["record"]["run"]), (1, 1))
+    order = []
+    for _ in range(4):
+        on_key(walk, "}", 10)
+        order.append((walk["view"]["record"]["shard"], walk["view"]["record"]["run"]))
+    _eq("} in shard and run order", order, [(1, 2), (3, 1), (1, 1), (1, 2)])
+
+    # An analysis failure Bazel reports as its own (an Aborted
+    # configured_label): what Bazel gave, when no error names it.
+    analysed = dict(kinds, fails = [{"kind": "target", "label": "//anal:broken", "detail": "analysis", "description": "in genrule rule //anal:broken: missing srcs", "pattern": False, "files": [("error", ("in genrule rule //anal:broken: missing srcs", False))], "output": "", "success": False}], counts = new_counts(), root_causes = {})
+    _eq("analysis failed", [_visible(l) for l in failure_summary(analysed, "t-9", False)][:3], ["── Failures (1) ──", "✗ //anal:broken  analysis", "  │ in genrule rule //anal:broken: missing srcs"])
+
+    # ] and [ step over the Failures list's rows in its order, Bazel's other
+    # errors among them, round to the first again.
+    other = "\x1b[31m\x1b[1mERROR: \x1b[0msyntax/BUILD.bazel:2:1: syntax error at 'newline'\n"
+    stepping = _screen(ctx, ["x"], fails = [{"kind": "action", "label": "//s:a", "detail": "Genrule", "files": [], "output": "o", "success": False}], building = False, ended = True, ansi = ctx.std.re.compile(ANSI), collected_errors = {"blocks": [_headed({"kind": "error", "text": other})], "not_kept": 0, "stdout": False, "color": True})
+    seen = []
+    for _ in range(3):
+        on_key(stepping, "]", 10)
+        seen.append(stepping["view"]["title"])
+    _eq("] steps over every row, an other error's too", seen, ["//s:a · Genrule", "Other error from Bazel", "//s:a · Genrule"])
+    on_key(stepping, "[", 10)
+    _eq("[ steps back", stepping["view"]["title"], "Other error from Bazel")
+
+    # Bazel's events carry UTF-8 as Latin-1: decoded back; other text kept.
+    _eq("decoded", repaired("//ar2:usesl\u00d0\u00b5"), "//ar2:usesl\u0435")
+    _eq("ASCII as it is", repaired("//a:b"), "//a:b")
+    _eq("not UTF-8: as it is", repaired("caf\u00e9"), "caf\u00e9")
+    _eq("real non-Latin-1 text: as it is", repaired("\u0435"), "\u0435")
+
+    # A passing run: the counts line alone, no rule.
+    passing = dict(kinds, fails = [], counts = dict(new_counts(), built = 3), root_causes = {})
+    _eq("a passing run", [_visible(l) for l in failure_summary(passing, "t-9", False, "/h/console.log")], ["3 built, 0 failed · 0 tests passed, 0 failed · Bazel's raw log: /h/console.log", "All of it: aspect history show t-9"])
+
+    many = dict(done, fails = [dict(done["fails"][0], label = "//a:b%d" % i) for i in range(14)], kept_errors = None)
+    _eq("capped, counted", [l for l in report_lines(many, "t-1", False) if l.startswith("──")], ["── Failures (first 10 of 14) ──"])
+    _eq("under the Dashboard too, by --console:recap-max", [l for l in report_lines(many, "t-1", False, max_entries = 4) if l.startswith("──")], ["── Failures (first 4 of 14) ──"])
+    stopped = dict(done, inv = {"build_finished": struct(exit_code = struct(name = "INTERRUPTED", code = 8))}, cancelling = False)
+    _eq("an interrupted build's counts say so", [l for l in report_lines(stopped, "t-3", False) if " built, " in l][0].startswith("interrupted · "), True)
+    late = dict(done, cancelling = True, inv = {"build_finished": struct(exit_code = struct(name = "SUCCESS", code = 0))})
+    _eq("a task cancelled before it returned, its build done", [l for l in report_lines(late, "t-5", False) if " built, " in l][0].startswith("interrupted · "), True)
+    _eq("q or Enter on the finished screen is no interruption", [l for l in report_lines(dict(late, cancelling = False, ended = True), "t-8", False) if " built, " in l][0].startswith("interrupted"), False)
+    _eq("a Ctrl+C between a build task's builds is", [l for l in report_lines(dict(late, task = "build", builds = [{}]), "t-7", False) if " built, " in l][0].startswith("interrupted · "), True)
+    _eq("one before it finished is", [l for l in report_lines(dict(done, cancelling = True, inv = {}), "t-6", False) if " built, " in l][0].startswith("interrupted · "), True)
+    _eq("a finished one's do not", [l for l in report_lines(dict(done, cancelling = False, inv = {"build_finished": struct(exit_code = struct(name = "BUILD_FAILURE", code = 1))}), "t-4", False) if " built, " in l][0].startswith("interrupted"), False)
+
+    # Small terminals: counts whole, the title kept, an action's age kept,
+    # the keys row always there.
+    small = _screen(ctx, ["INFO: x"], task = "build", phase = "", start_ms = 0, now_ms = 0, frames = 0, pages = [], ended = False, progress = ["[3 / 9] 2 actions running", "    Executing genrule //examples/full_screen:broken; 2s darwin-sandbox"])
+    small["counts"] = dict(new_counts(), configured = 3, built = 2, failed = 1)
+    small["fails"] = [{"kind": "action", "label": "//examples/full_screen:broken", "detail": "Genrule", "files": [], "output": "o", "success": False}]
+    at80 = _visible(render(small, 80, 24))
+    _eq("the counts whole at 80", "2 built, 1 failed" in at80, True)
+    _eq("the title kept", "aspect build" in _visible(render(small, 40, 12)).split("\n")[0], True)
+    _eq("the bar's counts not repeated in the header", "[3 / 9]" in _visible(render(small, 80, 24)).split("\n")[0], False)
+    _eq("an action's age kept", action_row("Executing genrule //examples/full_screen:broken; 2s darwin-sandbox", 30).endswith("2s darwin-sandbox"), True)
+    _eq("cut in the middle", "…" in action_row("Executing genrule //examples/full_screen:broken; 2s darwin-sandbox", 30), True)
+    for cols, rows in [(40, 10), (40, 12), (60, 14), (80, 24)]:
+        drawn = _visible(render(small, cols, rows)).split("\n")
+        _eq("the keys row at %dx%d" % (cols, rows), "? keys" in drawn[-1] or "keys" in drawn[-1], True)
+        _eq("the console at %dx%d" % (cols, rows), len([r for r in drawn if "INFO: x" in r]), 1)
+
+    redraw = _screen(ctx, [], drawn = "frame")
+    on_key(redraw, "ctrl-l", 10)
+    _eq("Ctrl+L redraws", redraw["drawn"], None)
+
+    # Long lines wrap (the default), `w` cuts them; a log too.
+    _eq("wrapped by cells", wrap_line("abcdefgh", 3), [("abc", 0), ("def", 3), ("gh", 6)])
+    _eq("a wide character kept whole", wrap_line("ab✅c", 3), [("ab", 0), ("✅c", 2)])
+    _eq("an empty line is a row", wrap_line("", 5), [("", 0)])
+    long = "src/a.cc:1:2: error: " + "x" * 100 + " THE_END"
+    wide = _screen(ctx, ["INFO: before", long], task = "build", phase = "", start_ms = 0, now_ms = 0, frames = 0, pages = [], ended = False, zoom = True)
+    drawn = _visible(render(wide, 40, 12))
+    _eq("its end shows", "THE_END" in drawn, True)
+    on_key(wide, "w", 10)
+    _eq("w cuts it", ("THE_END" in _visible(render(wide, 40, 12)), wide["wrap"]), (False, False))
+    on_key(wide, "w", 10)
+    many_long = _screen(ctx, ["line %d " % i + "y" * 60 for i in range(20)], task = "build", phase = "", start_ms = 0, now_ms = 0, frames = 0, pages = [], ended = False, zoom = True)
+    on_key(many_long, "K", 10)
+    top = _visible(render(many_long, 40, 12)).split("\n")
+    _eq("at the top, the oldest line from its first row", len([r for r in top if "line 0 " in r]), 1)
+    linked_long = _screen(ctx, ["see https://x.test/" + "a" * 60], task = "build", phase = "", start_ms = 0, now_ms = 0, frames = 0, pages = [], ended = False, zoom = True, line_links = {"see https://x.test/" + "a" * 60: [[4, 79, "https://x.test/" + "a" * 60]]})
+    linked_rows = render(linked_long, 40, 12)
+    _eq("a link carried onto each of its rows", linked_rows.count("\x1b]8;;https://x.test/"), 3)
+    linked_long.update(ansi = ctx.std.re.compile(ANSI), env = _fake_env({}), process = _fake_process(["pbcopy"], ran))
+    ran.clear()
+    first = linked_long["pane"][0]
+    on_key(linked_long, "mouse-press:0:%d" % first, 10)
+    on_key(linked_long, "mouse-drag:39:%d" % (first + 2), 10)
+    on_key(linked_long, "mouse-release:39:%d" % (first + 2), 10)
+    _eq("a wrapped line copies as one", ran[-1][1], ["see https://x.test/" + "a" * 60])
+
+    # A flaky test's failed attempt is not a red ✗; a timeout says so.
+    tests = _screen(ctx, [], test_counts = {}, spread = {})
+    flaky_attempt = failure_of("test_result", struct(label = "//t:flaky", attempt = 1, run = 1, shard = 1, configuration = struct(id = "c")), struct(status = "FAILED", test_attempt_duration_millis = 120, test_action_output = []))
+    timed_out = failure_of("test_result", struct(label = "//t:slow", attempt = 1, run = 1, shard = 1, configuration = struct(id = "c")), struct(status = "TIMEOUT", test_attempt_duration_millis = 4012, test_action_output = []))
+    tests["fails"] = [flaky_attempt, timed_out]
+    tests["counts"]["flaky"] = {"//t:flaky": True}
+    rows = failure_rows(tests, 4, 100)
+    _eq("flaky drawn as such", (rows[0].startswith(_role("warning") + "~"), "flaky, passed on a later attempt" in rows[0]), (True, True))
+    _eq("a timeout says how long", "test · timed out after 4.0s" in rows[1], True)
+
+    # The finished screen's slowest actions and critical path.
+    timed = _screen(ctx, [], task = "build", phase = "", start_ms = 0, now_ms = 0, frames = 0, pages = [], ended = False)
+    note_progress(timed, ["[1 / 3] 2 actions running", "    Compiling a.cc; 3s local", "    Linking b; 1s local"])
+    note_progress(timed, ["[2 / 3] 1 action running", "    Compiling a.cc; 9s local"])
+    add_lines(timed, ["INFO: Elapsed time: 12.0s, Critical Path: 9.2s"])
+    _eq("the slowest, not the critical path", slowest_rows(timed), ["Compiling a.cc; 9s", "Linking b; 1s"])
+    _eq("the critical path in the Results pane", "Critical path 9.2s" in _visible(render(dict(timed, ended = True, task = "build", phase = "", start_ms = 0, now_ms = 0, frames = 0, progress = [], pages = []), 120, 30)), True)
+    timed.update(ended = True, progress = [])
+    _eq("shown once the build is done", "Slowest" in _visible(render(timed, 100, 30)), True)
+    for i in range(8):
+        note_progress(timed, ["[2 / 3] 1 action running", "    Step %d; %ds local" % (i, i + 1)])
+    _eq("its overflow counted from what it lists", [r for r in _visible(render(timed, 60, 14)).split("\n") if "more" in r and "-" in r], [])
+
+    # A successful action's output folds under its INFO: From; Ctrl+O shows it.
+    fold = _screen(ctx, [], task = "build", phase = "", start_ms = 0, now_ms = 0, frames = 0, pages = [], ended = False, zoom = True)
+    add_lines(fold, ["INFO: From Compiling a.cc:", "a.cc:1: warning: x", "a.cc:2: note: y", "INFO: Build completed", "ERROR: b failed", "b.cc:1: error: z"])
+    drawn = _visible(render(fold, 80, 14))
+    _eq("folded to a count", ("+2 lines (Ctrl+O shows them)" in drawn, "warning: x" in drawn, "b.cc:1: error: z" in drawn), (True, False, True))
+    on_key(fold, "ctrl-o", 10)
+    _eq("Ctrl+O shows them", "a.cc:1: warning: x" in _visible(render(fold, 80, 14)), True)
+    on_key(fold, "ctrl-o", 10)
+
+    # A click on a fold's count, or its INFO: From, shows just its lines,
+    # that line kept where it was; again folds them. What clicks opened
+    # holds as lines come and the view scrolls; Ctrl+O shows every one and
+    # forgets them, so folding again folds all.
+    def _click(st, text):
+        rows = _visible(render(st, 80, 20)).split("\n")
+        at = [i for i, r in enumerate(rows) if text in r]
+        on_key(st, "mouse-press:10:%d" % at[0], 10)
+        on_key(st, "mouse-release:10:%d" % at[0], 10)
+        return at[0]
+
+    def _row_of_text(st, text):
+        rows = _visible(render(st, 80, 20)).split("\n")
+        return [i for i, r in enumerate(rows) if text in r]
+
+    blocks = _screen(ctx, [], task = "build", phase = "", start_ms = 0, now_ms = 0, frames = 0, pages = [], ended = False, zoom = True, mouse = True)
+    add_lines(blocks, ["INFO: From Compiling a.cc:", "a.cc:1: warning: x", "a.cc:2: note: y", "INFO: From Compiling b.cc:", "b.cc:1: warning: w", "INFO: Build completed"])
+    _eq("a click says so", _row_of_text(blocks, "+2 lines (click or Ctrl+O shows them)") != [], True)
+    before = _row_of_text(blocks, "INFO: From Compiling a.cc:")
+    _click(blocks, "+2 lines (click")
+    shown = _visible(render(blocks, 80, 20))
+    _eq("just that block shown", ("a.cc:2: note: y" in shown, "b.cc:1: warning: w" in shown, "+1 line (click" in shown), (True, False, True))
+    _eq("its line kept where it was", _row_of_text(blocks, "INFO: From Compiling a.cc:"), before)
+    _eq("the toggle's note", "expanded · click again to fold" in _visible(keys_row(blocks, 120)), True)
+    add_lines(blocks, ["more %d" % i for i in range(30)])
+    blocks["scroll"] = 0
+    _eq("kept open as lines come and the view scrolls", "a.cc:2: note: y" in "\n".join(shown_lines(blocks)), True)
+    blocks["scroll"] = len(shown_lines(blocks)) - 10
+    _click(blocks, "+1 line (click")
+    _eq("two open", ("a.cc:1: warning: x" in "\n".join(shown_lines(blocks)), "b.cc:1: warning: w" in "\n".join(shown_lines(blocks))), (True, True))
+    _click(blocks, "INFO: From Compiling a.cc:")
+    _eq("a click on its INFO: From folds it again", ("a.cc:1: warning: x" in "\n".join(shown_lines(blocks)), "b.cc:1: warning: w" in "\n".join(shown_lines(blocks))), (False, True))
+    on_key(blocks, "ctrl-o", 10)
+    on_key(blocks, "ctrl-o", 10)
+    _eq("Ctrl+O twice folds every one again", ("a.cc:1: warning: x" in "\n".join(shown_lines(blocks)), "b.cc:1: warning: w" in "\n".join(shown_lines(blocks))), (False, False))
+
+    # Only in the console: a click on a row of another tab is no fold's.
+    tabbed = _screen(ctx, [], zoom = True, mouse = True)
+    add_lines(tabbed, ["INFO: From x:", "y1", "y2", "INFO: Build completed"])
+    fold_row = _row_of_text(tabbed, "+2 lines")[0]
+    tabbed["tab"] = "metrics"
+    render(tabbed, 80, 20)
+    on_key(tabbed, "mouse-press:10:%d" % fold_row, 10)
+    on_key(tabbed, "mouse-release:10:%d" % fold_row, 10)
+    _eq("no fold toggled from Metrics", tabbed.get("fold_open"), {})
+
+    # With long lines wrapped, scrolled up: the clicked line keeps its row.
+    wrapped = _screen(ctx, [], zoom = True, mouse = True)
+    add_lines(wrapped, ["a%d" % i for i in range(10)] + ["INFO: From w:"] + ["w" * 150 + " %d" % i for i in range(3)] + ["INFO: Build completed"] + ["v" * 150 + " %d" % i for i in range(30)])
+    wrapped["scroll"] = 26
+    before = _row_of_text(wrapped, "INFO: From w:")
+    _click(wrapped, "+3 lines")
+    after = _row_of_text(wrapped, "INFO: From w:")[0]
+    _eq("its row kept with lines wrapped (a row off at most)", abs(after - before[0]) <= 1, True)
+    _click(wrapped, "INFO: From w:")
+    _eq("and folding again", abs(_row_of_text(wrapped, "INFO: From w:")[0] - after) <= 1, True)
+    unwrapped = dict(wrapped, wrap = False)
+    before = _row_of_text(unwrapped, "INFO: From w:")
+    _click(unwrapped, "+3 lines")
+    _eq("exactly, with lines cut", _row_of_text(unwrapped, "INFO: From w:"), before)
+
+    # Following, it goes on following.
+    tail = _screen(ctx, [], zoom = True, mouse = True)
+    add_lines(tail, ["INFO: From t:", "t1", "t2"])
+    _click(tail, "+2 lines")
+    _eq("still following", tail["scroll"], 0)
+
+    # An INFO: From with nothing under it yet: no claim, nothing opened.
+    bare = _screen(ctx, [], zoom = True, mouse = True)
+    add_lines(bare, ["INFO: From b:"])
+    _click(bare, "INFO: From b:")
+    _eq("nothing to expand", (bare["note"], bare["fold_open"]), ("", {}))
+    add_lines(bare, ["b1", "b2"])
+    _eq("its lines come folded", "  … +2 lines (click or Ctrl+O shows them)" in shown_lines(bare), True)
+
+    plain_rows = _screen(ctx, [], zoom = True, mouse = False)
+    add_lines(plain_rows, ["INFO: From x:", "y"])
+    _eq("without the mouse, only Ctrl+O named", "  … +1 line (Ctrl+O shows them)" in shown_lines(plain_rows), True)
+    _eq("the overlay names the click", any(["show or fold its lines" in r for r in help_rows(blocks)]), True)
+
+    fold["filter"] = "warnings"
+    _eq("a tool's warning under INFO: From is no warning of Bazel's", "a.cc:1: warning: x" in _visible(render(fold, 80, 14)), False)
+
+    # A jump to a match lands on it with long lines wrapped.
+    wrapped = _screen(ctx, ["short %d" % i for i in range(40)] + ["needle here"] + ["x" * 300] * 59, task = "build", phase = "", start_ms = 0, now_ms = 0, frames = 0, pages = [], ended = False, zoom = True)
+    page = console_height(wrapped, 80, 30)
+    on_key(wrapped, "/", page)
+    for c in "needle".elems():
+        on_key(wrapped, c, page)
+    _eq("the wrapped jump shows its match", "needle here" in _visible(render(wrapped, 80, 30)), True)
+    on_key(wrapped, "enter", page)
+    jumped_scroll = wrapped["scroll"]
+    for _ in range(30):
+        on_key(wrapped, "down", page)
+        render(wrapped, 80, 30)
+    _eq("then the keys scroll away from it", wrapped["scroll"] < jumped_scroll, True)
+    on_key(wrapped, "K", page)
+    render(wrapped, 80, 30)
+    _eq("and g reaches the top", "short 0" in _visible(render(wrapped, 80, 30)), True)
+
+    # The match stays drawn on the frames after its jump, and a resize
+    # centres it again.
+    def _held(log, query, steps, label):
+        st = _screen(ctx, log, task = "build", phase = "", start_ms = 0, now_ms = 0, frames = 0, pages = [], ended = False)
+        page = console_height(st, 80, 30)
+        render(st, 80, 30)
+        on_key(st, "/", page)
+        for c in query.elems():
+            on_key(st, c, page)
+            render(st, 80, 30)
+        on_key(st, "enter", page)
+        for key in [None] + steps:
+            if key:
+                on_key(st, key, page)
+            current = st["log"][len(st["log"]) - 1 - st["search"]["back"]]
+            for frame in range(3):
+                _eq("%s: %s on frame %d after %s" % (label, current, frame + 1, key or "the jump"), current[:20] in _visible(render(st, 80, 30)), True)
+        return st
+
+    _held(["x" * 800] * 20 + ["needle here"] + ["y" * 800] * 20, "needle", [], "long lines")
+    stepped = _held([("hit %d " % i) + "z" * 290 if i % 7 == 0 else "w" * 300 for i in range(120)], "hit", ["N"] * 6, "stepping")
+    current = stepped["log"][len(stepped["log"]) - 1 - stepped["search"]["back"]]
+
+    # A match taller than the pane: each ↓ after the jump shows a newer line.
+    tall = _held(["short %d" % i for i in range(30)] + ["needle " + "t" * 3000] + ["s%d" % i for i in range(60)], "needle", [], "a tall match")
+    page = console_height(tall, 80, 30)
+    seen = []
+    for _ in range(25):
+        on_key(tall, "down", page)
+        drawn = _visible(render(tall, 80, 30))
+        newest = -1
+        for i in range(60):
+            if ("│ s%d " % i) in drawn:
+                newest = i
+        seen.append(newest)
+    _eq("↓ moves the view every press", [seen[i] > seen[i - 1] for i in range(1, len(seen)) if seen[i - 1] < 59], [True] * len([1 for i in range(1, len(seen)) if seen[i - 1] < 59]))
+    _eq("resized, still shown", current[:20] in _visible(render(stepped, 60, 20)), True)
+    _eq("and after", current[:20] in _visible(render(stepped, 60, 20)), True)
+
+    # A search from a folded view starts where the view was, in lines.
+    origin = _screen(ctx, [], task = "build", phase = "", start_ms = 0, now_ms = 0, frames = 0, pages = [], ended = False, zoom = True)
+    lines = ["A match"]
+    for b in range(50):
+        lines += ["INFO: From Step %d:" % b] + [("C match" if b == 30 and i == 4 else "out %d %d" % (b, i)) for i in range(8)]
+    add_lines(origin, lines)
+    origin["scroll"] = 60
+    page = console_height(origin, 80, 30)
+    on_key(origin, "/", page)
+    _eq("the origin in lines", origin["search"]["origin"] > 60, True)
+    for c in "match".elems():
+        on_key(origin, c, page)
+    _eq("jumps to the match above the view, not the one below it", origin["log"][len(origin["log"]) - 1 - origin["search"]["back"]], "A match")
+    on_key(origin, "esc", page)
+    _eq("Esc goes back to the folded view's own scroll", origin["scroll"], 60)
+
+    # Many tests: Bazel's closing block keeps its head and its tail, the
+    # `Executed` line among them; a flaky test is no failure.
+    many_tests = _screen(ctx, [], log_path = "", bes_base = "", bazel_uuid = "", update = {}, read = lambda p, n: None, exec_root = "", output_dirs = {}, last_attempts = {})
+    add_lines(many_tests, ["INFO: Elapsed time: 9.0s, Critical Path: 8.0s"] + ["//t:t%d   PASSED in 0.1s" % i for i in range(300)] + ["Executed 300 out of 300 tests: 300 tests pass."])
+    report = report_lines(many_tests, "t-2", False)
+    _eq("the Executed line kept", "Executed 300 out of 300 tests: 300 tests pass." in report, True)
+    _eq("the rest counted", [l for l in report if l.startswith("… ") and "more of Bazel's lines" in l] != [], True)
+    flaky_report = _screen(ctx, [], log_path = "", bes_base = "", bazel_uuid = "", update = {}, read = lambda p, n: None, exec_root = "", output_dirs = {}, last_attempts = {})
+    flaky_report["fails"] = [failure_of("test_result", struct(label = "//t:f", attempt = 1, run = 1, shard = 1, configuration = struct(id = "c")), struct(status = "FAILED", test_action_output = []))]
+    flaky_report["counts"]["flaky"] = {"//t:f": True}
+    lines = report_lines(flaky_report, "t-3", False)
+    _eq("flaky, not failed", ("Failed:" in lines, "Flaky (passed on a later attempt):" in lines, "  ~ //t:f  attempt 1" in lines), (False, True, True))
+
+    # When the screen refuses the terminal, and says why.
+    def _std(env = {}, size = (100, 30), tty = True):
+        return struct(
+            io = struct(stdout = struct(is_tty = tty), stderr = struct(is_tty = tty)),
+            env = _fake_env(env),
+            term = struct(size = lambda: size),
+        )
+
+    human = {"TERM": "xterm-256color"}
+    _eq("a person's terminal", refusal(_std(human)), "")
+    _eq("not a terminal", refusal(_std(human, tty = False)), None)
+    _eq("CI", refusal(_std(dict(human, CI = "true"))), None)
+    _eq("an agent's pty", "coding agent" in refusal(_std(dict(human, CURSOR_AGENT = "1"))), True)
+    _eq("Claude Code's", "coding agent" in refusal(_std(dict(human, CLAUDECODE = "1"))), True)
+    _eq("a dumb terminal", refusal(_std({"TERM": "dumb"})), "dashboard off: TERM is dumb; Bazel's console is shown instead")
+    _eq("no TERM", "TERM is not set" in refusal(_std({})), True)
+    _eq("too small", "39x30, under 40x12" in refusal(_std(human, size = (39, 30))), True)
+
+    # A target Bazel did not build because a dependency failed: named as
+    # blocked, chosen like a failure, its root cause's log on Enter.
+    _eq("blocked by a name in its package", blocked_text("//a:demo", ["//a:broken"]), "blocked by :broken")
+    _eq("by a label in another, and more", blocked_text("//a:demo", ["//b:x", "//c:y"]), "blocked by //b:x and 1 more")
+    rec = {"kind": "action", "label": "//a:broken", "detail": "Genrule", "files": [], "output": "", "success": False}
+    blocked = _screen(ctx, [], fails = [rec], root_causes = {"//a:demo": ["//a:broken"]}, focus = "failures")
+    blocked["counts"]["failures"] = ["//a:broken", "//a:demo"]
+
+    # Bazel's target_completed for it (not success) counted it failed.
+    blocked["counts"]["failed"] = 1
+    blocked["counts"]["failed_labels"] = {"//a:demo": True}
+    rows = [_visible(r) for r in failure_rows(blocked, 5, 60)]
+    _eq("the blocked row", "○ //a:demo  blocked by :broken" in rows[1], True)
+    on_key(blocked, "down", 10)
+    _eq("chosen like a failure", blocked["selected"], 1)
+    on_key(blocked, "enter", 10)
+    _eq("Enter shows what blocks it", (blocked["selected"], blocked["view"]["record"]["label"]), (0, "//a:broken"))
+    report = [_visible(l) for l in report_lines(dict(blocked, read = lambda p, n: None, build = None, bes_base = "", bazel_uuid = "", update = {}, log_path = ""), "id1", False)]
+    _eq("under its root cause in the summary", [l for l in report if "blocked" in l and "○" in l], ["  ○ blocked: //a:demo"])
+    _eq("not counted as a root cause", [l for l in report if l.startswith("──")], ["── Failures (1) ──"])
+    _eq("its summary counts it blocked, its root failed", [l for l in report if l.startswith("0 built")], ["0 built, 1 failed, 1 blocked · 0 tests passed, 0 failed"])
+    targets = [_visible(l) for l in metrics_lines(blocked) if "built" in _visible(l) or "listed" in _visible(l)]
+    _eq("Metrics' targets by the same counts", [" ".join(l.split()) for l in targets], ["built 0 · 1 failed · 1 blocked by a dependency", "failures listed 1 (as in Failures)"])
+
+    # A test whose summary is Aborted with no reason: failed where one of
+    # its attempts failed (it failed to build), skipped where none ran (a
+    # build without --keep_going stopped first); an interrupt is no verdict.
+    aborted_tests = new_counts()
+    count_event(aborted_tests, "test_result", struct(label = "//t:built_badly", configuration = struct(id = "c")), struct(status = "failed_to_build"))
+    count_aborted_test(aborted_tests, "//t:built_badly", "unknown", "c")
+    count_aborted_test(aborted_tests, "//t:never_ran", "unknown", "c")
+    count_aborted_test(aborted_tests, "//t:stopped", "user_interrupted", "c")
+    _eq("an aborted test summary", (aborted_tests["tests_failed"], aborted_tests["failures"], aborted_tests["tests_skipped"]), (1, ["//t:built_badly"], 1))
+
+    # One attempt Bazel posts twice is one row, the one with a log; a failed
+    # TestRunner action stands for the run and shard its output names
+    # (this order is a recorded sharded build's, oldshard_flaky, run 1 shard 2 and run
+    # 1 shard 1, as Bazel 9 sends them), never listed once an attempt of
+    # them has come with its log.
+    out = "bazel-out/darwin_arm64-fastbuild/testlogs/examples/r29tmp/oldshard_flaky/"
+    lab = "//examples/r29tmp:oldshard_flaky"
+    log = [struct(name = "test.log", file = struct(uri = "file:///x/test.log"))]
+    runner = struct(success = False, type = "TestRunner", stderr = struct(file = struct(contents = "boom")))
+
+    def _result(run, shard, attempt, status, files):
+        return (struct(label = lab, run = run, shard = shard, attempt = attempt, configuration = struct(id = "c")), struct(status = status, test_action_output = files))
+
+    def _runner(folder):
+        return (struct(label = lab, primary_output = out + folder + "/test.log", configuration = struct(id = "c")), runner)
+
+    real = _screen(ctx, ["x"])
+    for kind, (eid, payload) in [
+        ("test_result", _result(1, 2, 1, "FAILED", log)),
+        ("test_result", _result(1, 1, 1, "FAILED", log)),
+        ("action_completed", _runner("shard_1_of_2_run_1_of_2")),
+        ("test_result", _result(1, 2, 2, "FAILED", log)),
+        ("action_completed", _runner("shard_2_of_2_run_1_of_2")),
+        ("test_result", _result(1, 1, 1, "FAILED_TO_BUILD", [])),
+        ("test_result", _result(1, 2, 1, "FAILED_TO_BUILD", [])),
+        ("test_result", _result(1, 2, 3, "NO_STATUS", [])),
+        ("test_result", _result(1, 1, 2, "NO_STATUS", [])),
+    ]:
+        note_event(real, kind, eid, payload, False)
+    rows = [(r["kind"], r.get("run"), r.get("shard"), r.get("attempt"), r.get("attempt_key")) for r in real["fails"]]
+    _eq("each attempt once; an action of a run and shard with a log not listed", rows, [
+        ("test", 1, 2, 1, None),
+        ("test", 1, 1, 1, None),
+        ("test", 1, 2, 2, None),
+    ])
+    first = _screen(ctx, ["x"])
+    note_event(first, "action_completed", _runner("shard_2_of_2_run_1_of_2")[0], runner, False)
+    note_event(first, "test_result", _result(1, 2, 1, "FAILED", log)[0], _result(1, 2, 1, "FAILED", log)[1], False)
+    _eq("an action folded once its attempt comes with its log", [r["kind"] for r in first["fails"]], ["test"])
+
+    # A recorded sharded build, combo: a shard that failed to build, its action (the
+    # only log) before its result, which has none: one row, the action's.
+    combo = _screen(ctx, ["x"])
+    combo_out = "bazel-out/darwin_arm64-fastbuild/testlogs/examples/r29tmp/combo/shard_1_of_2_run_1_of_2/test.log"
+    note_event(combo, "action_completed", struct(label = "//examples/r29tmp:combo", primary_output = combo_out, configuration = struct(id = "c")), runner, False)
+    note_event(combo, "test_result", struct(label = "//examples/r29tmp:combo", run = 1, shard = 1, attempt = 1, configuration = struct(id = "c")), struct(status = "FAILED_TO_BUILD", test_action_output = []), False)
+    _eq("a shard that failed to build: the action's row alone", [r["kind"] for r in combo["fails"]], ["action"])
+
+    # The folder after testlogs/<package>/<name>/ alone names the run and
+    # shard: not a test named like one, nor a package folder.
+    def _place(label, path):
+        st = _screen(ctx, ["x"])
+        note_event(st, "action_completed", struct(label = label, primary_output = path), runner, False)
+        return st["fails"][0]["attempt_key"]
+
+    _eq("a test named shard_9_x", _place("//p:shard_9_x", "bazel-out/k8/testlogs/p/shard_9_x/test.log"), ("//p:shard_9_x", "", 1, 1))
+    _eq("a package folder run_2", _place("//run_2/p:t", "bazel-out/k8/testlogs/run_2/p/t/shard_2_of_3/test.log"), ("//run_2/p:t", "", 1, 2))
+
+    # Metrics' spawns: after the build until its execution log is read, then
+    # what it held, none included.
+    reading = _screen(ctx, ["x"])
+    spawns = lambda st: [" ".join(_visible(l).split()) for l in metrics_lines(st) if "spawns" in _visible(l)]
+    _eq("spawns before the log is read", spawns(reading), ["spawns after the build, from its execution log"])
+    reading["exec_log_read"] = True
+    _eq("a log with none", spawns(reading), ["spawns 0 run: the execution log has none"])
+
+    # The caller's own binary or JSON log: Bazel writes no compact one, so
+    # the Dashboard read none; Results shows no cache row.
+    own = _screen(ctx, ["x"], exec_log_read = True, inv = {"options_parsed": struct(cmd_line = ["--keep_going", "--execution_log_binary_file=/tmp/x.binlog"], explicit_cmd_line = [])})
+    _eq("spawns beside the caller's log", spawns(own), ["spawns not read: this build writes its own execution log (--execution_log_binary_file)"])
+    _eq("no cache row in Results", "Cached" in _visible(render(own, 120, 30)), False)
+    for flags, want in [
+        (["--execution_log_binary_file="], None),
+        (["--execution_log_binary_file=/tmp/rc.binlog", "--execution_log_binary_file="], None),
+        (["--execution_log_json_file=", "--execution_log_json_file=/tmp/x.json"], "--execution_log_json_file"),
+
+        # As the CLI's `other_format` reads them: false words and `--no` are
+        # none, the bare flag and true words one.
+        (["--execution_log_binary_file=false"], None),
+        (["--execution_log_binary_file=/tmp/rc.binlog", "--noexecution_log_binary_file"], None),
+        (["--execution_log_json_file=0"], None),
+        (["--execution_log_binary_file"], "--execution_log_binary_file"),
+        (["--execution_log_binary_file=true"], "--execution_log_binary_file"),
+        (["--noexecution_log_json_file", "--execution_log_json_file=/tmp/x.json"], "--execution_log_json_file"),
+    ]:
+        _eq("the caller's own log from %r" % flags, own_execution_log({"options_parsed": struct(cmd_line = flags, explicit_cmd_line = [])}), want)
+
+    # A cached build's slowest pane: that nothing ran, not an empty box, only
+    # where the build succeeded and its metrics say so: not mid-build, nor
+    # after a failed one.
+    def _metrics(executed, misses):
+        return struct(action_summary = struct(actions_executed = executed, action_cache_statistics = struct(hits = 0, misses = misses)))
+
+    # A fully cached rebuild still runs the workspace
+    # status action, which Bazel runs on every build.
+    cached5 = struct(action_summary = struct(
+        actions_executed = 1,
+        action_data = [
+            struct(mnemonic = "BazelWorkspaceStatusAction", actions_executed = 1, actions_created = 1),
+            struct(mnemonic = "TestRunner", actions_created = 17),
+            struct(mnemonic = "Genrule", actions_created = 4),
+        ],
+        runner_count = [struct(name = "total", count = 1), struct(name = "internal", count = 1)],
+        action_cache_statistics = struct(misses = 1),
+    ))
+
+    success = struct(exit_code = struct(name = "SUCCESS", code = 0))
+    failure = struct(exit_code = struct(name = "BUILD_FAILURE", code = 1))
+    cases = [
+        ("a cached build", dict(building = False, inv = {"build_finished": success, "build_metrics": cached5}), ["nothing ran: every action was cached"]),
+        ("a build that ran a Genrule", dict(building = False, inv = {"build_finished": success, "build_metrics": struct(action_summary = struct(actions_executed = 2, action_data = [struct(mnemonic = "BazelWorkspaceStatusAction", actions_executed = 1), struct(mnemonic = "Genrule", actions_executed = 1)]))}), []),
+        ("mid-build", dict(building = True, inv = {}), []),
+        ("a failed build", dict(building = False, inv = {"build_finished": failure, "build_metrics": _metrics(1, 1)}), []),
+    ]
+    for what, kw, want in cases:
+        _eq("slowest: " + what, [_visible(r) for r in slowest_rows(_screen(ctx, [], critical = "a.cc 1s", **kw))], want)
+
+    # Drawn in the finished pane, the row is as wide as the others.
+    cached_screen = _screen(ctx, [], critical = "a.cc 1s", ended = True, building = False, inv = {"build_finished": success, "build_metrics": cached5})
+    end_build(cached_screen, 1000)
+    framed = [r for r in render(cached_screen, 100, 30).split("\n") if "nothing ran" in _visible(r)]
+    _eq("the nothing-ran row's width", [text_width(_visible(r).rstrip("\r")) for r in framed], [100])
+    mid = _screen(ctx, ["x"], building = True)
+    _eq("Metrics keeps no Slowest mid-build", any(["Slowest" in _visible(l) for l in metrics_lines(mid)]), False)
+
+    # Blocked only by a dependency that failed; a missing source file (an
+    # unconfigured root, its failure_detail saying so) is the target's own
+    # failure.
+    def _completed(label, roots, message = ""):
+        return struct(kind = "target_completed", id = struct(label = label), payload = struct(success = False, failure_detail = struct(message = message)), children = [struct(id = struct(label = r)) for r in roots])
+
+    own = _screen(ctx, ["x"])
+    note_blocked(own, _completed("//p:gen", ["//p:missing.txt"], "missing input file '//p:missing.txt'"))
+    dep = _screen(ctx, ["x"])
+    dep["counts"]["failed_labels"] = {"//p:broken": True}
+    note_blocked(dep, _completed("//p:demo", ["//p:broken"]))
+    _eq("blocked by what failed, not a missing source", (blocked_targets(own), blocked_targets(dep)), ({}, {"//p:demo": ["//p:broken"]}))
+
+    # A build without --keep_going: fastfail failed; a flaky test's
+    # second attempt was cut off and three never ran, all Aborted with no
+    # reason: Bazel's "1 fails locally and 4 were skipped".
+    nokg = new_counts()
+    tid = lambda label: struct(label = "//examples/r29tmp:" + label, configuration = struct(id = "c"))
+    count_event(nokg, "test_result", tid("flaky_then_skip"), struct(status = "failed"))
+    count_event(nokg, "test_result", tid("fastfail"), struct(status = "failed"))
+    count_event(nokg, "test_summary", tid("fastfail"), struct(overall_status = "failed"))
+    for label in ["flaky_then_skip", "sleepy1", "sleepy0", "sleepy2"]:
+        count_aborted_test(nokg, "//examples/r29tmp:" + label, "unknown", "c")
+    _eq("Bazel's count without --keep_going", (nokg["tests_failed"], nokg["tests_skipped"]), (1, 4))
+
+    # A test target that failed to build, or was blocked, gets no summary:
+    # failed, as Bazel counts it ("fails to build"), once.
+    # Under `aspect build` no test runs: none failed.
+    for command, want in [("test", 1), ("build", 0)]:
+        unbuilt = new_counts()
+        count_event(unbuilt, "build_started", struct(), struct(command = command))
+        count_event(unbuilt, "target_configured", tid("needs_bad"), struct(target_kind = "sh_test rule"))
+        count_event(unbuilt, "target_configured", tid("bad"), struct(target_kind = "genrule rule"))
+        count_event(unbuilt, "target_completed", tid("needs_bad"), struct(success = False))
+        count_event(unbuilt, "target_completed", tid("bad"), struct(success = False))
+        count_aborted_test(unbuilt, "//examples/r29tmp:needs_bad", "unknown", "c")
+        _eq("a test that failed to build, under %s" % command, unbuilt["tests_failed"], want)
+
+    # An analysis failure: a0 to a4 fail in analysis for zz_broken, Bazel
+    # posting three before it. Blocked whatever came first.
+    anal = _screen(ctx, ["x"])
+    root = "//examples/r29tmp:zz_broken"
+    configured = lambda label: struct(kind = "target_configured", id = struct(label = label), payload = struct(), payload_kind = "aborted", children = [struct(id = struct(label = root))])
+    for label in ["a0", "a3", "a4", "zz_broken", "a2", "a1"]:
+        note_blocked(anal, configured("//examples/r29tmp:" + label))
+        count_aborted(anal["counts"], "//examples/r29tmp:" + label, "analysis_failure")
+    _eq("blocked by a root posted after them", sorted(blocked_targets(anal)), ["//examples/r29tmp:a%d" % i for i in range(5)])
+
+    # A loading failure: t_nopkg is blocked by a target in a package that is
+    # not there, which it was not asked for and which Bazel reports only as
+    # an Aborted configured_label, once per configuration. That root is a
+    # failure of its own, once, its log Bazel's error; the build shows it
+    # failed. An Aborted payload's type can't be made here: `aborted` says
+    # what a real one's type would.
+    mix = _screen(ctx, ["x"], fs = ctx.std.fs, syntax = None, page_h = 10, env = _NO_ENV, read = lambda p, c: None, ansi = ctx.std.re.compile(ANSI), controls = ctx.std.re.compile(CONTROLS), test_counts = {}, spread = {}, last_attempts = {})
+    root = "//examples/r31_nonexistent:x"
+    error = "no such package 'examples/r31_nonexistent': BUILD file not found in any of the following directories."
+    for config in ("ddf13d99", "6eed62c4"):
+        rid = struct(label = root, configuration = struct(id = config))
+        aborted = struct(reason = "ANALYSIS_FAILURE", description = error)
+        count_event(mix["counts"], "configured_label", rid, aborted, aborted = True)
+        note_event(mix, "configured_label", rid, aborted, True)
+    note_blocked(mix, struct(kind = "target_configured", id = struct(label = "//examples/r30tmp:t_nopkg"), payload = struct(), payload_kind = "aborted", children = [struct(id = struct(label = root))]))
+    count_aborted(mix["counts"], "//examples/r30tmp:t_nopkg", "analysis_failure")
+    _eq("blocked by a dependency that failed analysis, unasked", sorted(blocked_targets(mix)), ["//examples/r30tmp:t_nopkg"])
+    _eq("the root counted once", mix["counts"]["failed_labels"].get(root), True)
+    rows = [(r["label"], r["detail"]) for r in mix["fails"]]
+    _eq("the root's row", rows, [(root, "analysis")])
+    results = _visible(render(mix, 140, 40))
+    _eq("Results says it failed", "1 failed, 1 blocked" in results, True)
+    on_key(mix, "2", 10)
+    on_key(mix, "enter", 10)
+    _eq("Enter shows Bazel's error", "no such package" in _visible(render(mix, 140, 40)), True)
+
+    # A target asked for that fails analysis is its own root cause, Bazel 9
+    # posting an Aborted configured_label for it before its Aborted
+    # target_configured: one failure, not two.
+    solo = _screen(ctx, ["x"], fs = ctx.std.fs, syntax = None, page_h = 10, env = _NO_ENV, read = lambda p, c: None, ansi = ctx.std.re.compile(ANSI), controls = ctx.std.re.compile(CONTROLS), test_counts = {}, spread = {}, last_attempts = {})
+    own = "//p:req_broken"
+    rid = struct(label = own, configuration = struct(id = "6e1e0d0f"))
+    aborted = struct(reason = "ANALYSIS_FAILURE", description = "in broken rule " + own)
+    count_event(solo["counts"], "configured_label", rid, aborted, aborted = True)
+    note_event(solo, "configured_label", rid, aborted, True)
+    note_blocked(solo, struct(kind = "target_configured", id = struct(label = own), payload = struct(), payload_kind = "aborted", children = [struct(id = rid)]))
+    count_event(solo["counts"], "target_configured", struct(label = own), struct(reason = "ANALYSIS_FAILURE"), aborted = True)
+    _eq("a target asked for, its own root, failed once", solo["counts"]["failed"], 1)
+    _eq("Results says it failed once", "0 built, 1 failed" in _visible(render(solo, 140, 40)), True)
+
+    ok = _screen(ctx, ["x"])
+    note_blocked(ok, struct(kind = "target_configured", id = struct(label = "//p:ok"), payload = struct(), children = [struct(id = struct(label = "//p:ok"))]))
+    _eq("a configured target's own completion is no root cause", blocked_targets(ok), {})
+
+    # A build picked with < while the next runs: its own Slowest, not
+    # hidden as if it were running.
+    picked = _screen(ctx, ["x"], building = True, tab = "metrics", spawn_slowest = [(5000, "Genrule", "//a:slow")], inv = {"build_finished": success})
+    end_build(picked, 1000)
+    new_build(picked, 2000)
+    picked["building"] = True
+    on_key(picked, "<", 10)
+    _eq("an earlier build's Slowest while the next runs", "Genrule //a:slow" in _visible(render(picked, 110, 60)), True)
+
+    # Skipped tests in the scrollback's summary and the narrow header.
+    skips = _screen(ctx, ["x"], read = lambda p, n: None, build = None, bes_base = "", bazel_uuid = "", update = {}, log_path = "")
+    skips["counts"]["tests_skipped"] = 3
+    _eq("skipped in the summary", [l for l in report_lines(skips, "s1", False) if "3 skipped" in l] != [], True)
+    _eq("skipped in Results at 64 columns", "3 skipped" in _visible(render(skips, 64, 30)) or "⊘3" in _visible(render(skips, 64, 30)), True)
+
+    # A build folded at its end keeps that its execution log was read.
+    ended = _screen(ctx, ["x"], building = True)
+    end_build(ended, 1000)
+    _eq("a folded build's log read", ended["builds"][-1]["snapshot"]["exec_log_read"], True)
+
+    # Page Up and Option/Alt+↑ scroll, not an Esc and the arrow.
+    paged = _screen(ctx, ["l%d" % i for i in range(200)])
+    on_key(paged, "pageup", 20)
+    on_key(paged, "alt-up", 20)
+    _eq("a page, then half", paged["scroll"], 30)
+
+    # The link under the pointer.
+
+    # A line too long is cut, its rest on disk; long lines keep the
+    # console's text under its budget, the oldest going first.
+    big = _screen(ctx, [])
+    add_lines(big, ["x" * 20000])
+    _eq("a long line cut", (len(big["log"][0]) < 9000, big["log"][0].endswith("characters in the console log)")), (True, True))
+    many = _screen(ctx, [])
+    for _ in range(3):
+        add_lines(many, ["y" * 8000] * 1000)
+    _eq("under its size budget", many["log_size"] <= 16 * 1024 * 1024 and len(many["log"]) < 3000, True)
+    _eq("its size counted", many["log_size"], len("".join(many["log"])))
+
+    # A peek: the file around a line, numbered, the line marked and in the
+    # middle, highlighted by its language; `o` opens it in the editor.
+    tmp = ctx.std.fs.mkdtemp()
+    src = tmp + "/main.rs"
+    ctx.std.fs.write(src, "\n".join(["fn f%d() { let x = %d; }" % (i, i) for i in range(1, 301)]) + "\n")
+    peek = _screen(ctx, [], fs = ctx.std.fs, syntax = ctx.std.syntax, env = struct(var = lambda k: None), page_h = 10)
+    _eq("read", open_peek(peek, src, 100), True)
+    view = peek["view"]
+    _eq("its title, and the line marked", (view["title"], [l for l in view["lines"] if l.startswith("▸")]), ("main.rs:100", ["▸  100  fn f100() { let x = 100; }"]))
+    drawn = render(peek, 100, 24)
+    _eq("in the middle, titled", ("▸  100" in ctx.std.re.compile(ANSI).replace(drawn, ""), "Console ▹ main.rs:100" in _visible(drawn)), (True, True))
+    _eq("highlighted", "\x1b[38;5;" in drawn, True)
+
+    # The keys over a peek: the key list, every row the screen's width, and
+    # the peek as it was once they close.
+    peek_scroll = peek["scroll"]
+    on_key(peek, "?", 10)
+    keyed = [r.rstrip("\r") for r in _visible(render(peek, 100, 24)).split("\n") if r.rstrip("\r")]
+    _eq("the keys, not the file", ("these keys" in "\n".join(keyed) or "… " in keyed[-3], "fn f100" in "\n".join(keyed)), (True, False))
+    _eq("every row the screen's width", [text_width(r) for r in keyed if text_width(r) != 100], [])
+    on_key(peek, "x", 10)
+    _eq("back to the peek where it was", (peek["view"]["title"], peek["scroll"]), ("main.rs:100", peek_scroll))
+    _eq("a file not there is no peek", open_peek(peek, tmp + "/gone.rs", 1), False)
+    raw = tmp + "/raw.log"
+    ctx.std.fs.write(raw, "a\tb\n\x1b[31mred\x1b[0m\nspin 10%\rspin 99%\n")
+    peek["ansi"] = ctx.std.re.compile(ANSI)
+    peek["controls"] = ctx.std.re.compile(CONTROLS)
+    open_peek(peek, raw, 2)
+    _eq("a log's lines made drawable", [l[8:] for l in peek["view"]["lines"]], ["a  b", "red", "spin 99%"])
+    open_peek(peek, src, 100)
+    _eq("the whole file, at the line", (len(peek["view"]["lines"]), peek["view"]["cut"], peek["view"]["line"]), (300, False, 100))
+    opened = []
+    peek["io"] = struct(editor = lambda: ("cursor", "Cursor"), editors = lambda: [("cursor", "Cursor"), ("zed", "Zed")], editor_url = lambda path, line = 1, format = "": "cursor://file%s:%d:1" % (path, line))
+    peek["process"] = _fake_process(["open"], opened)
+    on_key(peek, "o", 10)
+    _eq("o opens it in the editor, at the line", (opened[0][0], peek["note"]), (["open", "cursor://file%s:100:1" % src], "opened in Cursor"))
+    on_key(peek, "O", 10)
+    _eq("O picks the next editor and says how to keep it", (peek["editor_choice"], "file_hyperlink_format = \"zed\"" in peek["note"]), ("zed", True))
+
+    # A tool's own WARNING: line in its output is its line alone; the lines
+    # under an action's ERROR: are errors.
+    kinds = bazel.output.line_kinds(["INFO: From Executing genrule //a:s:", "WARNING: step 0 is slow", "working 1", "ERROR: a/BUILD:1:1: Executing genrule //a:b failed: (Exit 1)", "src/a.cc:3: error: nope", "INFO: Found 1 target..."])["kinds"]
+    _eq("kinds", kinds, ["", "warning", "", "error", "error", ""])
+
+    # A wrapped link lights whole: every row of it.
+    _eq("a row's spans of a link", link_spans("a " + link("u", "bc") + " d " + link("u", "e") + link("v", "f"), "u"), [(2, 4), (7, 8)])
+    lit = _screen(ctx, ["https://x.test/" + "a" * 150 + " end"], line_links = {"https://x.test/" + "a" * 150 + " end": [[0, 165, "https://x.test/" + "a" * 150]]}, hover = None)
+    render(lit, 80, 14)
+    rows = [i for i, r in enumerate(lit["frame"]) if link_spans(r, "https://x.test/" + "a" * 150)]
+    lit["hover"] = (10, rows[-1])
+    drawn = render(lit, 80, 14)
+    _eq("every row of the link lit", drawn.count(theme.fg("link.hover", stream = True)) >= len(rows) and len(rows) >= 2, True)
+
+    # A double click selects the word under it, a path whole, and copies it.
+    ran = []
+    words = _screen(ctx, ["see src/a.cc:12 (here)"], ansi = ctx.std.re.compile(ANSI), env = _fake_env({}), process = _fake_process(["pbcopy"], ran))
+    render(words, 80, 12)
+    at = [i for i, r in enumerate(words["frame"]) if "src/a.cc:12" in r][-1]
+    col = ctx.std.re.compile(ANSI).replace(words["frame"][at], "").find("a.cc")
+    on_key(words, "mouse-press:%d:%d" % (col, at), 10)
+    on_key(words, "mouse-release:%d:%d" % (col, at), 10)
+    on_key(words, "mouse-press:%d:%d" % (col, at), 10)
+    on_key(words, "mouse-release:%d:%d" % (col, at), 10)
+    _eq("the word, copied", (ran[-1][1] if ran else None, words["note"]), (["src/a.cc:12"], "copied 11 characters"))
+    _eq("and shown selected", theme.bg("selection", stream = True) in render(words, 80, 12), True)
+
+    # Esc goes back the way views were opened: a peek to the log it was
+    # opened from, where it was scrolled, then the console.
+    rec = {"kind": "action", "label": "//a:b", "detail": "Genrule", "files": [], "output": "", "success": False}
+    back = _screen(ctx, [], fails = [rec], fs = ctx.std.fs, syntax = ctx.std.syntax, env = struct(var = lambda k: None), read = lambda p, n: None)
+    on_key(back, "]", 10)
+    _eq("] shows a failure's log", back["view"]["record"]["label"], "//a:b")
+    back["scroll"] = 3
+    open_peek(back, src, 10)
+    on_key(back, "esc", 10)
+    _eq("back to the log, as it was scrolled", (back["view"]["record"]["label"], back["scroll"]), ("//a:b", 3))
+    on_key(back, "esc", 10)
+    _eq("then the console", back["view"], None)
+
+    # The tabs: 1 to 5 show each, Esc goes back to the console; the
+    # Invocation tab redacts what may be a secret.
+    tabs = _screen(ctx, ["x"], inv = {"options_parsed": struct(explicit_cmd_line = ["--remote_header=Authorization=Bearer abc", "--action_env=TOKEN=zzz", "--remote_cache=grpcs://u:p@host", "--define=API_TOKEN=d1", "--test_arg=--password=t1", "--copt=-DKEY=c1", "--define=mode=fast", "--test_arg=--password", "--test_arg=hunter2", "--test_arg=--token x9", "--google_default_credentials", "//keep:me", "--test_arg=--token", "--copt=-Ikept", "--test_arg=after", "--bes_header=Cookie=sess1", "//..."], explicit_startup_options = [])})
+    on_key(tabs, "4", 10)
+    shown = _visible(render(tabs, 100, 40))
+    _eq("the invocation tab, its secrets hidden", ("Flags given" in shown, "abc" in shown, "zzz" in shown, "u:p@" in shown, "--action_env=TOKEN=<REDACTED>" in shown), (True, False, False, False, True))
+    _eq("a secret's setting inside a flag's value hidden", [w in shown for w in ("d1", "t1", "c1", "--define=API_TOKEN=<REDACTED>", "--define=mode=fast")], [False, False, False, True, True])
+    _eq("a secret's value in the next argument hidden", [w in shown for w in ("hunter2", "x9", "sess1", "--test_arg=<REDACTED>", "//keep:me", "--copt=-Ikept", "--test_arg=after")], [False, False, False, True, True, True, True])
+    on_key(tabs, "3", 10)
+    _eq("metrics", "Actions" in _visible(render(tabs, 100, 40)), True)
+    for tab in ("metrics", "invocation", "failures"):
+        on_key(tabs, str(1 + ["console", "failures", "metrics", "invocation", "tips"].index(tab)), 10)
+        render(tabs, 100, 40)
+        widths = [text_width(_visible(r)) for r in tabs["frame"]]
+        _eq("every row of %s as wide as the screen" % tab, [_visible(r) for r in tabs["frame"][1:] if r and text_width(_visible(r)) != 100], [])
+    on_key(tabs, "esc", 10)
+    _eq("Esc to the console", tabs["tab"], "console")
+    on_key(tabs, "tab", 10)
+    on_key(tabs, "tab", 10)
+    _eq("Tab cycles every tab", tabs["tab"], "metrics")
+    on_key(tabs, "shift-tab", 10)
+    _eq("Shift+Tab goes back", tabs["tab"], "failures")
+    render(tabs, 100, 40)
+    spans = tabs["tab_spans"]
+    _eq("the tabs stay in order", [t for _, _, t in spans], ["console", "failures", "metrics", "invocation", "tips"])
+    on_key(tabs, "mouse-move:%d:%d" % (spans[3][0] + 1, tabs["tab_row"]), 10)
+    col, row = tabs["hover"]
+    _eq("the pointer over a tab", [t for a, b, t in spans if a <= col and col < b and row == tabs["tab_row"]], ["invocation"])
+    if _role("hover") not in render(tabs, 100, 40):
+        fail("render: the tab under the pointer is lit")
+    on_key(tabs, "mouse-press:%d:%d" % (spans[3][0] + 1, tabs["tab_row"]), 10)
+    on_key(tabs, "mouse-release:%d:%d" % (spans[3][0] + 1, tabs["tab_row"]), 10)
+    _eq("a click takes a tab", tabs["tab"], "invocation")
+
+    # A peek open as a test's summary arrives; a status
+    # value under a secret's name; a pointer moving keeps nothing from
+    # opening; huge lines left plain; a file the system would run.
+    peeked = _screen(ctx, ["x"])
+    peeked["view"] = {"title": "a.py:1", "lines": ["x"], "cut": False, "record": None, "peek": True}
+    note_event(peeked, "test_summary", struct(label = "//t:a", configuration = None), struct(run_count = 1, shard_count = 0), False)
+    refresh_test_view(peeked, struct(kind = "test_summary", id = struct(label = "//t:a", configuration = None), payload = struct(run_count = 1, shard_count = 0)))
+    status = _screen(ctx, ["x"], inv = {"workspace_status": struct(item = [struct(key = "STABLE_API_TOKEN", value = "tok-123")])})
+    _eq("a status value under a secret's name", "tok-123" in "\n".join([_visible(l) for l in invocation_lines(status)]), False)
+    _eq("a minified line is left plain", highlightable(["x" * 5000]), False)
+    _eq("ordinary lines are highlighted", highlightable(["x = 1"] * 100), True)
+    _eq("never a file:// link", open_in_editor(dict(_screen(ctx, ["x"]), io = struct(editor_url = lambda p, line, format: "file://" + p, editors = lambda: [], editor = lambda: ("vscode", "VS Code"))), "/tmp/x.command").startswith("no editor"), True)
+
+    # An empty Failures tab: ↓ and Enter do nothing; `a` there keeps the
+    # tab's keys.
+    empty = _screen(ctx, ["x"])
+    for k in ("tab", "down", "enter"):
+        on_key(empty, k, 10)
+    _eq("an empty list: nothing chosen, nothing open", (empty["tab"], empty["selected"], empty["view"]), ("failures", 0, None))
+
+    # Each tab owns what is opened in it, named by crumbs in the tab bar: a
+    # failure's log in Failures (its attempt where there are several), a
+    # file peeked from it one deeper; a crumb's click goes back to it; ]
+    # steps sideways and drops a peek; } { step a target's attempts.
+    def _attempt(label, attempt):
+        return failure_of("test_result", struct(label = label, run = 1, shard = 1, attempt = attempt, configuration = struct(id = "c")), struct(status = "failed", test_action_output = [struct(name = "test.log", file = "x")]))
+
+    tri = _screen(ctx, ["ERROR: x"], fails = [_attempt("//t:a", 1), _attempt("//t:a", 2), _attempt("//t:b", 1)], fs = ctx.std.fs, syntax = None, page_h = 10, env = _NO_ENV, read = lambda p, c: None, ansi = ctx.std.re.compile(ANSI), controls = ctx.std.re.compile(CONTROLS), test_counts = {}, spread = {}, last_attempts = {("//t:a", "c", 1, 1): 2, ("//t:b", "c", 1, 1): 1})
+    on_key(tri, "]", 10)
+    _eq("] opens the log in Failures, its attempt named", (tri["tab"], crumbs(tri)), ("failures", ["//t:a ▹ attempt 1/2"]))
+    on_key(tri, "}", 10)
+    _eq("} its next attempt", crumbs(tri), ["//t:a ▹ attempt 2/2"])
+    on_key(tri, "{", 10)
+    _eq("{ back", crumbs(tri), ["//t:a ▹ attempt 1/2"])
+    src = ctx.std.fs.mkdtemp() + "/a.py"
+    ctx.std.fs.write(src, "x = 1\n" * 20)
+    open_peek(tri, src, 12)
+    _eq("a peek from the log, one deeper, in the same tab", (tri["tab"], crumbs(tri)), ("failures", ["//t:a ▹ attempt 1/2", "a.py:12"]))
+    tab_bar = _visible(render(tri, 120, 30))
+    if "Failures ✗" not in tab_bar or "▹ //t:a ▹ attempt 1/2 ▹ a.py:12" not in tab_bar:
+        fail("render: the tab bar names the open view:\n" + tab_bar)
+    crumb = [(a, b) for a, b, t in tri["tab_spans"] if t == ("crumb", 1)]
+    _eq("the log's crumb can be clicked", len(crumb), 1)
+    on_key(tri, "mouse-press:%d:%d" % (crumb[0][0], tri["tab_row"]), 10)
+    on_key(tri, "mouse-release:%d:%d" % (crumb[0][0], tri["tab_row"]), 10)
+    _eq("a crumb's click goes back to it", crumbs(tri), ["//t:a ▹ attempt 1/2"])
+    open_peek(tri, src, 3)
+    on_key(tri, "]", 10)
+    _eq("] steps sideways to the next row, the peek gone", crumbs(tri), ["//t:b"])
+    on_key(tri, "[", 10)
+    _eq("[ back to the row's attempt the summary quotes", crumbs(tri), ["//t:a ▹ attempt 2/2"])
+    on_key(tri, "]", 10)
+    narrow = _visible(render(tri, 30, 20)).split("\n")
+    top = [r for r in narrow if "//t:b" in r]
+    _eq("narrow: the deepest crumb kept", len(top) >= 1, True)
+    console_peek = _screen(ctx, ["x"], fs = ctx.std.fs, syntax = None, page_h = 10)
+    open_peek(console_peek, src, 2)
+    _eq("a peek from the console is the console's", (console_peek.get("tab", "console"), crumbs(console_peek)), ("console", ["a.py:2"]))
+    on_key(console_peek, "esc", 10)
+    _eq("Esc: back to the console", (console_peek.get("tab", "console"), console_peek["view"]), ("console", None))
+
+    # g and G in every pane: the Failures list's first and last, Metrics'
+    # top and bottom; zoom kept as the tabs change.
+    gg = _screen(ctx, ["x"], fails = [dict(act, label = "//g:%d" % i) for i in range(5)], zoom = True)
+    on_key(gg, "tab", 10)
+    on_key(gg, "J", 10)
+    _eq("J: the list's last", (gg["tab"], gg["selected"], gg["zoom"]), ("failures", 4, True))
+    on_key(gg, "K", 10)
+    _eq("K: its first", gg["selected"], 0)
+    on_key(gg, "tab", 10)
+    on_key(gg, "J", 10)
+    render(gg, 100, 10)
+    _eq("Metrics: J to the bottom, K to the top, still zoomed", (gg["tab"], gg["tab_scroll"] > 0, gg["zoom"]), ("metrics", True, True))
+    on_key(gg, "K", 10)
+    _eq("K to the top", gg["tab_scroll"], 0)
+
+    # --runs_per_test: each failed run is a failure of its own, named by
+    # its run, and } steps through them.
+    def _run(n):
+        return failure_of("test_result", struct(label = "//t:r", run = n, shard = 1, attempt = 1, configuration = struct(id = "c")), struct(status = "failed", test_action_output = [struct(name = "test.log", file = "x")]))
+
+    runs = _screen(ctx, ["x"], fails = [_run(1), _run(2), _run(3)], fs = ctx.std.fs, syntax = None, page_h = 10, env = _NO_ENV, read = lambda p, c: None, ansi = ctx.std.re.compile(ANSI), controls = ctx.std.re.compile(CONTROLS), test_counts = {("//t:r", "c"): (3, 1)}, spread = {}, last_attempts = {})
+    seen = []
+    for _ in range(4):
+        on_key(runs, "}", 10)
+        seen.append(crumbs(runs)[-1])
+    _eq("} steps each run, round to the first", seen, ["//t:r ▹ run 2/3", "//t:r ▹ run 3/3", "//t:r ▹ run 1/3", "//t:r ▹ run 2/3"])
+
+    # ] [ with the pick on a target without a log (past the logged
+    # records) open that row; } { the last logged one stands in. } with the open log's target
+    # no longer listed (a newer build's failures): the chosen one's.
+    unlogged = _screen(ctx, ["x"], fails = [_attempt("//t:a", 1)], fs = ctx.std.fs, syntax = None, page_h = 10, env = _NO_ENV, read = lambda p, c: None, ansi = ctx.std.re.compile(ANSI), controls = ctx.std.re.compile(CONTROLS), test_counts = {}, spread = {}, last_attempts = {})
+    count_aborted(unlogged["counts"], "//b:b", "analysis_failure")
+    for key in ["]", "[", "}", "{"]:
+        unlogged["view"] = None
+        on_key(unlogged, "2", 10)
+        on_key(unlogged, "J", 10)
+        _eq("%s: the pick past the logged records" % key, unlogged["selected"], 1)
+        on_key(unlogged, key, 10)
+        _eq("%s on a target without a log" % key, crumbs(unlogged), ["//b:b"] if key in ("]", "[") else ["//t:a"])
+
+    # } { step from the record shown, not the one chosen; one shown from a
+    # list it is no longer in opens its target's first record here, unstepped.
+    a1, a2, a3, c1, z1 = _attempt("//t:a", 1), _attempt("//t:a", 2), _attempt("//t:a", 3), _attempt("//t:c", 1), _attempt("//t:z", 1)
+    steps = _screen(ctx, ["x"], fails = [a1, a2, a3, c1], fs = ctx.std.fs, syntax = None, page_h = 10, env = _NO_ENV, read = lambda p, c: None, ansi = ctx.std.re.compile(ANSI), controls = ctx.std.re.compile(CONTROLS), test_counts = {}, spread = {}, last_attempts = {})
+
+    def _open_one():
+        return steps["view"]["record"] if steps["view"] != None else None
+
+    seen = []
+    for key in ["}", "}", "}", "{"]:
+        on_key(steps, key, 10)
+        seen.append(steps["fails"].index(_open_one()))
+    _eq("} { from the one shown", seen, [1, 2, 0, 2])
+    steps["selected"] = 3
+    on_key(steps, "}", 10)
+    _eq("} from the shown one, not the chosen", _open_one(), a1)
+    on_key(steps, "}", 10)
+    on_key(steps, "}", 10)
+    steps["fails"] = [z1, a1, a2]
+    steps["selected"] = 0
+    on_key(steps, "}", 10)
+    _eq("the shown one gone: its target's first here, unstepped", _open_one(), a1)
+    on_key(steps, "}", 10)
+    _eq("then } steps on", _open_one(), a2)
+    steps["fails"] = [z1]
+    on_key(steps, "{", 10)
+    _eq("its target gone too: the chosen one", _open_one(), z1)
+
+    # The CLI's version at the keys row's right end, with room for the keys.
+    versioned = _screen(ctx, ["x"], cli_version = "2026.47.3")
+    bottom = _visible(render(versioned, 100, 20)).split("\n")[-1]
+    _eq("the version at the right end", (bottom.endswith(" aspect 2026.47.3 "), text_width(bottom)), (True, 100))
+    narrow_bottom = _visible(render(versioned, 50, 20)).split("\n")[-1]
+    _eq("too narrow: the keys alone", "2026.47.3" in narrow_bottom, False)
+
+    # Lines drawn in the colour they were written in; a search's matches
+    # laid over it; the CLI's own lines as written, no mark of their own.
+    painted = _screen(ctx, [])
+    add_lines(painted, ["INFO: done here"], None, ["\x1b[1;90mINFO:\x1b[0m done here"])
+    add_lines(painted, ["→ Build"], None, ["\x1b[1mBuild\x1b[0m"], cli = True)
+    drawn = render(painted, 100, 20)
+    _eq("the line's own colour drawn", "\x1b[1;90mINFO:\x1b[0m done here" in drawn, True)
+    _eq("the CLI's line unmarked", "» " in _visible(drawn), False)
+    painted["search"]["pattern"] = ctx.std.re.compile("done")
+    _eq("the line's colour kept, its match found in its text", (painted["colour_of"].get("INFO: done here"), painted["search"]["pattern"].highlight("INFO: done here", "<", ">")), ("\x1b[1;90mINFO:\x1b[0m done here", "INFO: <done> here"))
+    _eq("a match over the colour", _role("search.match") + "done" in render(painted, 100, 20), True)
+
+    # At the top, the oldest line shows from its first row even when a
+    # later line is taller than the pane.
+    tall = _screen(ctx, [], ended = True)
+    add_lines(tall, ["the oldest", "", "second"], None, None, cli = True)
+    add_lines(tall, ["INFO: " + "--flag " * 600] + ["line %d" % i for i in range(90)])
+    on_key(tall, "K", 10)
+    tall_rows = _visible(render(tall, 120, 40)).split("\n")
+    tab_row = [i for i, r in enumerate(tall_rows) if "Console" in r and "Invocation" in r][0]
+    _eq("the oldest line first at the top", tall_rows[tab_row + 1][:14], "│ the oldest  ")
+
+    # Coloured rows as wide as the plain ones: a tab as two spaces, U+FE0F
+    # widening the character before it.
+    for plain, coloured in [("x\tERROR: tab here", "\x1b[31mx\tERROR: tab here\x1b[0m"), ("done ⚠️ " * 20, "\x1b[33m" + "done ⚠️ " * 20 + "\x1b[0m")]:
+        wide = _screen(ctx, [], wrap = False)
+        add_lines(wide, [plain], None, [coloured])
+        rows = [r.rstrip("\r") for r in _visible(render(wide, 80, 24)).split("\n") if r.rstrip("\r")]
+        _eq("a coloured row fits: %r" % plain[:12], [text_width(r) for r in rows if text_width(r) != 80], [])
+        _eq("no raw tab drawn", any(["\t" in r for r in rows]), False)
+
+    # A zero-width mark between a character and its U+FE0F: still as wide
+    # as the plain row.
+    marked = _screen(ctx, [], wrap = False)
+    add_lines(marked, ["á️ b " * 20], None, ["\x1b[33m" + "á️ b " * 20 + "\x1b[0m"])
+    marked_rows = [r.rstrip("\r") for r in _visible(render(marked, 80, 24)).split("\n") if r.rstrip("\r")]
+    _eq("a mark before U+FE0F fits", [text_width(r) for r in marked_rows if text_width(r) != 80], [])
+
+    # What the task wrote before the screen was taken is not replayed.
+    seeded = _screen(ctx, [], seeded = 2)
+    add_lines(seeded, ["banner", "▸ Running build task"], None, None, cli = True)
+    add_lines(seeded, ["INFO: from bazel"])
+    _eq("the replay starts after the seed", replay_lines(seeded, False), ["INFO: from bazel"])
+
+    # Before any build: the header names the task's phase, no progress row
+    # and no build panes, the build tabs muted and saying so.
+    early = _screen(ctx, [], building = False, task = "lint")
+    add_lines(early, ["▸ Running lint task", "", "▸ Setup", "▹ Running setup"], None, None, cli = True)
+    _eq("the phase from the CLI's lines", phase_status(early), ["Setup · Running setup"])
+    _eq("nothing built yet", built(early), False)
+    rows = _visible(render(early, 100, 24)).split("\n")
+    _eq("the header names the phase", "Setup · Running setup" in rows[0], True)
+    _eq("then the tabs, no progress row nor panes", rows[1].startswith("┌─ Console"), True)
+    _eq("no Results pane", "Results" in _visible(render(early, 100, 24)), False)
+    early["tab"] = "metrics"
+    _eq("a build tab says so", "No build yet" in _visible(render(early, 100, 24)), True)
+    early["tab"] = "console"
+    _eq("the build tabs muted", (built(early), _role("muted") + " Failures " in render(early, 100, 24)), (False, True))
+
+    # A build running: its panes in one frame; ended, folded to a row; the
+    # next build's panes under it.
+    many_builds = _screen(ctx, ["one"], building = True, task = "lint")
+    new_build(many_builds, 1000)
+    many_builds["building"] = True
+    many_builds["progress"] = ["[3 / 9] 1 action running", "    a.cc; 1s"]
+    _eq("panes while a build runs", panes_shown(many_builds), True)
+    many_builds["counts"]["failures"] = ["//a:b"]
+    many_builds["counts"]["failed_labels"] = {"//a:b": True}
+    many_builds["now_ms"] = 13000
+    fold_build(many_builds, 13000)
+    many_builds["building"] = False
+    many_builds["progress"] = []
+    _eq("folded: its failures, outcome and time, no progress count", _visible(build_row(many_builds["builds"][0], 100)), " ✗ bazel · ✗1 · ended without a result · 12s")
+    _eq("between builds, folded", panes_shown(many_builds), False)
+    _eq("the console is the task's, kept", many_builds["log"], ["one"])
+    folded_rows = _visible(render(many_builds, 100, 24)).split("\n")
+    _eq("the folded row above the tabs", folded_rows[1].startswith(" ✗ bazel"), True)
+    on_key(many_builds, "p", 10)
+    _eq("p opens the panes", panes_shown(many_builds), True)
+    on_key(many_builds, "p", 10)
+    _eq("p folds them again", panes_shown(many_builds), False)
+    new_build(many_builds, 14000)
+    many_builds["building"] = True
+    _eq("the next build starts with its own counts", many_builds["counts"]["failures"], [])
+    _eq("picked: the running one", picked_build(many_builds), 1)
+    many_builds["tab"] = "metrics"
+    _eq("its crumb", crumbs(many_builds), ["2 of 2"])
+    on_key(many_builds, "<", 10)
+    _eq("< the build before", (picked_build(many_builds), crumbs(many_builds)), (0, ["1 of 2"]))
+    on_key(many_builds, "<", 10)
+    _eq("never before the first", picked_build(many_builds), 0)
+    on_key(many_builds, ">", 10)
+    _eq("> the next", picked_build(many_builds), 1)
+
+    # An older build picked: the links row and the left pane, both click
+    # targets, are its own (its results pages, its slowest), never the
+    # newest's; no running actions of the newest's beside them.
+    picks = _screen(ctx, ["one"], building = True, task = "build")
+    new_build(picks, 1000)
+    picks.update(building = True, pages = [("OLDER", "https://example.test/older-invocation")], slowest = {"Genrule //old:slowest_action": 7}, now_ms = 9000)
+    picks["counts"].update(built = 111, configured = 111)
+    fold_build(picks, 9000)
+    new_build(picks, 10000)
+    picks.update(building = True, pages = [("NEWEST", "https://example.test/newest-invocation")], slowest = {"Genrule //new:slowest_action": 3}, now_ms = 19000)
+    picks["counts"].update(built = 2, configured = 2)
+    fold_build(picks, 19000)
+    picks.update(building = False, ended = True, panes = True, tab = "metrics")
+    newest = "\n".join(_visible(render(picks, 140, 40)).split("\n")[:16])
+    _eq("the newest: its links and slowest", ("newest-invocation" in newest, "//new:slowest_action" in newest, "older-invocation" in newest, "//old:slowest_action" in newest), (True, True, False, False))
+    on_key(picks, "<", 10)
+    older = "\n".join(_visible(render(dict(picks, progress = ["[3 / 9] 1 action running", "    Executing genrule //new:live; 4s"]), 140, 40)).split("\n")[:16])
+    _eq("the older: its links and slowest", ("older-invocation" in older, "//old:slowest_action" in older, "newest-invocation" in older, "//new:" in older, "Slowest" in older), (True, True, False, False, True))
+
+    # A build folded before any frame noted what it blocked, picked again
+    # with <: its Metrics draw, timed by its own run, not the task's.
+    unframed = _screen(ctx, ["x"], building = True, build_start_ms = 1000)
+    unframed.pop("blocked", None)
+    fold_build(unframed, 13000)
+    new_build(unframed, 14000)
+    unframed["building"] = True
+    unframed["now_ms"] = 99000
+    unframed["tab"] = "metrics"
+    on_key(unframed, "<", 10)
+    took = [r for r in _visible(render(unframed, 100, 60)).split("\n") if "elapsed" in r]
+    _eq("a folded build's own time", len(took) == 1 and took[0].split()[2] == "12s", True)
+    unframed["picked_build"] = None
+    took = [r for r in _visible(render(unframed, 100, 60)).split("\n") if "elapsed" in r]
+    _eq("the running build's own time", len(took) == 1 and took[0].split()[2], "1m25s")
+    never = _screen(ctx, ["x"], building = False, ended = True, tab = "metrics", fails = [act])
+    _eq("Metrics with no build at all", "elapsed" in _visible(render(never, 100, 60)), True)
+
+    # Finished: one build's panes stay open for build and test, every other
+    # task's builds stay folded.
+    for kind, want in [("build", True), ("test", True), ("lint", False), ("gazelle", False), ("format", False)]:
+        done = _screen(ctx, [], building = False, task = kind, ended = True)
+        fold_build(done, 0)
+        _eq("%s finished, its panes open" % kind, panes_shown(done), want)
+    nothing = _screen(ctx, [], building = False, task = "format", ended = True)
+    _eq("a task that never built shows no panes", (panes_shown(nothing), built(nothing)), (False, False))
+    _eq("a task's own ▸ Running line is no phase", note_phase(dict(phase_title = "x"), "▸ Running format task"), None)
+
+    # A click's opener: one that fails at once has the link copied instead,
+    # one that exits 0 or is still running (a browser) has opened it.
+    for exit, want in [(1, "couldn't open cursor://file/x, copied it"), (0, "opened cursor://file/x"), (None, "opened cursor://file/x")]:
+        opened_by = []
+        clicked = _screen(ctx, [], process = _fake_process(["open", "pbcopy"], opened_by, exit = exit), env = _fake_env({}))
+        _eq("opener exiting %r" % exit, open_link(clicked, "cursor://file/x", trusted = True), want)
+        _eq("copied only when it failed: %r" % exit, len(opened_by), 2 if exit == 1 else 1)
+
+    # The panes are one height for the whole build, however many actions run.
+    heights = []
+    for n in [0, 1, 3, 12]:
+        sized = _screen(ctx, ["x"], progress = ["[1 / 99] %d actions running" % n] + ["    a%d; %ds" % (i, i) for i in range(n)])
+        rows = _visible(render(sized, 100, 30)).split("\n")
+        heights.append([i for i, r in enumerate(rows) if r.startswith("┌─ Console")][0])
+    _eq("one height across running counts", heights, [heights[0]] * 4)
+    _eq("as tall as the most Results rows", results_capacity(True), 11)
+
+    # The list scrolls in it: unscrolled the rest counted, scrolled a window
+    # and a scrollbar.
+    long = ["a%d" % i for i in range(10)]
+    shown, edge = scrolled_rows(long, 4, 0)
+    _eq("unscrolled, the rest counted", shown, ["a0", "a1", "a2", "… and 7 more"])
+    _eq("a scrollbar when they do not fit", len(edge), 4)
+    _eq("scrolled, a window", scrolled_rows(long, 4, 3)[0], ["a3", "a4", "a5", "a6"])
+    _eq("never past the end", scrolled_rows(long, 4, 99)[0], ["a6", "a7", "a8", "a9"])
+    _eq("all fit: no scrollbar", scrolled_rows(long[:2], 4, 0), (["a0", "a1"], None))
+    wheeled = _screen(ctx, ["x"], progress = ["[1 / 99] 12 actions running"] + ["    a%d; %ds" % (i, i) for i in range(12)])
+    render(wheeled, 100, 30)
+    top, _, width = wheeled["actions_at"]
+    wheeled["hover"] = (3, top + 1)
+    on_key(wheeled, "wheel-down", 10)
+    _eq("the wheel over the list scrolls it, not the console", (wheeled["actions_scroll"] > 0, wheeled["scroll"]), (True, 0))
+
+    # Slowest from the execution log: every spawn that ran, longest first,
+    # to a tenth of a second; a cache hit's fetch is no work and is left out.
+    spawned = _screen(ctx, [])
+    spawn = lambda ms, label, hit = False, runner = "darwin-sandbox": struct(mnemonic = "CppCompile", target_label = label, cache_hit = hit, runner = runner, metrics = struct(execution_wall_time_ms = ms, total_time_ms = ms))
+    note_spawn_time(spawned, spawn(1200, "//a:short"))
+    note_spawn_time(spawned, spawn(98000, "//a:cached", hit = True))
+    note_spawn_time(spawned, spawn(87000, "//a:disk", runner = "disk cache hit"))
+    note_spawn_time(spawned, spawn(12450, "//a:long"))
+    _eq("ran spawns, longest first", slowest_rows(spawned), ["CppCompile //a:long; 12.4s", "CppCompile //a:short; 1.2s"])
+    _eq("titled from the log", slowest_title(spawned), "Slowest")
+    _eq("without it, what Bazel showed", slowest_title(_screen(ctx, [])), "Slowest seen")
+
+    # The Tips tab: its count in the tab, the most urgent first, `s`
+    # silencing on this machine and back, a failed save said on its row.
+    # The fake store sets a silenced tip aside and gives it back once undone,
+    # as the Tips feature does.
+    calls = []
+    store = [
+        {"id": "remote-miss", "severity": "suggestion", "title": "41% missed", "body": "Use a cache."},
+        {"id": "disk-full", "severity": "warning", "title": "98% full", "body": ""},
+    ]
+    aside = {}
+
+    def _silencer(id, on):
+        calls.append((id, on))
+        if on:
+            aside[id] = [t for t in store if t["id"] == id]
+            kept = [t for t in store if t["id"] != id]
+            store.clear()
+            store.extend(kept)
+        else:
+            store.extend(aside.pop(id, []))
+        return None
+
+    tipped = _screen(ctx, ["x"], tips = list(store), silencer = _silencer, tips_from = lambda: list(store))
+    _eq("counted", tips_count(tipped), 2)
+    _eq("in the most urgent's colour", tips_role(tipped), "tip.warning")
+    _eq("the most urgent first", [t["id"] for t, _ in shown_tips(tipped)], ["disk-full", "remote-miss"])
+    tipped["tab"] = "tips"
+    _eq("Tips N in the tab bar", " Tips " in _visible(render(tipped, 100, 30)), True)
+    on_key(tipped, "s", 10)
+    _eq("s silences the chosen one", (calls, tips_count(tipped)), ([("disk-full", True)], 1))
+    _eq("it stays, saying so", "silenced on this machine · s to undo" in "\n".join([_visible(l) for l in tips_lines(tipped, 96)]), True)
+    tipped["tip_selected"] = [i for i, (t, _) in enumerate(shown_tips(tipped)) if t["id"] == "disk-full"][0]
+    on_key(tipped, "s", 10)
+    _eq("s again undoes it", (calls[-1], tips_count(tipped)), (("disk-full", False), 2))
+    _eq("undone, it is shown from the store again", ([t["id"] for t in tipped["tips"]], [t["id"] for t, _ in shown_tips(tipped)]), (["remote-miss", "disk-full"], ["disk-full", "remote-miss"]))
+    tipped["silencer"] = lambda id, on: "read-only file"
+    on_key(tipped, "s", 10)
+    _eq("a failed save says why and changes nothing", ("couldn't save to ~/.aspect/config.json: read-only file" in "\n".join([_visible(l) for l in tips_lines(tipped, 96)]), tips_count(tipped)), (True, 2))
+    _eq("no tips", _visible(tips_lines(_screen(ctx, []), 96)[0]), "No tips")
+
+    # No progress row: the panes sit under the header whether or not Bazel
+    # has counted, and the header says how far it is.
+    def _running_row(progress):
+        rows = [_visible(r) for r in render(_screen(ctx, ["x"], progress = progress), 100, 30).split("\r\n")]
+        return [i for i, r in enumerate(rows) if "Running (" in r]
+
+    analyzing = _running_row(["Analyzing: 3 targets (2 packages loaded)", "    Compiling a.cc; 1s local"])
+    counted = _running_row(["[1 / 14] 1 action running", "    Compiling a.cc; 1s local"])
+    _eq("the panes stay put when the counts come", (len(analyzing), analyzing), (1, counted))
+    _eq("under the bar, right under the header", analyzing, [2])
+
+    # With the bar drawn the count is on it, and the header has Bazel's
+    # status; without it (zoomed), the header has the count.
+    top = lambda progress, **kw: _visible(render(_screen(ctx, ["x"], progress = progress, **kw), 100, 30)).split("\n")[:2]
+    _eq("before it counts, what it is doing", [r.rstrip(" \r").endswith(e) for r, e in zip(top(["Analyzing: 3 targets"]), ["Analyzing: 3 targets", "analyzing"])], [True, True])
+    _eq("then Bazel's status, and the count on the bar", [r.rstrip(" \r").endswith(e) for r, e in zip(top(["[4 / 14] 1 action running"]), ["1 action running", "4 of 14 actions"])], [True, True])
+    _eq("zoomed, the count in the header", top(["[4 / 14] 1 action running"], zoom = True)[0].rstrip(" \r").endswith("4 of 14 actions done"), True)
+
+    # Once a build ends nothing it last counted stays: not in the header,
+    # not in its folded row; only what ✔/✗ cannot say, from BuildFinished.
+    stale = _screen(ctx, ["x"], progress = ["[4 / 14] 1 action running"], task = "lint")
+    fold_build(stale, 0)
+    stale.update(building = False, ended = True, progress = [])
+    shown = _visible(render(stale, 100, 30))
+    _eq("no stale count after the end", ("4 of 14" in shown, "4/14" in shown), (False, False))
+    _eq("no BuildFinished: said", "ended without a result" in shown.split("\n")[0], True)
+    stale["builds"][-1]["snapshot"]["inv"] = {"build_finished": struct(exit_code = struct(name = "INTERRUPTED", code = 8))}
+    _eq("interrupted, from BuildFinished", "interrupted" in _visible(render(stale, 100, 30)).split("\n")[0], True)
+    stale["builds"][-1]["snapshot"]["inv"] = {"build_finished": struct(exit_code = struct(name = "SUCCESS", code = 0))}
+    _eq("a success says nothing more", _visible(render(stale, 100, 30)).split("\n")[0].rstrip(" \r").endswith("0s"), True)
+    ran = _screen(ctx, ["x"], inv = {"build_finished": struct(exit_code = struct(name = "SUCCESS", code = 0)), "build_metrics": struct(action_summary = struct(
+        actions_executed = 1204,
+        runner_count = [struct(name = "total", count = 1204), struct(name = "internal", count = 4), struct(name = "remote cache hit", count = 1000), struct(name = "linux-sandbox", count = 200)],
+        action_cache_statistics = struct(hits = 7000, misses = 1204),
+    ))})
+    fold_build(ran, 0)
+    _eq("a folded build: its actions as the bar says them", "8,204 actions · 8,000 cache hits (98%)" in _visible(build_row(ran["builds"][0], 100)), True)
+    ran.update(building = False, ended = True, progress = [])
+    rows = _visible(render(ran, 140, 30)).split("\n")
+    _eq("on the bar only, not in the finished header", (rows[0].rstrip(" \r").endswith("0s"), rows[1].rstrip(" \r").endswith("8,204 actions · 8,000 cache hits (98%)")), (True, True))
+
+    # The finished screen stays, saying how to leave, its verdict first.
+    finished = _screen(ctx, ["x"], ended = True, verdict = False)
+    row = _visible(keys_row(finished, 120))
+    _eq("how to leave the finished screen", (row.startswith(" Done ✗"), "q, Enter or Esc to leave" in row), (True, True))
+
+    # A build that crashed without a result, or was interrupted, folds as
+    # not ok, saying so; only BuildFinished's SUCCESS folds as ✓.
+    for name, mark, said in [(None, "✗", "ended without a result"), ("INTERRUPTED", "✗", "interrupted"), ("SUCCESS", "✓", "")]:
+        inv = {} if name == None else {"build_finished": struct(exit_code = struct(name = name, code = 0))}
+        crashed = _screen(ctx, ["x"], inv = inv)
+        fold_build(crashed, 0)
+        row = _visible(build_row(crashed["builds"][0], 100))
+        _eq("folded %s" % name, (row.startswith(" " + mark), (said in row) if said else True), (True, True))
+
+    # A header too narrow for the status leaves it out, never cut to a number.
+    narrow = _screen(ctx, ["x"], progress = ["[1,204 / 9,000] 1 action running"])
+    head = _visible(render(narrow, 40, 24)).split("\n")[0]
+    zoomed = _visible(render(dict(narrow, zoom = True), 40, 24)).split("\n")[0]
+    _eq("no cut count", ("actions done" in zoomed) or not any([c.isdigit() for c in zoomed.partition("·")[2].strip(" \r").partition(" ")[2].elems()]), True)
+    _eq("no cut status", head.rstrip(" \r").endswith("1 action running") or not any([c.isdigit() for c in head.partition("·")[2].strip(" \r").partition(" ")[2].elems()]), True)
+
+    # The console's state (following, lines up) at the tab border's right
+    # end, a dash apart from the tabs, muted (never the accent, nor bold),
+    # at every width; cut, then gone, rather than the tabs collapse for it.
+    lines = ["line %d" % i for i in range(200)]
+    for scroll, said in [(0, "following"), (12, "12 lines up")]:
+        for cols in range(24, 161, 7):
+            st = _screen(ctx, lines, scroll = scroll)
+            top = [r for r in render(st, cols, 30).split("\n") if "Console" in _visible(r) and "┌" in _visible(r)][0]
+            plain = _visible(top).rstrip("\r")
+            _eq("the border's width at %d" % cols, text_width(plain), cols)
+            tabs, _, tail = plain.partition(" ─")
+            if said in plain:
+                _eq("%s apart from the tabs at %d" % (said, cols), said in tabs, False)
+                _eq("%s at the right end at %d" % (said, cols), plain.endswith(said + " ─┐") or tail.endswith("… ─┐"), True)
+                _eq("%s muted at %d" % (said, cols), (ANSI_MUTED + " " + said) in top or (ANSI_MUTED + " ") in top, True)
+                if ANSI_HEADING and ANSI_HEADING != ANSI_MUTED:
+                    _eq("%s not in the accent at %d" % (said, cols), ANSI_HEADING + " " in top, False)
+            long = _screen(ctx, lines, scroll = 12, unseen = 999, unseen_errors = 99, dropped = 9999)
+            long_top = _visible([r for r in render(long, cols, 30).split("\n") if "Console" in _visible(r) and "┌" in _visible(r)][0])
+            _eq("the tabs whatever the state's length at %d" % cols, "Failures" in plain, "Failures" in long_top)
+
+    # A tool's line coloured as Bazel colours a message's label, inside an
+    # action's output, stays in the fold: only Bazel's own starts a block.
+    shaped = _screen(ctx, [])
+    lines = ["INFO: From Executing genrule //:g:", "one", "INFO: two", "three", "INFO: Build completed"]
+    colours = ["\x1b[32mINFO: \x1b[0mFrom Executing genrule //:g:", "one", "\x1b[32mINFO:\x1b[0m two", "three", "\x1b[32mINFO: \x1b[0mBuild completed"]
+    add_lines(shaped, lines, colours = colours)
+    _eq("one fold, then Bazel's next line", [l for l in shaped["folded"] if not l.startswith("INFO: From")][-1:], ["INFO: Build completed"])
+    _eq("the tool's lines folded together", len(shaped["folded"]), 3)
+
+    # At every width the shown tab's name is drawn whole: the other tabs go
+    # first, never a cut of it.
+    for cols in range(30, 81):
+        top = [_visible(r) for r in render(_screen(ctx, ["x"]), cols, 30).split("\n") if "┌" in _visible(r) and "onsole" in _visible(r)][0]
+        _eq("the shown tab whole at %d" % cols, " Console " in top, True)
+
+    # A toggle says, for a moment, the state it left and how to undo it;
+    # then the keys row is its own again, and Ctrl+C's warning wins.
+    for key, first, second in [
+        ("w", "long lines cut · w wraps them", "long lines wrapped · w cuts them"),
+        ("z", "console zoomed · z unzooms it", "console unzoomed · z zooms it"),
+        ("p", "build panes folded · p opens them", "build panes open · p folds them"),
+        ("ctrl-o", "lines under each INFO: From shown · ^O folds them", "lines under each INFO: From folded · ^O shows them"),
+        ("e", "errors and warnings only · e errors only", "errors only · e every line"),
+        ("m", "mouse on: the wheel scrolls, a click picks · m gives it to the terminal", "mouse off: the terminal selects text · m takes it back"),
+    ]:
+        toggled = _screen(ctx, ["x"], now_ms = 10000, screen = struct(mouse = lambda on: None), panes = True)
+        for want in (first, second):
+            on_key(toggled, key, 10)
+            row = _visible(keys_row(toggled, 120))
+            _eq("%s says %r" % (key, want), row.strip(), want)
+            _eq("%s's row the frame's width" % key, text_width(row), 120)
+        toggled["now_ms"] += 2000
+        _eq("%s's note gone after a moment" % key, second in _visible(keys_row(toggled, 120)), False)
+
+    # Before any build, p says there are no panes yet.
+    unbuilt = _screen(ctx, ["x"], now_ms = 0, building = False)
+    on_key(unbuilt, "p", 10)
+    _eq("p before any build", _visible(keys_row(unbuilt, 120)).strip(), "no build panes yet: p opens them once a build runs")
+
+    # A later note keeps no earlier note's deadline: w twice, the moment
+    # past, then a copy's note shows.
+    later = _screen(ctx, ["x"], now_ms = 0)
+    on_key(later, "w", 10)
+    on_key(later, "w", 10)
+    later["now_ms"] = 2500
+    say_note(later, "copied 3 characters")
+    _eq("a note after an expired one shows", "copied 3 characters" in _visible(keys_row(later, 120)), True)
+
+    # On the finished screen the frame's time stays, but notes go by the
+    # screen's own clock.
+    ticks = [10000]
+    still = _screen(ctx, ["x"], now_ms = 10000, ended = True, building = False, clock = lambda: ticks[0])
+    on_key(still, "w", 10)
+    ticks[0] += 2500
+    _eq("a note expires on the finished screen", "long lines" in _visible(keys_row(still, 120)), False)
+
+    urgent = _screen(ctx, ["x"], now_ms = 0)
+    on_key(urgent, "w", 10)
+    urgent["cancelling"] = True
+    _eq("Ctrl+C's warning wins over a toggle's note", "Ctrl+C again" in _visible(keys_row(urgent, 120)), True)
+    lists = _screen(ctx, ["x"], now_ms = 0, outputs = [{"kind": "action", "label": "//o:o", "detail": "Genrule", "files": [("stdout", "x")], "output": "", "success": True}], fails = [act])
+    on_key(lists, "a", 10)
+    _eq("a says which list", _visible(keys_row(lists, 120)).strip(), "actions that wrote output listed · a lists the failures")
+
+    # Keys as data: an entry either takes keys and does something, or only
+    # documents keys another layer reads; the overlay shows only what
+    # applies, grouped; no key is shown twice.
+    for k in KEYS:
+        _eq("bound or documented: %s" % (k.help,), (len(k.keys) > 0) == (k.do != None), True)
+    calm = _screen(ctx, ["x"])
+    failed = _screen(ctx, ["x"], fails = [act])
+    _eq("no Failures keys without failures", "Failures" in help_rows(calm), False)
+    _eq("Failures keys with them", "Failures" in help_rows(failed), True)
+    shown = [k.help[0] for k in KEYS if k.help != None and k.shown(failed)]
+    _eq("no key row twice", len(shown), len({r: 1 for r in shown}))
+
+    # A row cut in its middle is never wider than asked, a wide character
+    # (CJK, emoji) the cut would split left out, at every width.
+    for text in ["编译" * 40 + " //pkg:目标; 3s", "🚀 " * 40 + "Compiling a.cc; 3s"]:
+        for width in range(8, 201):
+            cut = action_row(text, width)
+            if text_width(cut) > width:
+                fail("action_row(%r, %d) is %d cells" % (text[:6], width, text_width(cut)))
+    _goldens(ctx, view_state, act, ctx.args.update)
+    _held_line_reads(ctx)
+    _interrupted_mark(ctx)
+    _narrow_failure_rows(ctx)
+    _frame_order(ctx)
+    _hold_burst(ctx)
+    print("dashboard_test.axl: OK")
+    return 0
+
+dashboard_tests = task(
+    summary = "Run the dashboard's tests.",
+    kind = "test-dashboard",
+    group = ["dev"],
+    implementation = _impl,
+    args = {
+        "update": args.boolean(default = False),
+    },
+)

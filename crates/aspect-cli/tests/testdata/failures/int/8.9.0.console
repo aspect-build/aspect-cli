@@ -1,0 +1,25 @@
+[32mComputing main repo mapping:[0m 
+[1A[K[32mLoading:[0m 
+[1A[K[32mLoading:[0m 0 packages loaded
+[1A[K[32mAnalyzing:[0m 2 targets (0 packages loaded, 0 targets configured)
+[1A[K[32mAnalyzing:[0m 2 targets (0 packages loaded, 0 targets configured)
+[32m[0 / 1][0m checking cached actions
+[1A[K[1A[K[32mINFO: [0mAnalyzed 2 targets (0 packages loaded, 0 targets configured).
+[32m[0 / 1][0m checking cached actions
+[1A[K[32m[2 / 3][0m Executing genrule //int:slow; 0s local
+
+Bazel caught interrupt signal; cancelling pending invocation.
+
+[1A[KUse --verbose_failures to see the command lines of failed build steps.
+[32m[3 / 3][0m no actions running
+[1A[K[31m[1mERROR: [0mbuild interrupted
+[32m[3 / 3][0m no actions running
+[1A[K[32mINFO: [0mElapsed time: 1.247s, Critical Path: 1.13s
+[32m[3 / 3][0m no actions running
+[1A[K[32mINFO: [0m3 processes: 2 internal, 1 darwin-sandbox.
+[32m[3 / 3][0m no actions running
+[1A[K[31m[1mERROR: [0mBuild did NOT complete successfully
+[31m[1mFAILED:[0m 
+[1A[K[31m[1mFAILED:[0m 
+[1A[K[32mINFO: [0mBuild Event Protocol files produced successfully.
+[0m

@@ -1,0 +1,37 @@
+"""The theme a suite that compares drawn glyphs runs in, whatever its
+caller's colour settings (`rerun_in_default_theme`).
+
+The process's theme is resolved once, at its start: under the `mono` theme
+(`NO_COLOR`, `ASPECT_THEME=mono`, or a user's `theme` in
+`~/.aspect/config.json` or `~/.aspect/config.axl`) the failure summary
+draws `✗` and `│` as `x` and `|`, which the suites' expectations do not.
+Such a suite runs itself again in a child that has none of those: a scratch
+HOME, so no user config is read, `NO_COLOR` empty and the default theme
+named."""
+
+load("@std//theme.axl", "theme")
+
+# Set in the child, so a theme that stays `mono` fails rather than reruns.
+_PINNED = "ASPECT_TEST_THEME_PINNED"
+
+def rerun_in_default_theme(ctx, args: list) -> int | None:
+    """None where this process draws in a theme other than `mono`, for the
+    suite to go on; else the exit code of the CLI run again with `args` (the
+    suite's own command line) in a child of the default theme: its HOME a
+    scratch folder (no user `config.json` or `config.axl`), removed after,
+    `ASPECT_THEME=aspect` and `NO_COLOR` empty (which is not set), its
+    output passed on."""
+    if theme.info()["name"] != "mono":
+        return None
+    if ctx.std.env.var(_PINNED):
+        fail("the theme is still mono with a scratch HOME, ASPECT_THEME=aspect and NO_COLOR empty")
+    home = ctx.std.fs.mkdtemp(prefix = "aspect-test-theme-")
+    cmd = ctx.std.process.command(ctx.std.env.current_exe()).args(args).env("HOME", home)
+    cmd = cmd.env("ASPECT_THEME", "aspect").env("NO_COLOR", "").env(_PINNED, "1")
+    code = cmd.spawn().wait().code
+    ctx.std.fs.remove_dir_all(home)
+    return code
+
+test_theme = namespace(
+    rerun_in_default_theme = rerun_in_default_theme,
+)
