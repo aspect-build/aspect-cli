@@ -383,10 +383,11 @@ def _top(state: dict, cols: int, rows: int) -> list:
     """The rows above the console: the header (`_header`), then, unless
     zoomed (`z`) or showing the keys (`?`), the builds that ended folded to
     a row each, and while the panes are open, the bar of the build's
-    actions (`bar_row`), the links, and the running actions, oldest first
-    and coloured by age, beside the Results pane. The bar and the Results
-    pane are the build `<`/`>` picked (`build_view`), the newest unless one
-    was."""
+    actions (`bar_row`), its results pages' links, and the running
+    actions, oldest first and coloured by age (once it has ended, its
+    slowest), beside the Results pane. All of them are the build `<`/`>`
+    picked (`build_view`), the newest unless one was; an older one has no
+    running actions, only its slowest."""
     out = [""]
     if state.get("zoom") or state.get("help"):
         out[0] = _header(state, cols, False)
@@ -421,17 +422,20 @@ def _top(state: dict, cols: int, rows: int) -> list:
         out.append(_bar_row(view, cols))
         out[0] = _header(state, cols, True)
 
-    if state["pages"] and (rows >= _SHORT_ROWS or limit >= 6):
+    pages = view.get("pages") or []
+    if pages and (rows >= _SHORT_ROWS or limit >= 6):
         limit -= 1
-        out.append(links_row(state["pages"], cols))
+        out.append(links_row(pages, cols))
 
-    # Running actions | targets and tests.
-    actions = sorted(_running_actions(state["progress"]), key = lambda r: -_action_seconds(r))
-    running, started = _action_counts(state["progress"])
+    # Running actions | targets and tests: Bazel's live ones the newest
+    # build's alone; an older one picked, its own slowest.
+    older = bool(view.get("older"))
+    actions = [] if older else sorted(_running_actions(state["progress"]), key = lambda r: -_action_seconds(r))
+    running, started = (0, 0) if older else _action_counts(state["progress"])
     running = max(len(actions), running)
-    finished = state["ended"] and not actions and (state.get("slowest") or state.get("critical"))
+    finished = (older or state["ended"]) and not actions and bool(view.get("slowest") or view.get("critical"))
     if finished:
-        actions = _slowest_rows(state)
+        actions = _slowest_rows(view)
     right_w = _results_width(cols)
     left_w = cols - right_w
     c = view["counts"]
@@ -525,8 +529,8 @@ def _top(state: dict, cols: int, rows: int) -> list:
     # Started but not yet running (queued for a remote executor or a full
     # local pool) are counted beside the running ones, as Bazel's line has.
     head = "Running (%d of %d started)" % (running, started) if started > running else "Running (%d)" % running
-    if finished:
-        head = _slowest_title(state)
+    if finished or older:
+        head = _slowest_title(view)
     out.append(_box_top(head, left_w) + _box_top(results, right_w))
 
     # Where the failures' count is drawn, for a click to show their tab;

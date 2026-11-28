@@ -2516,6 +2516,25 @@ def _impl(ctx: TaskContext) -> int:
     on_key(many_builds, ">", 10)
     _eq("> the next", picked_build(many_builds), 1)
 
+    # An older build picked: the links row and the left pane, both click
+    # targets, are its own (its results pages, its slowest), never the
+    # newest's; no running actions of the newest's beside them.
+    picks = _screen(ctx, ["one"], building = True, task = "build")
+    new_build(picks, 1000)
+    picks.update(building = True, pages = [("OLDER", "https://example.test/older-invocation")], slowest = {"Genrule //old:slowest_action": 7}, now_ms = 9000)
+    picks["counts"].update(built = 111, configured = 111)
+    fold_build(picks, 9000)
+    new_build(picks, 10000)
+    picks.update(building = True, pages = [("NEWEST", "https://example.test/newest-invocation")], slowest = {"Genrule //new:slowest_action": 3}, now_ms = 19000)
+    picks["counts"].update(built = 2, configured = 2)
+    fold_build(picks, 19000)
+    picks.update(building = False, ended = True, panes = True, tab = "metrics")
+    newest = "\n".join(_visible(render(picks, 140, 40)).split("\n")[:16])
+    _eq("the newest: its links and slowest", ("newest-invocation" in newest, "//new:slowest_action" in newest, "older-invocation" in newest, "//old:slowest_action" in newest), (True, True, False, False))
+    on_key(picks, "<", 10)
+    older = "\n".join(_visible(render(dict(picks, progress = ["[3 / 9] 1 action running", "    Executing genrule //new:live; 4s"]), 140, 40)).split("\n")[:16])
+    _eq("the older: its links and slowest", ("older-invocation" in older, "//old:slowest_action" in older, "newest-invocation" in older, "//new:" in older, "Slowest" in older), (True, True, False, False, True))
+
     # A build folded before any frame noted what it blocked, picked again
     # with <: its Metrics draw, timed by its own run, not the task's.
     unframed = _screen(ctx, ["x"], building = True, build_start_ms = 1000)
